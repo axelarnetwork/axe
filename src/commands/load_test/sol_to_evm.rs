@@ -1,12 +1,12 @@
 use std::fs::File;
 use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eyre::eyre;
 use futures::future::join_all;
-use solana_client::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
+use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use tokio::sync::Mutex;
 
@@ -14,6 +14,7 @@ use alloy::primitives::keccak256;
 use alloy::sol_types::SolValue;
 use rand::Rng;
 
+use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::LoadTestArgs;
 use crate::solana;
@@ -37,13 +38,60 @@ fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
 /// Contention testing mode.
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum ContentionMode {
-    /// Send transactions sequentially with delay
+    /// Round-robin across derived keypairs with delay between each tx
     #[default]
     None,
-    /// All transactions from a single keypair
+    /// All transactions from a single keypair (nonce contention stress test)
     SingleAccount,
-    /// Fire all transactions in parallel without delay
+    /// Fire one tx per keypair simultaneously each wave, then delay
     Parallel,
+}
+
+/// Prepare the signing keypairs for the load test.
+///
+/// When `num_keys >= 2`, derives N keypairs from the main one, funds any that
+/// are below the minimum balance, and returns the list. Shows progress bar
+/// during funding.
+///
+/// When `num_keys <= 1`, returns the main keypair as the only signer.
+fn prepare_keypairs(
+    args: &LoadTestArgs,
+    main_keypair: &Keypair,
+) -> eyre::Result<Vec<Arc<dyn Signer + Send + Sync>>> {
+    if args.num_keys <= 1 {
+        return Ok(vec![
+            Arc::new(Keypair::new_from_array(main_keypair.to_bytes()[..32].try_into().unwrap()))
+                as Arc<dyn Signer + Send + Sync>,
+        ]);
+    }
+
+    ui::section("Derived Keys");
+    ui::info(&format!("deriving {} keypairs from main wallet...", args.num_keys));
+
+    let derived = keypairs::derive_keypairs(main_keypair, args.num_keys)?;
+
+    // Show derived addresses
+    for (i, kp) in derived.iter().enumerate() {
+        ui::info(&format!("  key {}: {}", i, kp.pubkey()));
+    }
+
+    // Fund any that need it
+    let balances = keypairs::ensure_funded(&args.solana_rpc, main_keypair, &derived)?;
+
+    println!();
+    #[allow(clippy::float_arithmetic)]
+    let total_sol: f64 = balances.iter().sum::<u64>() as f64 / 1e9;
+    ui::success(&format!(
+        "proceeding with {} funded keys ({:.4} SOL total across keys)",
+        derived.len(),
+        total_sol,
+    ));
+    println!();
+
+    Ok(derived
+        .into_iter()
+        .map(|kp| Arc::new(kp) as Arc<dyn Signer + Send + Sync>)
+        .collect())
 }
 
 /// Run load test and return metrics report.
@@ -54,6 +102,7 @@ pub async fn run_load_test_with_metrics(
 ) -> eyre::Result<LoadTestReport> {
     ui::kv("duration", &format!("{}s", args.time));
     ui::kv("delay", &format!("{}ms", args.delay));
+    ui::kv("num keys", &args.num_keys.to_string());
     ui::kv("contention mode", &format!("{:?}", args.contention_mode));
 
     let tx_output = args.output_dir.join("transactions.txt");
@@ -65,22 +114,29 @@ pub async fn run_load_test_with_metrics(
         File::create(&tx_output).map_err(|e| eyre!("failed to create output file: {e}"))?,
     ));
 
-    let keypair = Arc::new(solana::load_keypair(args.keypair.as_deref())?)
-        as Arc<dyn Signer + Send + Sync>;
+    let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
 
-    // Check balance before starting
+    // Check main wallet balance
     let rpc_client =
-        RpcClient::new_with_commitment(&args.solana_rpc, CommitmentConfig::confirmed());
-    let pubkey = keypair.pubkey();
+        solana_client::rpc_client::RpcClient::new_with_commitment(
+            &args.solana_rpc,
+            solana_commitment_config::CommitmentConfig::confirmed(),
+        );
+    let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
     #[allow(clippy::float_arithmetic)]
-    let sol = balance as f64 / 1_000_000_000.0;
+    let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
         return Err(eyre!(
             "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
         ));
     }
+
+    // Derive and fund keypairs
+    let keypairs = prepare_keypairs(args, &main_keypair)?;
+    let keypairs = Arc::new(keypairs);
+    let key_count = keypairs.len();
 
     let payload: Option<Vec<u8>> = match &args.payload {
         Some(hex_str) => Some(hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?),
@@ -97,63 +153,110 @@ pub async fn run_load_test_with_metrics(
     let start_time = Instant::now();
     let solana_rpc = args.solana_rpc.clone();
 
+    // Atomic counter for round-robin key rotation
+    let key_index = Arc::new(AtomicUsize::new(0));
+
     println!();
 
     match args.contention_mode {
-        ContentionMode::Parallel => loop {
-            if start_time.elapsed() >= duration {
-                break;
-            }
-            let kp = Arc::clone(&keypair);
-            let dest_chain = args.destination_chain.clone();
-            let dest_addr = destination_address.to_string();
-            let tx_payload = make_payload(&payload);
-            let output_clone = Arc::clone(&output_file);
-            let metrics_clone = Arc::clone(&metrics_list);
-            let rpc = solana_rpc.clone();
+        ContentionMode::Parallel => {
+            // Fire one tx per keypair simultaneously each wave
+            loop {
+                if start_time.elapsed() >= duration {
+                    break;
+                }
+                // Spawn one task per key
+                for i in 0..key_count {
+                    if start_time.elapsed() >= duration {
+                        break;
+                    }
+                    let kp = Arc::clone(&keypairs[i]);
+                    let dest_chain = args.destination_chain.clone();
+                    let dest_addr = destination_address.to_string();
+                    let tx_payload = make_payload(&payload);
+                    let output_clone = Arc::clone(&output_file);
+                    let metrics_clone = Arc::clone(&metrics_list);
+                    let rpc = solana_rpc.clone();
 
-            let handle = tokio::spawn(async move {
-                execute_and_record(
-                    &rpc,
-                    kp,
-                    &dest_chain,
-                    &dest_addr,
-                    &tx_payload,
-                    output_clone,
-                    metrics_clone,
-                )
-                .await;
-            });
-            pending_tasks.push(handle);
-            tokio::time::sleep(delay_duration).await;
-        },
-        ContentionMode::SingleAccount | ContentionMode::None => loop {
-            if start_time.elapsed() >= duration {
-                break;
+                    let handle = tokio::spawn(async move {
+                        execute_and_record(
+                            &rpc,
+                            kp,
+                            &dest_chain,
+                            &dest_addr,
+                            &tx_payload,
+                            output_clone,
+                            metrics_clone,
+                        )
+                        .await;
+                    });
+                    pending_tasks.push(handle);
+                }
+                tokio::time::sleep(delay_duration).await;
             }
-            let kp = Arc::clone(&keypair);
-            let dest_chain = args.destination_chain.clone();
-            let dest_addr = destination_address.to_string();
-            let tx_payload = make_payload(&payload);
-            let output_clone = Arc::clone(&output_file);
-            let metrics_clone = Arc::clone(&metrics_list);
-            let rpc = solana_rpc.clone();
+        }
+        ContentionMode::SingleAccount => {
+            // All transactions from a single keypair (contention test)
+            let kp = Arc::clone(&keypairs[0]);
+            loop {
+                if start_time.elapsed() >= duration {
+                    break;
+                }
+                let kp = Arc::clone(&kp);
+                let dest_chain = args.destination_chain.clone();
+                let dest_addr = destination_address.to_string();
+                let tx_payload = make_payload(&payload);
+                let output_clone = Arc::clone(&output_file);
+                let metrics_clone = Arc::clone(&metrics_list);
+                let rpc = solana_rpc.clone();
 
-            let handle = tokio::spawn(async move {
-                execute_and_record(
-                    &rpc,
-                    kp,
-                    &dest_chain,
-                    &dest_addr,
-                    &tx_payload,
-                    output_clone,
-                    metrics_clone,
-                )
-                .await;
-            });
-            pending_tasks.push(handle);
-            tokio::time::sleep(delay_duration).await;
-        },
+                let handle = tokio::spawn(async move {
+                    execute_and_record(
+                        &rpc,
+                        kp,
+                        &dest_chain,
+                        &dest_addr,
+                        &tx_payload,
+                        output_clone,
+                        metrics_clone,
+                    )
+                    .await;
+                });
+                pending_tasks.push(handle);
+                tokio::time::sleep(delay_duration).await;
+            }
+        }
+        ContentionMode::None => {
+            // Round-robin across keypairs with delay
+            loop {
+                if start_time.elapsed() >= duration {
+                    break;
+                }
+                let idx = key_index.fetch_add(1, Ordering::Relaxed) % key_count;
+                let kp = Arc::clone(&keypairs[idx]);
+                let dest_chain = args.destination_chain.clone();
+                let dest_addr = destination_address.to_string();
+                let tx_payload = make_payload(&payload);
+                let output_clone = Arc::clone(&output_file);
+                let metrics_clone = Arc::clone(&metrics_list);
+                let rpc = solana_rpc.clone();
+
+                let handle = tokio::spawn(async move {
+                    execute_and_record(
+                        &rpc,
+                        kp,
+                        &dest_chain,
+                        &dest_addr,
+                        &tx_payload,
+                        output_clone,
+                        metrics_clone,
+                    )
+                    .await;
+                });
+                pending_tasks.push(handle);
+                tokio::time::sleep(delay_duration).await;
+            }
+        }
     }
 
     let total_submitted = pending_tasks.len() as u64;
@@ -182,6 +285,7 @@ pub async fn run_load_test_with_metrics(
         destination_address: destination_address.to_string(),
         duration_secs: args.time,
         delay_ms: args.delay,
+        num_keys: key_count,
         contention_mode: format!("{:?}", args.contention_mode),
         total_submitted,
         total_confirmed,

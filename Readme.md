@@ -71,7 +71,9 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-Everything is auto-detected from the config: test type, source/destination chains, and RPCs. Defaults to 1 tx/sec for 10 seconds.
+Everything is auto-detected from the config: test type, source/destination chains, and RPCs.
+
+Defaults: 10 derived keypairs, 1 tx/sec, 10 seconds. Keypairs are deterministically derived from the main wallet and auto-funded before the test starts.
 
 Verifies each message through 4 Amplifier checkpoints: Voted → Routed → Approved → Executed.
 
@@ -81,6 +83,16 @@ Verifies each message through 4 Amplifier checkpoints: Voted → Routed → Appr
 | `evm-to-sol` | EVM → Solana | coming soon |
 | `evm-to-evm` | EVM → EVM | coming soon |
 
+### Multi-key parallelism
+
+By default, 10 keypairs are derived from the main wallet. Transactions are distributed round-robin across keys to avoid nonce contention. Keys are auto-funded from the main wallet if their balance is below 0.01 SOL.
+
+| Mode | `--contention-mode` | Behavior |
+| --- | --- | --- |
+| Round-robin (default) | `none` | Cycles through keys with `--delay` between each tx |
+| Single account | `single-account` | All txs from one key (nonce contention stress test) |
+| Parallel | `parallel` | Fires one tx per key simultaneously each wave, then waits `--delay` |
+
 Override anything:
 
 ```bash
@@ -88,7 +100,7 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
   --destination-chain avalanche-fuji \
   --source-chain solana-18 \
-  --time 30 --delay 500
+  --num-keys 20 --time 30 --delay 500
 ```
 
 Run `axe test load-test --help` for all options.

@@ -1,3 +1,4 @@
+pub mod keypairs;
 pub mod metrics;
 pub mod sol_to_evm;
 mod verify;
@@ -50,6 +51,7 @@ pub struct LoadTestArgs {
     pub time: u64,
     pub delay: u64,
     pub keypair: Option<String>,
+    pub num_keys: usize,
     pub contention_mode: ContentionMode,
     pub payload: Option<String>,
     pub output_dir: PathBuf,

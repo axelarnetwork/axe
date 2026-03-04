@@ -103,6 +103,10 @@ pub enum TestCommands {
         #[arg(long, env = "SOLANA_PRIVATE_KEY")]
         keypair: Option<String>,
 
+        /// Number of derived keypairs for parallel submission (1 = use main key only)
+        #[arg(long, default_value = "10")]
+        num_keys: usize,
+
         /// Contention testing mode
         #[arg(long, value_enum, default_value = "none")]
         contention_mode: ContentionMode,

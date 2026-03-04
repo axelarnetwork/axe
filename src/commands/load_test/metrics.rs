@@ -55,6 +55,7 @@ pub struct LoadTestReport {
     pub destination_address: String,
     pub duration_secs: u64,
     pub delay_ms: u64,
+    pub num_keys: usize,
     pub contention_mode: String,
 
     pub total_submitted: u64,
