@@ -1,3 +1,4 @@
+pub mod evm_to_sol;
 pub mod keypairs;
 pub mod metrics;
 pub mod sol_to_evm;
@@ -30,12 +31,15 @@ use self::metrics::LoadTestReport;
 pub enum TestType {
     /// Solana -> EVM cross-chain load test
     SolToEvm,
+    /// EVM -> Solana cross-chain load test
+    EvmToSol,
 }
 
 impl std::fmt::Display for TestType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TestType::SolToEvm => write!(f, "sol-to-evm"),
+            TestType::EvmToSol => write!(f, "evm-to-sol"),
         }
     }
 }
@@ -111,8 +115,10 @@ fn find_chains_by_type(
 fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
     match (source_type, dest_type) {
         ("svm", "evm") => Ok(TestType::SolToEvm),
+        ("evm", "svm") => Ok(TestType::EvmToSol),
         _ => Err(eyre::eyre!(
-            "unsupported chain type combination: {source_type} -> {dest_type}. Supported: svm -> evm (sol-to-evm)"
+            "unsupported chain type combination: {source_type} -> {dest_type}. \
+             Supported: svm -> evm, evm -> svm"
         )),
     }
 }
@@ -187,6 +193,14 @@ pub fn resolve_from_config(
                 eyre::eyre!("no RPC URL for source chain '{source_chain}' in config")
             })?
             .to_string(),
+        TestType::EvmToSol => chains
+            .get(&destination_chain)
+            .and_then(|v| v.get("rpc"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                eyre::eyre!("no RPC URL for destination chain '{destination_chain}' in config")
+            })?
+            .to_string(),
     };
 
     Ok(ResolvedConfig {
@@ -240,6 +254,40 @@ fn auto_detect_chains(
             };
             Ok((source, dest))
         }
+        TestType::EvmToSol => {
+            let source = match source_override {
+                Some(s) => s,
+                None => {
+                    let evm = find_chains_by_type(chains, "evm", true);
+                    match evm.len() {
+                        0 => return Err(eyre::eyre!("no EVM chain found in config")),
+                        1 => {
+                            ui::info(&format!("auto-detected source: {}", evm[0]));
+                            evm[0].clone()
+                        }
+                        _ => return Err(eyre::eyre!(
+                            "multiple EVM chains found: {}. Use --source-chain to pick one.",
+                            evm.join(", ")
+                        )),
+                    }
+                }
+            };
+            let dest = match dest_override {
+                Some(d) => d,
+                None => {
+                    let svm = find_chains_by_type(chains, "svm", false);
+                    if svm.is_empty() {
+                        return Err(eyre::eyre!("no SVM (Solana) chain found in config"));
+                    }
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        svm[0]
+                    ));
+                    svm[0].clone()
+                }
+            };
+            Ok((source, dest))
+        }
     }
 }
 
@@ -266,6 +314,21 @@ fn auto_detect_all(
             ui::info("inferred test type: sol-to-evm");
             return Ok((TestType::SolToEvm, src.clone(), dst));
         }
+        if src_type == "evm" {
+            let svm = find_chains_by_type(chains, "svm", false);
+            if svm.is_empty() {
+                return Err(eyre::eyre!("no SVM chain found in config to pair with EVM source"));
+            }
+            let dst = dest_override.unwrap_or_else(|| {
+                ui::info(&format!(
+                    "auto-detected destination: {} (use --destination-chain to override)",
+                    svm[0]
+                ));
+                svm[0].clone()
+            });
+            ui::info("inferred test type: evm-to-sol");
+            return Ok((TestType::EvmToSol, src.clone(), dst));
+        }
         return Err(eyre::eyre!(
             "cannot infer test type from source chain type '{src_type}'. Use --test-type to specify."
         ));
@@ -282,6 +345,15 @@ fn auto_detect_all(
             ui::info(&format!("auto-detected source: {}", svm[0]));
             ui::info("inferred test type: sol-to-evm");
             return Ok((TestType::SolToEvm, svm[0].clone(), dst.clone()));
+        }
+        if dst_type == "svm" {
+            let evm = find_chains_by_type(chains, "evm", true);
+            if evm.is_empty() {
+                return Err(eyre::eyre!("no EVM chain found in config to pair with SVM destination"));
+            }
+            ui::info(&format!("auto-detected source: {}", evm[0]));
+            ui::info("inferred test type: evm-to-sol");
+            return Ok((TestType::EvmToSol, evm[0].clone(), dst.clone()));
         }
         return Err(eyre::eyre!(
             "cannot infer test type from destination chain type '{dst_type}'. Use --test-type to specify."
@@ -304,10 +376,19 @@ fn auto_detect_all(
 
 pub async fn run(args: LoadTestArgs) -> Result<()> {
     let run_start = Instant::now();
+
+    ui::section(&format!("Load Test: {} -> {}", args.source_chain, args.destination_chain));
+    std::fs::create_dir_all(&args.output_dir)?;
+
+    match args.test_type {
+        TestType::SolToEvm => run_sol_to_evm(args, run_start).await,
+        TestType::EvmToSol => run_evm_to_sol(args, run_start).await,
+    }
+}
+
+async fn run_sol_to_evm(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     let dest = &args.destination_chain;
     let src = &args.source_chain;
-
-    ui::section(&format!("Load Test: {src} -> {dest}"));
 
     // --- Read chain info from chains config JSON ---
     let config_content = std::fs::read_to_string(&args.config)
@@ -357,9 +438,6 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
             (new_addr, write_provider)
         } else {
             ui::info(&format!("SenderReceiver: reusing {addr}"));
-            // We still need a signing provider for verification phase (isMessageApproved calls)
-            // but those are read-only calls. Build a wallet provider if key is available,
-            // otherwise use a dummy signer — the calls are view-only.
             let private_key = args.private_key.as_deref().unwrap_or(
                 "0x0000000000000000000000000000000000000000000000000000000000000001",
             );
@@ -388,18 +466,13 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
     let destination_address = format!("{sender_receiver_addr}");
 
-    std::fs::create_dir_all(&args.output_dir)?;
-
     // --- Phase 1: Send transactions ---
     println!("\n{}", "=".repeat(60));
     println!("PHASE 1: LOAD TEST");
     println!("{}\n", "=".repeat(60));
 
-    let mut report = match args.test_type {
-        TestType::SolToEvm => {
-            sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?
-        }
-    };
+    let mut report =
+        sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?;
 
     // --- Phase 2: On-chain verification ---
     println!("\n{}", "=".repeat(60));
@@ -418,16 +491,94 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    // --- Phase 3: Final report ---
+    finish_report(&args, &report, run_start)
+}
+
+async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    // --- Read SOURCE EVM chain info ---
+    let config_content = std::fs::read_to_string(&args.config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
+    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+
+    let evm_rpc_url = config_root
+        .pointer(&format!("/chains/{src}/rpc"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("no rpc URL for source chain '{src}' in config"))?;
+
+    ui::kv("source chain", src);
+    ui::kv("destination chain", dest);
+    ui::kv("EVM RPC (source)", evm_rpc_url);
+    ui::kv("Solana RPC (dest)", &args.solana_rpc);
+
+    let gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
+    ui::address("EVM gateway (source)", &format!("{gateway_addr}"));
+
+    // --- Set up EVM signer (no SenderReceiver needed, calls gateway directly) ---
+    let private_key = args.private_key.as_ref().ok_or_else(|| {
+        eyre::eyre!(
+            "EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key"
+        )
+    })?;
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let signer_address = signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(evm_rpc_url.parse()?);
+
+    // Destination on Solana: memo program
+    let destination_address = evm_to_sol::MEMO_PROGRAM_ADDRESS;
+    ui::kv("destination program", destination_address);
+
+    // --- Phase 1: Send EVM transactions ---
+    println!("\n{}", "=".repeat(60));
+    println!("PHASE 1: LOAD TEST");
+    println!("{}\n", "=".repeat(60));
+
+    let mut report = evm_to_sol::run_load_test_with_metrics(
+        &args,
+        gateway_addr,
+        signer_address,
+        destination_address,
+        &provider,
+    )
+    .await?;
+
+    // --- Phase 2: On-chain verification ---
+    println!("\n{}", "=".repeat(60));
+    println!("PHASE 2: ON-CHAIN VERIFICATION");
+    println!("{}\n", "=".repeat(60));
+
+    let verification = verify::verify_onchain_solana(
+        &args.config,
+        &args.source_chain,
+        &args.destination_chain,
+        destination_address,
+        &args.solana_rpc,
+        &mut report.transactions,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &report, run_start)
+}
+
+fn finish_report(
+    args: &LoadTestArgs,
+    report: &LoadTestReport,
+    run_start: Instant,
+) -> Result<()> {
     println!("\n{}", "=".repeat(60));
     println!("PHASE 3: FINAL REPORT");
     println!("{}\n", "=".repeat(60));
 
     let report_output = args.output_dir.join("report.json");
-    let report_json = serde_json::to_string_pretty(&report)?;
+    let report_json = serde_json::to_string_pretty(report)?;
     std::fs::write(&report_output, &report_json)?;
 
-    print_final_report(&report);
+    print_final_report(report);
     ui::kv("full report saved to", &report_output.display().to_string());
     ui::success(&format!(
         "load test complete ({})",

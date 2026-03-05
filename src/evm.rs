@@ -52,6 +52,11 @@ sol! {
 
     #[sol(rpc)]
     contract AxelarAmplifierGateway {
+        function callContract(
+            string calldata destinationChain,
+            string calldata destinationContractAddress,
+            bytes calldata payload
+        ) external;
         function isContractCallApproved(
             bytes32 commandId,
             string calldata sourceChain,

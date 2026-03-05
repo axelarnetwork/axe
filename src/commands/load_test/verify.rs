@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, FixedBytes};
+use alloy::primitives::{keccak256, Address, FixedBytes};
 use alloy::providers::Provider;
 use eyre::Result;
 use serde_json::json;
+use solana_sdk::pubkey::Pubkey;
 
 use super::metrics::{AmplifierTiming, FailureCategory, TxMetrics, VerificationReport};
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
@@ -643,5 +644,387 @@ fn avg_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
         None
     } else {
         Some(vals.iter().sum::<f64>() / vals.len() as f64)
+    }
+}
+
+// ===========================================================================
+// EVM -> Solana verification
+// ===========================================================================
+
+/// Verify EVM->Solana transactions through the Amplifier pipeline:
+///
+/// 1. **Voted** — VotingVerifier verification (source EVM chain)
+/// 2. **Routed** — Cosmos Gateway outgoing_messages (dest Solana chain)
+/// 3. **Approved** — Solana IncomingMessage PDA exists
+/// 4. **Executed** — Solana IncomingMessage PDA status = executed
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_solana(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    solana_rpc: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    let total = confirmed.len();
+    if total == 0 {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    ui::kv("transactions to verify", &total.to_string());
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    ui::kv("cosmos LCD", &lcd);
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    if let Some(ref vv) = voting_verifier {
+        ui::address(&format!("voting verifier ({source_chain})"), vv);
+    }
+    ui::address(
+        &format!("cosmos gateway ({destination_chain})"),
+        &cosm_gateway,
+    );
+    ui::kv("solana RPC", solana_rpc);
+
+    // For EVM->Sol, message_id is stored directly in TxMetrics.signature
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let message_id = tx.signature.clone();
+
+            PendingTx {
+                idx,
+                message_id,
+                sig_short: truncate_sig(&tx.signature),
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+            }
+        })
+        .collect();
+
+    // Precompute command_ids for Solana PDA lookups
+    let command_ids: Vec<[u8; 32]> = confirmed
+        .iter()
+        .map(|&idx| {
+            let message_id = &metrics[idx].signature;
+            let input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
+            keccak256(&input).into()
+        })
+        .collect();
+
+    // Step 1/4: Voted (reused)
+    if let Some(ref vv) = voting_verifier {
+        batch_poll_voted(
+            &mut txs,
+            &lcd,
+            vv,
+            source_chain,
+            destination_chain,
+            destination_address,
+        )
+        .await;
+    } else {
+        ui::info("VotingVerifier not in config, skipping voted step");
+    }
+
+    // Step 2/4: Routed (reused)
+    batch_poll_routed(&mut txs, &lcd, &cosm_gateway, source_chain).await;
+
+    // Step 3/4: Approved on Solana
+    batch_poll_solana_approved(&mut txs, &command_ids, solana_rpc, destination_chain).await;
+
+    // Step 4/4: Executed on Solana
+    batch_poll_solana_executed(&mut txs, &command_ids, solana_rpc).await;
+
+    // Compute stats (same as verify_onchain)
+    let mut successful = 0u64;
+    let mut failed = 0u64;
+    let mut failure_reasons: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+
+    for tx in &txs {
+        metrics[tx.idx].amplifier_timing = Some(tx.timing.clone());
+        if tx.failed {
+            failed += 1;
+            if let Some(ref reason) = tx.fail_reason {
+                *failure_reasons.entry(reason.clone()).or_insert(0) += 1;
+            }
+        } else if tx.timing.executed_ok == Some(true) {
+            successful += 1;
+        }
+    }
+
+    let total_verified = successful + failed;
+    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+    let success_rate = if total_verified > 0 {
+        successful as f64 / total_verified as f64
+    } else {
+        0.0
+    };
+
+    let failure_categories: Vec<FailureCategory> = failure_reasons
+        .into_iter()
+        .map(|(reason, count)| FailureCategory { reason, count })
+        .collect();
+
+    let all_timings: Vec<&AmplifierTiming> = txs.iter().map(|t| &t.timing).collect();
+    let avg_voted = avg_option(all_timings.iter().filter_map(|t| t.voted_secs));
+    let avg_routed = avg_option(all_timings.iter().filter_map(|t| t.routed_secs));
+    let avg_approved = avg_option(all_timings.iter().filter_map(|t| t.approved_secs));
+    let avg_executed = avg_option(all_timings.iter().filter_map(|t| t.executed_secs));
+
+    println!();
+    ui::kv("successful", &successful.to_string());
+    ui::kv("failed", &failed.to_string());
+    ui::kv(
+        "success rate",
+        &format!("{:.1}%", success_rate * 100.0),
+    );
+    if let Some(v) = avg_voted {
+        ui::kv("avg voted", &format!("{v:.1}s"));
+    }
+    if let Some(v) = avg_routed {
+        ui::kv("avg routed", &format!("{v:.1}s"));
+    }
+    if let Some(v) = avg_approved {
+        ui::kv("avg approved", &format!("{v:.1}s"));
+    }
+    if let Some(v) = avg_executed {
+        ui::kv("avg executed", &format!("{v:.1}s"));
+    }
+
+    Ok(VerificationReport {
+        total_verified,
+        successful,
+        pending: 0,
+        failed,
+        success_rate,
+        failure_reasons: failure_categories,
+        avg_voted_secs: avg_voted,
+        avg_routed_secs: avg_routed,
+        avg_approved_secs: avg_approved,
+        avg_executed_secs: avg_executed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 (Solana): Approved — IncomingMessage PDA exists
+// ---------------------------------------------------------------------------
+
+async fn batch_poll_solana_approved(
+    txs: &mut [PendingTx],
+    command_ids: &[[u8; 32]],
+    solana_rpc: &str,
+    destination_chain: &str,
+) {
+    let pending: Vec<usize> = (0..txs.len()).filter(|&i| !txs[i].failed).collect();
+    let pending_count = pending.len();
+    if pending_count == 0 {
+        return;
+    }
+
+    let spinner = ui::wait_spinner(&format!(
+        "waiting to be approved on {destination_chain} (0/{pending_count} done)..."
+    ));
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let mut done_count = 0usize;
+
+    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+        solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
+
+    loop {
+        for &i in &pending {
+            if txs[i].timing.approved_secs.is_some() || txs[i].failed {
+                continue;
+            }
+            match check_solana_incoming_message(&rpc_client, &command_ids[i]) {
+                Ok(Some(_status)) => {
+                    // PDA exists = message approved (or already executed)
+                    txs[i].timing.approved_secs =
+                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                    done_count += 1;
+                    spinner.set_message(format!(
+                        "waiting to be approved on {destination_chain} ({done_count}/{pending_count} done)..."
+                    ));
+                }
+                Ok(None) => {} // PDA doesn't exist yet
+                Err(e) => {
+                    spinner.set_message(format!("Solana PDA query error: {e}"));
+                }
+            }
+        }
+
+        if done_count >= pending_count || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    spinner.finish_and_clear();
+
+    println!();
+    for &i in &pending {
+        if let Some(secs) = txs[i].timing.approved_secs {
+            println!(
+                "    {}  T + {secs:>6.1}s  \u{2714} approved",
+                txs[i].sig_short
+            );
+        } else {
+            let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+            println!(
+                "    {}  T + {elapsed:>6.1}s  \u{2718} approved (timed out)",
+                txs[i].sig_short
+            );
+            txs[i].failed = true;
+            txs[i].fail_reason = Some("Solana approval: timed out".into());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 4 (Solana): Executed — IncomingMessage PDA status = 1
+// ---------------------------------------------------------------------------
+
+async fn batch_poll_solana_executed(
+    txs: &mut [PendingTx],
+    command_ids: &[[u8; 32]],
+    solana_rpc: &str,
+) {
+    let pending: Vec<usize> = (0..txs.len())
+        .filter(|&i| !txs[i].failed && txs[i].timing.executed_ok.is_none())
+        .collect();
+    let pending_count = pending.len();
+    if pending_count == 0 {
+        return;
+    }
+
+    let spinner = ui::wait_spinner(&format!(
+        "waiting to be executed (0/{pending_count} done)..."
+    ));
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    let mut done_count = 0usize;
+
+    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+        solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
+
+    loop {
+        for &i in &pending {
+            if txs[i].timing.executed_secs.is_some() || txs[i].failed {
+                continue;
+            }
+            match check_solana_incoming_message(&rpc_client, &command_ids[i]) {
+                Ok(Some(status)) if status != 0 => {
+                    // status != 0 means executed (MessageStatus::is_executed)
+                    txs[i].timing.executed_secs =
+                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                    txs[i].timing.executed_ok = Some(true);
+                    done_count += 1;
+                    spinner.set_message(format!(
+                        "waiting to be executed ({done_count}/{pending_count} done)..."
+                    ));
+                }
+                Ok(Some(_)) => {} // status=0, still approved not executed
+                Ok(None) => {}    // PDA doesn't exist (shouldn't happen after approval)
+                Err(e) => {
+                    spinner.set_message(format!("Solana PDA query error: {e}"));
+                }
+            }
+        }
+
+        if done_count >= pending_count || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    spinner.finish_and_clear();
+
+    println!();
+    for &i in &pending {
+        if let Some(secs) = txs[i].timing.executed_secs {
+            println!(
+                "    {}  T + {secs:>6.1}s  \u{2714} executed",
+                txs[i].sig_short
+            );
+        } else {
+            let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+            println!(
+                "    {}  T + {elapsed:>6.1}s  \u{2718} executed (timed out)",
+                txs[i].sig_short
+            );
+            txs[i].failed = true;
+            txs[i].timing.executed_ok = Some(false);
+            txs[i].fail_reason = Some("Solana execution: timed out".into());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Solana IncomingMessage PDA check
+// ---------------------------------------------------------------------------
+
+/// Incoming message account data offset for the status byte.
+/// Layout: 8 (discriminator) + 1 (bump) + 1 (signing_pda_bump) + 3 (pad) = 13
+const INCOMING_MESSAGE_STATUS_OFFSET: usize = 13;
+
+/// Check the Solana IncomingMessage PDA for a given command_id.
+/// Returns `Some(status_byte)` if the account exists, `None` otherwise.
+/// Status: 0 = approved, non-zero = executed.
+fn check_solana_incoming_message(
+    rpc_client: &solana_client::rpc_client::RpcClient,
+    command_id: &[u8; 32],
+) -> Result<Option<u8>> {
+    let (pda, _bump) = Pubkey::find_program_address(
+        &[b"incoming message", command_id],
+        &solana_axelar_gateway::id(),
+    );
+
+    match rpc_client.get_account_data(&pda) {
+        Ok(data) => {
+            if data.len() <= INCOMING_MESSAGE_STATUS_OFFSET {
+                return Err(eyre::eyre!(
+                    "IncomingMessage account too small: {} bytes",
+                    data.len()
+                ));
+            }
+            Ok(Some(data[INCOMING_MESSAGE_STATUS_OFFSET]))
+        }
+        Err(e) => {
+            let err_str = e.to_string();
+            if err_str.contains("AccountNotFound")
+                || err_str.contains("could not find account")
+            {
+                Ok(None)
+            } else {
+                Err(eyre::eyre!("Solana RPC error: {e}"))
+            }
+        }
     }
 }
