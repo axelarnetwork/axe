@@ -1,6 +1,5 @@
 use std::fs::File;
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,9 +13,9 @@ use alloy::primitives::keccak256;
 use alloy::sol_types::SolValue;
 use rand::Rng;
 
+use super::LoadTestArgs;
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::LoadTestArgs;
 use crate::solana;
 use crate::ui;
 
@@ -35,17 +34,6 @@ fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-/// Contention testing mode.
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
-pub enum ContentionMode {
-    /// Round-robin across derived keypairs with delay between each tx
-    #[default]
-    None,
-    /// All transactions from a single keypair (nonce contention stress test)
-    SingleAccount,
-    /// Fire one tx per keypair simultaneously each wave, then delay
-    Parallel,
-}
 
 /// Minimum delay (ms) between individual Solana transactions to avoid RPC rate limiting.
 const MIN_TX_DELAY_MS: u64 = 200;
@@ -63,14 +51,16 @@ fn prepare_keypairs(
     main_keypair: &Keypair,
 ) -> eyre::Result<Vec<Arc<dyn Signer + Send + Sync>>> {
     if num_keys <= 1 {
-        return Ok(vec![
-            Arc::new(Keypair::new_from_array(main_keypair.to_bytes()[..32].try_into().unwrap()))
-                as Arc<dyn Signer + Send + Sync>,
-        ]);
+        return Ok(vec![Arc::new(Keypair::new_from_array(
+            main_keypair.to_bytes()[..32].try_into().unwrap(),
+        )) as Arc<dyn Signer + Send + Sync>]);
     }
 
     ui::section("Derived Keys");
-    ui::info(&format!("deriving {} keypairs from main wallet...", num_keys));
+    ui::info(&format!(
+        "deriving {} keypairs from main wallet...",
+        num_keys
+    ));
 
     let derived = keypairs::derive_keypairs(main_keypair, num_keys)?;
 
@@ -120,24 +110,12 @@ pub async fn run_load_test_with_metrics(
         clamped
     };
 
-    // Auto-scale num_keys so each tx uses a unique key (avoids nonce contention)
-    #[allow(clippy::integer_division)]
-    let expected_txs = (args.time * 1000) / effective_delay;
-    let effective_num_keys = match args.contention_mode {
-        ContentionMode::None => args.num_keys.max(expected_txs as usize),
-        _ => args.num_keys,
-    };
-    if effective_num_keys != args.num_keys {
-        ui::info(&format!(
-            "auto-scaled num_keys from {} to {} (1 key per expected tx)",
-            args.num_keys, effective_num_keys
-        ));
-    }
+    let effective_num_keys = args.num_keys;
 
     ui::kv("duration", &format!("{}s", args.time));
     ui::kv("delay", &format!("{}ms", effective_delay));
     ui::kv("num keys", &effective_num_keys.to_string());
-    ui::kv("contention mode", &format!("{:?}", args.contention_mode));
+    ui::kv("contention mode", "Parallel");
 
     let tx_output = args.output_dir.join("transactions.txt");
     if let Some(parent) = tx_output.parent() {
@@ -151,11 +129,10 @@ pub async fn run_load_test_with_metrics(
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
 
     // Check main wallet balance
-    let rpc_client =
-        solana_client::rpc_client::RpcClient::new_with_commitment(
-            &args.solana_rpc,
-            solana_commitment_config::CommitmentConfig::confirmed(),
-        );
+    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+        &args.solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
     #[allow(clippy::float_arithmetic)]
@@ -192,114 +169,44 @@ pub async fn run_load_test_with_metrics(
     let start_time = Instant::now();
     let solana_rpc = args.solana_rpc.clone();
 
-    // Atomic counter for round-robin key rotation
-    let key_index = Arc::new(AtomicUsize::new(0));
-
     println!();
 
-    match args.contention_mode {
-        ContentionMode::Parallel => {
-            // Fire one tx per keypair each wave, staggered to avoid rate limiting
-            loop {
-                if start_time.elapsed() >= duration {
-                    break;
-                }
-                // Spawn one task per key with stagger between each
-                for i in 0..key_count {
-                    if start_time.elapsed() >= duration {
-                        break;
-                    }
-                    let kp = Arc::clone(&keypairs[i]);
-                    let dest_chain = args.destination_chain.clone();
-                    let dest_addr = destination_address.to_string();
-                    let tx_payload = make_payload(&payload);
-                    let output_clone = Arc::clone(&output_file);
-                    let metrics_clone = Arc::clone(&metrics_list);
-                    let rpc = solana_rpc.clone();
+    // Fire one tx per keypair each wave, staggered to avoid rate limiting
+    loop {
+        if start_time.elapsed() >= duration {
+            break;
+        }
+        for i in 0..key_count {
+            if start_time.elapsed() >= duration {
+                break;
+            }
+            let kp = Arc::clone(&keypairs[i]);
+            let dest_chain = args.destination_chain.clone();
+            let dest_addr = destination_address.to_string();
+            let tx_payload = make_payload(&payload);
+            let output_clone = Arc::clone(&output_file);
+            let metrics_clone = Arc::clone(&metrics_list);
+            let rpc = solana_rpc.clone();
 
-                    let handle = tokio::spawn(async move {
-                        execute_and_record(
-                            &rpc,
-                            kp,
-                            &dest_chain,
-                            &dest_addr,
-                            &tx_payload,
-                            output_clone,
-                            metrics_clone,
-                        )
-                        .await;
-                    });
-                    pending_tasks.push(handle);
-                    // Stagger between txs within a wave to avoid RPC rate limiting
-                    if i + 1 < key_count {
-                        tokio::time::sleep(min_tx_stagger).await;
-                    }
-                }
-                tokio::time::sleep(delay_duration).await;
+            let handle = tokio::spawn(async move {
+                execute_and_record(
+                    &rpc,
+                    kp,
+                    &dest_chain,
+                    &dest_addr,
+                    &tx_payload,
+                    output_clone,
+                    metrics_clone,
+                )
+                .await;
+            });
+            pending_tasks.push(handle);
+            // Stagger between txs within a wave to avoid RPC rate limiting
+            if i + 1 < key_count {
+                tokio::time::sleep(min_tx_stagger).await;
             }
         }
-        ContentionMode::SingleAccount => {
-            // All transactions from a single keypair (contention test)
-            let kp = Arc::clone(&keypairs[0]);
-            loop {
-                if start_time.elapsed() >= duration {
-                    break;
-                }
-                let kp = Arc::clone(&kp);
-                let dest_chain = args.destination_chain.clone();
-                let dest_addr = destination_address.to_string();
-                let tx_payload = make_payload(&payload);
-                let output_clone = Arc::clone(&output_file);
-                let metrics_clone = Arc::clone(&metrics_list);
-                let rpc = solana_rpc.clone();
-
-                let handle = tokio::spawn(async move {
-                    execute_and_record(
-                        &rpc,
-                        kp,
-                        &dest_chain,
-                        &dest_addr,
-                        &tx_payload,
-                        output_clone,
-                        metrics_clone,
-                    )
-                    .await;
-                });
-                pending_tasks.push(handle);
-                tokio::time::sleep(delay_duration).await;
-            }
-        }
-        ContentionMode::None => {
-            // Round-robin across keypairs with delay
-            loop {
-                if start_time.elapsed() >= duration {
-                    break;
-                }
-                let idx = key_index.fetch_add(1, Ordering::Relaxed) % key_count;
-                let kp = Arc::clone(&keypairs[idx]);
-                let dest_chain = args.destination_chain.clone();
-                let dest_addr = destination_address.to_string();
-                let tx_payload = make_payload(&payload);
-                let output_clone = Arc::clone(&output_file);
-                let metrics_clone = Arc::clone(&metrics_list);
-                let rpc = solana_rpc.clone();
-
-                let handle = tokio::spawn(async move {
-                    execute_and_record(
-                        &rpc,
-                        kp,
-                        &dest_chain,
-                        &dest_addr,
-                        &tx_payload,
-                        output_clone,
-                        metrics_clone,
-                    )
-                    .await;
-                });
-                pending_tasks.push(handle);
-                tokio::time::sleep(delay_duration).await;
-            }
-        }
+        tokio::time::sleep(delay_duration).await;
     }
 
     let total_submitted = pending_tasks.len() as u64;
@@ -329,7 +236,7 @@ pub async fn run_load_test_with_metrics(
         duration_secs: args.time,
         delay_ms: effective_delay,
         num_keys: key_count,
-        contention_mode: format!("{:?}", args.contention_mode),
+        contention_mode: "Parallel".to_string(),
         total_submitted,
         total_confirmed,
         total_failed,
@@ -375,7 +282,10 @@ pub async fn run_load_test_with_metrics(
     ui::kv("total submitted", &report.total_submitted.to_string());
     ui::kv("total confirmed", &report.total_confirmed.to_string());
     ui::kv("total failed", &report.total_failed.to_string());
-    ui::kv("test duration", &format!("{:.2}s", report.test_duration_secs));
+    ui::kv(
+        "test duration",
+        &format!("{:.2}s", report.test_duration_secs),
+    );
     ui::kv("TPS (submitted)", &format!("{:.2}", report.tps_submitted));
     ui::kv("TPS (confirmed)", &format!("{:.2}", report.tps_confirmed));
     ui::kv(
@@ -389,10 +299,7 @@ pub async fn run_load_test_with_metrics(
         ui::kv("avg compute units", &format!("{avg:.0}"));
     }
     ui::kv("metrics saved to", &metrics_output.display().to_string());
-    ui::kv(
-        "transactions saved to",
-        &tx_output.display().to_string(),
-    );
+    ui::kv("transactions saved to", &tx_output.display().to_string());
 
     Ok(report)
 }

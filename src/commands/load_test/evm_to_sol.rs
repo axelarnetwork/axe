@@ -173,7 +173,7 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         duration_secs: args.time,
         delay_ms: args.delay,
         num_keys: 1,
-        contention_mode: "single-key".to_string(),
+        contention_mode: "SingleAccount".to_string(),
         total_submitted,
         total_confirmed,
         total_failed,

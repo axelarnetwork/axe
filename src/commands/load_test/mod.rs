@@ -4,7 +4,6 @@ pub mod metrics;
 pub mod sol_to_evm;
 mod verify;
 
-pub use sol_to_evm::ContentionMode;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -56,7 +55,6 @@ pub struct LoadTestArgs {
     pub delay: u64,
     pub keypair: Option<String>,
     pub num_keys: usize,
-    pub contention_mode: ContentionMode,
     pub payload: Option<String>,
     pub output_dir: PathBuf,
     /// Whether --source-rpc was provided (skips rate-limit guard)

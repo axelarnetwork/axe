@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-use crate::commands::load_test::sol_to_evm::ContentionMode;
 use crate::commands::load_test::TestType;
 
 #[derive(Parser)]
@@ -113,10 +112,6 @@ pub enum TestCommands {
         /// Number of derived keypairs for parallel submission (1 = use main key only)
         #[arg(long, default_value = "10")]
         num_keys: usize,
-
-        /// Contention testing mode
-        #[arg(long, value_enum, default_value = "none")]
-        contention_mode: ContentionMode,
 
         /// Override source chain RPC URL (default: from config)
         #[arg(long)]
