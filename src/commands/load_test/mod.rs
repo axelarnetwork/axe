@@ -54,7 +54,6 @@ pub struct LoadTestArgs {
     pub time: u64,
     pub delay: u64,
     pub keypair: Option<String>,
-    pub num_keys: usize,
     pub payload: Option<String>,
     pub output_dir: PathBuf,
     /// Whether --source-rpc was provided (skips rate-limit guard)

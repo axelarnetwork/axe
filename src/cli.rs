@@ -109,10 +109,6 @@ pub enum TestCommands {
         #[arg(long, env = "SOLANA_PRIVATE_KEY")]
         keypair: Option<String>,
 
-        /// Number of derived keypairs for parallel submission (1 = use main key only)
-        #[arg(long, default_value = "10")]
-        num_keys: usize,
-
         /// Override source chain RPC URL (default: from config)
         #[arg(long)]
         source_rpc: Option<String>,

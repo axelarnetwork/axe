@@ -110,11 +110,13 @@ pub async fn run_load_test_with_metrics(
         clamped
     };
 
-    let effective_num_keys = args.num_keys;
+    // Derive num_keys from expected tx count (1 key per tx to avoid nonce contention)
+    #[allow(clippy::integer_division)]
+    let num_keys = ((args.time * 1000) / effective_delay).max(1) as usize;
 
     ui::kv("duration", &format!("{}s", args.time));
     ui::kv("delay", &format!("{}ms", effective_delay));
-    ui::kv("num keys", &effective_num_keys.to_string());
+    ui::kv("num keys", &num_keys.to_string());
     ui::kv("contention mode", "Parallel");
 
     let tx_output = args.output_dir.join("transactions.txt");
@@ -145,7 +147,7 @@ pub async fn run_load_test_with_metrics(
     }
 
     // Derive and fund keypairs
-    let keypairs = prepare_keypairs(&args.solana_rpc, effective_num_keys, &main_keypair)?;
+    let keypairs = prepare_keypairs(&args.solana_rpc, num_keys, &main_keypair)?;
     let keypairs = Arc::new(keypairs);
     let key_count = keypairs.len();
 
