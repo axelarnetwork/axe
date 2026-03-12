@@ -112,10 +112,6 @@ pub enum TestCommands {
         /// Hex-encoded payload to send (default: random test message)
         #[arg(long)]
         payload: Option<String>,
-
-        /// Output directory for all results
-        #[arg(long, default_value = "output")]
-        output_dir: PathBuf,
     },
 }
 

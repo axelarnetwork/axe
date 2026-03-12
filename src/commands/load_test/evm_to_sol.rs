@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,15 +88,6 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         .map_err(|e| eyre!("invalid memo program address: {e}"))?;
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
-    let tx_output = args.output_dir.join("transactions.txt");
-    if let Some(parent) = tx_output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let output_file = Arc::new(Mutex::new(
-        File::create(&tx_output).map_err(|e| eyre!("failed to create output file: {e}"))?,
-    ));
-
     let payload: Option<Vec<u8>> = match &args.payload {
         Some(hex_str) => Some(hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?),
         None => None,
@@ -121,7 +110,6 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
     // Send N txs sequentially with a small stagger to avoid rate limiting
     for i in 0..num_txs {
         let tx_payload = make_executable_payload(&payload, &counter_pda);
-        let output_clone = Arc::clone(&output_file);
         let metrics_clone = Arc::clone(&metrics_list);
         let dest_chain = dest_chain.clone();
         let dest_addr = dest_addr.clone();
@@ -140,7 +128,6 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
                 &dest_chain,
                 &dest_addr,
                 &tx_payload,
-                output_clone,
                 metrics_clone,
                 counter,
                 sp,
@@ -208,13 +195,6 @@ pub async fn run_load_test_with_metrics<P: Provider + Clone + 'static>(
         transactions: metrics,
     };
 
-    let metrics_output = args.output_dir.join("metrics.json");
-    let metrics_json = serde_json::to_string_pretty(&report)?;
-    std::fs::write(&metrics_output, metrics_json)?;
-
-    ui::kv("metrics saved to", &metrics_output.display().to_string());
-    ui::kv("transactions saved to", &tx_output.display().to_string());
-
     Ok(report)
 }
 
@@ -227,7 +207,6 @@ async fn execute_and_record_evm<P: Provider>(
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
-    output_file: Arc<Mutex<File>>,
     metrics_list: Arc<Mutex<Vec<TxMetrics>>>,
     confirmed_counter: Arc<AtomicU64>,
     spinner: ProgressBar,
@@ -289,11 +268,6 @@ async fn execute_and_record_evm<P: Provider>(
                         send_instant: Some(submit_start),
                         amplifier_timing: None,
                     };
-
-                    {
-                        let mut file = output_file.lock().await;
-                        let _ = writeln!(file, "{message_id}");
-                    }
 
                     let done = confirmed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     spinner.set_message(format!("sending ({done}/{total} confirmed)..."));

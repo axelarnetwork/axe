@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -80,15 +78,6 @@ pub async fn run_load_test_with_metrics(
 ) -> eyre::Result<LoadTestReport> {
     let num_txs = args.num_txs.max(1) as usize;
 
-    let tx_output = args.output_dir.join("transactions.txt");
-    if let Some(parent) = tx_output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let output_file = Arc::new(Mutex::new(
-        File::create(&tx_output).map_err(|e| eyre!("failed to create output file: {e}"))?,
-    ));
-
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
 
     // Check main wallet balance
@@ -132,7 +121,6 @@ pub async fn run_load_test_with_metrics(
         let dest_chain = args.destination_chain.clone();
         let dest_addr = destination_address.to_string();
         let tx_payload = make_payload(&payload);
-        let output_clone = Arc::clone(&output_file);
         let metrics_clone = Arc::clone(&metrics_list);
         let rpc = solana_rpc.clone();
         let counter = Arc::clone(&confirmed_counter);
@@ -146,7 +134,6 @@ pub async fn run_load_test_with_metrics(
                 &dest_chain,
                 &dest_addr,
                 &tx_payload,
-                output_clone,
                 metrics_clone,
                 counter,
                 sp,
@@ -216,13 +203,6 @@ pub async fn run_load_test_with_metrics(
         transactions: metrics,
     };
 
-    let metrics_output = args.output_dir.join("metrics.json");
-    let metrics_json = serde_json::to_string_pretty(&report)?;
-    std::fs::write(&metrics_output, metrics_json)?;
-
-    ui::kv("metrics saved to", &metrics_output.display().to_string());
-    ui::kv("transactions saved to", &tx_output.display().to_string());
-
     Ok(report)
 }
 
@@ -233,7 +213,6 @@ async fn execute_and_record(
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
-    output_file: Arc<Mutex<File>>,
     metrics_list: Arc<Mutex<Vec<TxMetrics>>>,
     confirmed_counter: Arc<AtomicU64>,
     spinner: ProgressBar,
@@ -245,17 +224,11 @@ async fn execute_and_record(
     let payload_hash = alloy::hex::encode(keccak256(payload));
 
     match solana::send_call_contract(solana_rpc, keypair.as_ref(), dest_chain, dest_addr, payload) {
-        Ok((sig, mut metrics)) => {
+        Ok((_sig, mut metrics)) => {
             metrics.payload = payload.to_vec();
             metrics.payload_hash = payload_hash;
             metrics.source_address = source_addr;
             metrics.send_instant = Some(submit_start);
-            {
-                let mut file = output_file.lock().await;
-                if let Err(e) = writeln!(file, "{sig}") {
-                    eprintln!("  failed to write signature to file: {e}");
-                }
-            }
             let done = confirmed_counter.fetch_add(1, Ordering::Relaxed) + 1;
             spinner.set_message(format!("sending ({done}/{total} confirmed)..."));
             metrics_list.lock().await.push(metrics);

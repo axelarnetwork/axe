@@ -55,7 +55,6 @@ async fn main() -> Result<()> {
                 keypair,
                 source_rpc,
                 payload,
-                output_dir,
             } => {
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
@@ -76,7 +75,6 @@ async fn main() -> Result<()> {
                     num_txs,
                     keypair,
                     payload,
-                    output_dir,
                 })
                 .await
             }

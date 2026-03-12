@@ -8,6 +8,7 @@ mod verify;
 use std::path::PathBuf;
 use std::time::Instant;
 
+
 use alloy::{
     primitives::Bytes,
     providers::{Provider, ProviderBuilder},
@@ -56,7 +57,6 @@ pub struct LoadTestArgs {
     pub num_txs: u64,
     pub keypair: Option<String>,
     pub payload: Option<String>,
-    pub output_dir: PathBuf,
 }
 
 /// Cache file for storing SenderReceiver address per chain.
@@ -379,7 +379,6 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     let run_start = Instant::now();
 
     ui::section(&format!("Load Test: {} -> {}", args.source_chain, args.destination_chain));
-    std::fs::create_dir_all(&args.output_dir)?;
 
     match args.test_type {
         TestType::SolToEvm => run_sol_to_evm(args, run_start).await,
@@ -543,16 +542,11 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
 }
 
 fn finish_report(
-    args: &LoadTestArgs,
+    _args: &LoadTestArgs,
     report: &LoadTestReport,
     run_start: Instant,
 ) -> Result<()> {
-    let report_output = args.output_dir.join("report.json");
-    let report_json = serde_json::to_string_pretty(report)?;
-    std::fs::write(&report_output, &report_json)?;
-
     print_final_report(report);
-    ui::kv("full report saved to", &report_output.display().to_string());
     ui::success(&format!(
         "load test complete ({})",
         ui::format_elapsed(run_start)
