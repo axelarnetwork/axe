@@ -125,6 +125,14 @@ sol! {
     contract InterchainTokenService {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
         function isTrustedChain(string calldata chainName) external view returns (bool);
+        function interchainTransfer(
+            bytes32 tokenId,
+            string calldata destinationChain,
+            bytes calldata destinationAddress,
+            uint256 amount,
+            bytes calldata metadata,
+            uint256 gasValue
+        ) external payable;
     }
 
     // InterchainTokenDeployed event (emitted by ITS when a token is deployed)
@@ -141,6 +149,7 @@ sol! {
     contract ERC20 {
         function name() external view returns (string);
         function balanceOf(address account) external view returns (uint256);
+        function transfer(address to, uint256 amount) external returns (bool);
     }
 
     #[sol(rpc)]

@@ -55,6 +55,9 @@ async fn main() -> Result<()> {
                 keypair,
                 source_rpc,
                 payload,
+                protocol,
+                gas_value,
+                token_id,
             } => {
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
                 commands::load_test::run(commands::load_test::LoadTestArgs {
                     config,
                     test_type: resolved.test_type,
+                    protocol,
                     destination_chain: resolved.destination_chain,
                     source_chain: resolved.source_chain,
                     solana_rpc: resolved.solana_rpc,
@@ -76,6 +80,8 @@ async fn main() -> Result<()> {
                     num_txs,
                     keypair,
                     payload,
+                    gas_value,
+                    token_id,
                 })
                 .await
             }

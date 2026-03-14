@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-use crate::commands::load_test::TestType;
+use crate::commands::load_test::{Protocol, TestType};
 
 #[derive(Parser)]
 #[command(name = "axe")]
@@ -112,6 +112,18 @@ pub enum TestCommands {
         /// Hex-encoded payload to send (default: random test message)
         #[arg(long)]
         payload: Option<String>,
+
+        /// Protocol: gmp (callContract) or its (interchainTransfer)
+        #[arg(long, value_enum, default_value = "gmp")]
+        protocol: Protocol,
+
+        /// Gas value to attach for cross-chain gas (in wei, e.g. "10000000000000000")
+        #[arg(long)]
+        gas_value: Option<String>,
+
+        /// ITS token ID to use (hex, skips token deployment)
+        #[arg(long)]
+        token_id: Option<String>,
     },
 }
 

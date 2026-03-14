@@ -138,6 +138,8 @@ pub fn send_call_contract(
         error: None,
         payload_hash: String::new(),
         source_address: String::new(),
+        gmp_destination_chain: String::new(),
+        gmp_destination_address: String::new(),
         payload: Vec::new(),
         send_instant: None,
         amplifier_timing: None,

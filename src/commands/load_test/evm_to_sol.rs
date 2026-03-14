@@ -314,6 +314,8 @@ async fn execute_and_record_evm<P: Provider>(
                         payload: payload.to_vec(),
                         payload_hash,
                         source_address: format!("{signer_address}"),
+                        gmp_destination_chain: String::new(),
+                        gmp_destination_address: String::new(),
                         send_instant: Some(submit_start),
                         amplifier_timing: None,
                     }
@@ -341,6 +343,8 @@ fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
         payload: Vec::new(),
         payload_hash: String::new(),
         source_address: String::new(),
+        gmp_destination_chain: String::new(),
+        gmp_destination_address: String::new(),
         send_instant: None,
         amplifier_timing: None,
     }

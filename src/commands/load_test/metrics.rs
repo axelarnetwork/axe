@@ -26,6 +26,12 @@ pub struct TxMetrics {
     /// Instant the tx was submitted (for computing T+X timing).
     #[serde(skip)]
     pub send_instant: Option<Instant>,
+    /// GMP-level destination chain from ContractCall event (e.g. "axelar" for ITS hub routing).
+    #[serde(default)]
+    pub gmp_destination_chain: String,
+    /// GMP-level destination address from ContractCall event (e.g. ITS Hub contract for ITS).
+    #[serde(default)]
+    pub gmp_destination_address: String,
     /// Amplifier pipeline timing (populated during verification phase).
     pub amplifier_timing: Option<AmplifierTiming>,
 }
@@ -37,6 +43,8 @@ pub struct AmplifierTiming {
     pub voted_secs: Option<f64>,
     /// Seconds from send to message routed on destination Cosmos Gateway.
     pub routed_secs: Option<f64>,
+    /// Seconds from send to message approved on AxelarnetGateway hub (ITS only).
+    pub hub_approved_secs: Option<f64>,
     /// Seconds from send to isMessageApproved on EVM gateway.
     pub approved_secs: Option<f64>,
     /// Seconds from send to execution on destination contract.
@@ -86,6 +94,7 @@ pub struct VerificationReport {
     pub failure_reasons: Vec<FailureCategory>,
     pub avg_voted_secs: Option<f64>,
     pub avg_routed_secs: Option<f64>,
+    pub avg_hub_approved_secs: Option<f64>,
     pub avg_approved_secs: Option<f64>,
     pub avg_executed_secs: Option<f64>,
     pub min_executed_secs: Option<f64>,

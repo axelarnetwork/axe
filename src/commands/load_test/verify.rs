@@ -29,6 +29,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 enum Phase {
     Voted,
     Routed,
+    HubApproved,
     Approved,
     Executed,
     Done,
@@ -53,6 +54,10 @@ struct PendingTx {
     contract_addr: Address,
     payload_hash: FixedBytes<32>,
     payload_hash_hex: String,
+    /// GMP-level destination chain from ContractCall event (e.g. "axelar" for ITS).
+    gmp_destination_chain: String,
+    /// GMP-level destination address from ContractCall event (e.g. ITS Hub contract).
+    gmp_destination_address: String,
     timing: AmplifierTiming,
     failed: bool,
     fail_reason: Option<String>,
@@ -199,11 +204,13 @@ async fn poll_pipeline<P: Provider>(
     txs: &mut [PendingTx],
     lcd: &str,
     voting_verifier: Option<&str>,
-    cosm_gateway: &str,
+    cosm_gateway: Option<&str>,
     source_chain: &str,
     destination_chain: &str,
     destination_address: &str,
     checker: &DestinationChecker<'_, P>,
+    axelarnet_gateway: Option<&str>,
+    display_chain: Option<&str>,
 ) {
     let total = txs.len();
     if total == 0 {
@@ -235,6 +242,7 @@ async fn poll_pipeline<P: Provider>(
                 let payload_hash = txs[i].payload_hash;
                 let payload_hash_hex = txs[i].payload_hash_hex.clone();
                 let send_instant = txs[i].send_instant;
+                let axelarnet_gw = axelarnet_gateway.map(|s| s.to_string());
 
                 async move {
                     let outcome = match phase {
@@ -265,14 +273,42 @@ async fn poll_pipeline<P: Provider>(
                             }
                         }
                         Phase::Routed => {
-                            match check_cosmos_routed(lcd, cosm_gateway, source_chain, &message_id)
+                            if let Some(gw) = cosm_gateway {
+                                match check_cosmos_routed(lcd, gw, source_chain, &message_id)
+                                    .await
+                                {
+                                    Ok(true) => CheckOutcome::PhaseComplete {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    },
+                                    Ok(false) => CheckOutcome::NotYet,
+                                    Err(e) => CheckOutcome::Error(format!("Gateway: {e}")),
+                                }
+                            } else {
+                                // No cosmos gateway to query — skip Routed phase
+                                CheckOutcome::SkipVoting
+                            }
+                        }
+                        Phase::HubApproved => {
+                            if let Some(ref gw) = axelarnet_gw {
+                                match check_hub_approved(
+                                    lcd,
+                                    gw,
+                                    source_chain,
+                                    &message_id,
+                                )
                                 .await
-                            {
-                                Ok(true) => CheckOutcome::PhaseComplete {
-                                    elapsed: send_instant.elapsed().as_secs_f64(),
-                                },
-                                Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => CheckOutcome::Error(format!("Gateway: {e}")),
+                                {
+                                    Ok(true) => CheckOutcome::PhaseComplete {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    },
+                                    Ok(false) => CheckOutcome::NotYet,
+                                    Err(e) => {
+                                        CheckOutcome::Error(format!("AxelarnetGateway: {e}"))
+                                    }
+                                }
+                            } else {
+                                // No hub gateway — skip this phase
+                                CheckOutcome::SkipVoting
                             }
                         }
                         Phase::Approved => {
@@ -285,6 +321,8 @@ async fn poll_pipeline<P: Provider>(
                                 contract_addr,
                                 payload_hash,
                                 payload_hash_hex,
+                                gmp_destination_chain: String::new(),
+                                gmp_destination_address: String::new(),
                                 timing: AmplifierTiming::default(),
                                 failed: false,
                                 fail_reason: None,
@@ -315,6 +353,8 @@ async fn poll_pipeline<P: Provider>(
                                 contract_addr,
                                 payload_hash,
                                 payload_hash_hex,
+                                gmp_destination_chain: String::new(),
+                                gmp_destination_address: String::new(),
                                 timing: AmplifierTiming::default(),
                                 failed: false,
                                 fail_reason: None,
@@ -353,6 +393,14 @@ async fn poll_pipeline<P: Provider>(
                         }
                         Phase::Routed => {
                             txs[i].timing.routed_secs = Some(elapsed);
+                            txs[i].phase = if axelarnet_gateway.is_some() {
+                                Phase::HubApproved
+                            } else {
+                                Phase::Approved
+                            };
+                        }
+                        Phase::HubApproved => {
+                            txs[i].timing.hub_approved_secs = Some(elapsed);
                             txs[i].phase = Phase::Approved;
                         }
                         Phase::Approved => {
@@ -369,7 +417,19 @@ async fn poll_pipeline<P: Provider>(
                     last_progress = Instant::now();
                 }
                 CheckOutcome::SkipVoting => {
-                    txs[i].phase = Phase::Routed;
+                    // Skip current phase — advance to next
+                    txs[i].phase = match txs[i].phase {
+                        Phase::Voted => Phase::Routed,
+                        Phase::Routed => {
+                            if axelarnet_gateway.is_some() {
+                                Phase::HubApproved
+                            } else {
+                                Phase::Approved
+                            }
+                        }
+                        Phase::HubApproved => Phase::Approved,
+                        _ => Phase::Routed,
+                    };
                     last_progress = Instant::now();
                 }
                 CheckOutcome::AlreadyExecuted { elapsed } => {
@@ -388,14 +448,19 @@ async fn poll_pipeline<P: Provider>(
         }
 
         // Update spinner with multi-phase progress
-        let (voted, routed, approved, executed) = phase_counts(txs);
+        let (voted, routed, hub_approved, approved, executed) = phase_counts(txs);
+        let hub_str = if axelarnet_gateway.is_some() {
+            format!("  hub: {hub_approved}/{total}")
+        } else {
+            String::new()
+        };
         if let Some(ref err) = error_msg {
             spinner.set_message(format!(
-                "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
+                "voted: {voted}/{total}  routed: {routed}/{total}{hub_str}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
             ));
         } else {
             spinner.set_message(format!(
-                "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
+                "voted: {voted}/{total}  routed: {routed}/{total}{hub_str}  approved: {approved}/{total}  executed: {executed}/{total}"
             ));
         }
 
@@ -414,6 +479,7 @@ async fn poll_pipeline<P: Provider>(
         let label = match tx.phase {
             Phase::Voted => "VotingVerifier",
             Phase::Routed => "cosmos routing",
+            Phase::HubApproved => "hub approval",
             Phase::Approved => checker.approval_label(),
             Phase::Executed => checker.execution_label(),
             Phase::Done => unreachable!(),
@@ -424,20 +490,209 @@ async fn poll_pipeline<P: Provider>(
         tx.fail_reason = Some(format!("{label}: timed out"));
     }
 
-    let (voted, routed, approved, executed) = phase_counts(txs);
+    let (voted, routed, hub_approved, approved, executed) = phase_counts(txs);
+    let hub_str = if axelarnet_gateway.is_some() {
+        format!("  hub: {hub_approved}/{total}")
+    } else {
+        String::new()
+    };
     spinner.finish_and_clear();
+    let label = display_chain.unwrap_or(destination_chain);
     ui::success_annotated(
         &format!(
-            "voted: {voted}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
+            "voted: {voted}/{total}  routed: {routed}/{total}{hub_str}  approved: {approved}/{total}  executed: {executed}/{total}"
         ),
-        destination_chain,
+        label,
     );
 }
 
+// ---------------------------------------------------------------------------
+// ITS hub-only pipeline (Voted → HubApproved)
+// ---------------------------------------------------------------------------
+
+/// Simplified polling pipeline for ITS first-leg verification.
+///
+/// Tracks only two phases:
+/// 1. **Voted** — VotingVerifier (destination = "axelar" / AxelarnetGateway)
+/// 2. **Hub Approved** — AxelarnetGateway `executable_messages`
+///
+/// The second-leg (axelar → destination chain) has a different message_id
+/// that we cannot derive, so Approved/Executed on the destination are not tracked.
+async fn poll_pipeline_its_hub(
+    txs: &mut [PendingTx],
+    lcd: &str,
+    voting_verifier: Option<&str>,
+    source_chain: &str,
+    axelarnet_gateway: &str,
+) {
+    let total = txs.len();
+    if total == 0 {
+        return;
+    }
+
+    let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
+    let mut last_progress = Instant::now();
+
+    loop {
+        let active: Vec<usize> = (0..txs.len())
+            .filter(|&i| !txs[i].failed && txs[i].phase != Phase::Done)
+            .collect();
+
+        if active.is_empty() {
+            break;
+        }
+
+        let futs: Vec<_> = active
+            .iter()
+            .map(|&i| {
+                let phase = txs[i].phase;
+                let message_id = txs[i].message_id.clone();
+                let source_address = txs[i].source_address.clone();
+                let payload_hash_hex = txs[i].payload_hash_hex.clone();
+                let send_instant = txs[i].send_instant;
+                let dest_chain = txs[i].gmp_destination_chain.clone();
+                let dest_address = txs[i].gmp_destination_address.clone();
+
+                async move {
+                    let outcome = match phase {
+                        Phase::Voted => {
+                            if let Some(vv) = voting_verifier {
+                                match check_voting_verifier(
+                                    lcd,
+                                    vv,
+                                    source_chain,
+                                    &message_id,
+                                    &source_address,
+                                    &dest_chain,
+                                    &dest_address,
+                                    &payload_hash_hex,
+                                )
+                                .await
+                                {
+                                    Ok(true) => CheckOutcome::PhaseComplete {
+                                        elapsed: send_instant.elapsed().as_secs_f64(),
+                                    },
+                                    Ok(false) => CheckOutcome::NotYet,
+                                    Err(e) => {
+                                        CheckOutcome::Error(format!("VotingVerifier: {e}"))
+                                    }
+                                }
+                            } else {
+                                CheckOutcome::SkipVoting
+                            }
+                        }
+                        Phase::HubApproved => {
+                            match check_hub_approved(
+                                lcd,
+                                axelarnet_gateway,
+                                source_chain,
+                                &message_id,
+                            )
+                            .await
+                            {
+                                Ok(true) => CheckOutcome::PhaseComplete {
+                                    elapsed: send_instant.elapsed().as_secs_f64(),
+                                },
+                                Ok(false) => CheckOutcome::NotYet,
+                                Err(e) => {
+                                    CheckOutcome::Error(format!("AxelarnetGateway: {e}"))
+                                }
+                            }
+                        }
+                        // Done or other phases — no-op
+                        _ => CheckOutcome::NotYet,
+                    };
+                    (i, outcome)
+                }
+            })
+            .collect();
+
+        let results = join_all(futs).await;
+
+        let mut error_msg = None;
+        for (i, outcome) in results {
+            match outcome {
+                CheckOutcome::NotYet => {}
+                CheckOutcome::PhaseComplete { elapsed } => {
+                    match txs[i].phase {
+                        Phase::Voted => {
+                            txs[i].timing.voted_secs = Some(elapsed);
+                            // Skip Routed, go directly to HubApproved
+                            txs[i].phase = Phase::HubApproved;
+                        }
+                        Phase::HubApproved => {
+                            txs[i].timing.hub_approved_secs = Some(elapsed);
+                            txs[i].phase = Phase::Done;
+                        }
+                        _ => {}
+                    }
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::SkipVoting => {
+                    txs[i].phase = Phase::HubApproved;
+                    last_progress = Instant::now();
+                }
+                CheckOutcome::AlreadyExecuted { .. } | CheckOutcome::Error(_) => {
+                    if let CheckOutcome::Error(msg) = outcome {
+                        error_msg = Some(msg);
+                    }
+                }
+            }
+        }
+
+        let voted = txs.iter().filter(|t| t.timing.voted_secs.is_some()).count();
+        let hub = txs
+            .iter()
+            .filter(|t| t.timing.hub_approved_secs.is_some())
+            .count();
+
+        if let Some(ref err) = error_msg {
+            spinner.set_message(format!(
+                "voted: {voted}/{total}  hub approved: {hub}/{total}  (err: {err})"
+            ));
+        } else {
+            spinner.set_message(format!(
+                "voted: {voted}/{total}  hub approved: {hub}/{total}"
+            ));
+        }
+
+        if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
+            break;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    // Mark remaining non-done txs as failed
+    for tx in txs.iter_mut() {
+        if tx.failed || tx.phase == Phase::Done {
+            continue;
+        }
+        tx.failed = true;
+        let label = match tx.phase {
+            Phase::Voted => "VotingVerifier",
+            Phase::HubApproved => "hub approval",
+            _ => "pipeline",
+        };
+        tx.fail_reason = Some(format!("{label}: timed out"));
+    }
+
+    let voted = txs.iter().filter(|t| t.timing.voted_secs.is_some()).count();
+    let hub = txs
+        .iter()
+        .filter(|t| t.timing.hub_approved_secs.is_some())
+        .count();
+
+    spinner.finish_and_clear();
+    ui::success(&format!(
+        "ITS pipeline: voted: {voted}/{total}  hub approved: {hub}/{total}"
+    ));
+}
+
 /// Count how many txs have reached each phase (cumulative).
-fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize) {
+fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize, usize) {
     let mut voted = 0;
     let mut routed = 0;
+    let mut hub_approved = 0;
     let mut approved = 0;
     let mut executed = 0;
     for tx in txs {
@@ -447,6 +702,9 @@ fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize) {
         if tx.timing.routed_secs.is_some() {
             routed += 1;
         }
+        if tx.timing.hub_approved_secs.is_some() {
+            hub_approved += 1;
+        }
         if tx.timing.approved_secs.is_some() {
             approved += 1;
         }
@@ -454,7 +712,7 @@ fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize) {
             executed += 1;
         }
     }
-    (voted, routed, approved, executed)
+    (voted, routed, hub_approved, approved, executed)
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +782,8 @@ pub async fn verify_onchain<P: Provider>(
                 contract_addr,
                 payload_hash,
                 payload_hash_hex: tx.payload_hash.clone(),
+                gmp_destination_chain: String::new(),
+                gmp_destination_address: String::new(),
                 timing: AmplifierTiming::default(),
                 failed: false,
                 fail_reason: None,
@@ -540,11 +800,13 @@ pub async fn verify_onchain<P: Provider>(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        &cosm_gateway,
+        Some(&cosm_gateway),
         source_chain,
         destination_chain,
         destination_address,
         &checker,
+        None,
+        None,
     )
     .await;
 
@@ -611,6 +873,8 @@ pub async fn verify_onchain_solana(
                 contract_addr: Address::ZERO,
                 payload_hash,
                 payload_hash_hex: tx.payload_hash.clone(),
+                gmp_destination_chain: String::new(),
+                gmp_destination_address: String::new(),
                 timing: AmplifierTiming::default(),
                 failed: false,
                 fail_reason: None,
@@ -644,11 +908,107 @@ pub async fn verify_onchain_solana(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        &cosm_gateway,
+        Some(&cosm_gateway),
         source_chain,
         destination_chain,
         destination_address,
         &checker,
+        None,
+        None,
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, metrics);
+    Ok(report)
+}
+
+/// Verify EVM->Solana ITS transactions through the Amplifier pipeline.
+///
+/// ITS messages route via the Axelar hub: the ContractCall event has
+/// `destination_chain = "axelar"` and `destination_address = AxelarnetGateway`.
+/// The VotingVerifier query must match these event values, not the final
+/// destination (solana-18).
+///
+/// Phases tracked:
+/// 1. **Voted** — VotingVerifier (dest = "axelar" / AxelarnetGateway)
+/// 2. **Hub Approved** — AxelarnetGateway executable_messages
+///
+/// Routed / Approved / Executed on Solana are skipped for now because the
+/// second-leg message (axelar → solana) has a different message_id that we
+/// cannot derive from the first-leg ContractCall alone.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_solana_its(
+    config: &Path,
+    source_chain: &str,
+    _destination_chain: &str,
+    _destination_address: &str,
+    _solana_rpc: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+
+    let axelarnet_gateway = read_axelar_contract_field(
+        config,
+        "/axelar/contracts/AxelarnetGateway/address",
+    )?;
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            PendingTx {
+                idx,
+                message_id: tx.signature.clone(),
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                gmp_destination_chain: tx.gmp_destination_chain.clone(),
+                gmp_destination_address: tx.gmp_destination_address.clone(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+            }
+        })
+        .collect();
+
+    // ITS ContractCall has destination_chain="axelar" and
+    // destination_address=ITS Hub contract — use per-tx values from the event.
+    // Stop at HubApproved — we can't track the second-leg message on Solana
+    // because it has a different source_chain ("axelar") and message_id.
+    poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
     )
     .await;
 
@@ -716,6 +1076,28 @@ async fn check_cosmos_routed(
         }
         _ => false,
     })
+}
+
+/// Check if a message is approved on the AxelarnetGateway hub via `executable_messages`.
+async fn check_hub_approved(
+    lcd: &str,
+    axelarnet_gateway: &str,
+    source_chain: &str,
+    message_id: &str,
+) -> Result<bool> {
+    let query = json!({
+        "executable_messages": {
+            "cc_ids": [{
+                "source_chain": source_chain,
+                "message_id": message_id,
+            }]
+        }
+    });
+
+    let resp = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &query).await?;
+    let resp_str = serde_json::to_string(&resp)?;
+    // The message is executable if the response is non-null and contains the message_id
+    Ok(!resp_str.contains("null") && resp_str.contains(message_id))
 }
 
 /// Check `isMessageApproved` on the EVM gateway (single attempt).
@@ -798,6 +1180,7 @@ fn compute_verification_report(
     let all_timings: Vec<&AmplifierTiming> = txs.iter().map(|t| &t.timing).collect();
     let avg_voted = avg_option(all_timings.iter().filter_map(|t| t.voted_secs));
     let avg_routed = avg_option(all_timings.iter().filter_map(|t| t.routed_secs));
+    let avg_hub_approved = avg_option(all_timings.iter().filter_map(|t| t.hub_approved_secs));
     let avg_approved = avg_option(all_timings.iter().filter_map(|t| t.approved_secs));
     let avg_executed = avg_option(all_timings.iter().filter_map(|t| t.executed_secs));
     let min_executed = min_option(all_timings.iter().filter_map(|t| t.executed_secs));
@@ -812,6 +1195,7 @@ fn compute_verification_report(
         failure_reasons: failure_categories,
         avg_voted_secs: avg_voted,
         avg_routed_secs: avg_routed,
+        avg_hub_approved_secs: avg_hub_approved,
         avg_approved_secs: avg_approved,
         avg_executed_secs: avg_executed,
         min_executed_secs: min_executed,
@@ -823,14 +1207,13 @@ fn compute_verification_report(
 
 /// Determine which phase a timed-out tx got stuck at (the last phase it didn't complete).
 fn stuck_phase(tx: &PendingTx) -> String {
-    if tx.timing.voted_secs.is_none() {
-        "voted".into()
-    } else if tx.timing.routed_secs.is_none() {
-        "routed".into()
-    } else if tx.timing.approved_secs.is_none() {
-        "approved".into()
-    } else {
-        "executed".into()
+    match tx.phase {
+        Phase::Voted => "voted".into(),
+        Phase::Routed => "routed".into(),
+        Phase::HubApproved => "hub approved".into(),
+        Phase::Approved => "approved".into(),
+        Phase::Executed => "executed".into(),
+        Phase::Done => "done".into(),
     }
 }
 

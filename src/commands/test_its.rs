@@ -658,7 +658,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 }
 
 /// Generate a random salt using timestamp to avoid collisions.
-fn generate_salt() -> FixedBytes<32> {
+pub fn generate_salt() -> FixedBytes<32> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -861,7 +861,7 @@ async fn relay_to_hub(
 
 /// Extract tokenId and token address from InterchainTokenDeployed event in receipt logs.
 /// Reads topics/data directly to avoid ABI decode issues with indexed field differences.
-fn extract_token_deployed_event(
+pub fn extract_token_deployed_event(
     receipt: &alloy::rpc::types::TransactionReceipt,
 ) -> Result<(FixedBytes<32>, Address)> {
     for log in receipt.inner.logs() {
@@ -890,7 +890,7 @@ fn extract_token_deployed_event(
 
 /// Extract ContractCall event data from a transaction receipt.
 /// Returns (event_index, payload, payload_hash, destination_chain, destination_address).
-fn extract_contract_call_event(
+pub fn extract_contract_call_event(
     receipt: &alloy::rpc::types::TransactionReceipt,
 ) -> Result<(usize, Vec<u8>, FixedBytes<32>, String, String)> {
     for (i, log) in receipt.inner.logs().iter().enumerate() {

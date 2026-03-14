@@ -1,4 +1,5 @@
 pub mod evm_to_sol;
+pub mod its_evm_to_sol;
 pub mod keypairs;
 pub mod metrics;
 pub mod sol_to_evm;
@@ -47,10 +48,28 @@ impl std::fmt::Display for TestType {
     }
 }
 
+/// Protocol: GMP (callContract) or ITS (interchainTransfer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Protocol {
+    #[default]
+    Gmp,
+    Its,
+}
+
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Protocol::Gmp => write!(f, "gmp"),
+            Protocol::Its => write!(f, "its"),
+        }
+    }
+}
+
 /// CLI arguments for the load test command.
 pub struct LoadTestArgs {
     pub config: PathBuf,
     pub test_type: TestType,
+    pub protocol: Protocol,
     pub destination_chain: String,
     pub source_chain: String,
     pub solana_rpc: String,
@@ -59,6 +78,8 @@ pub struct LoadTestArgs {
     pub num_txs: u64,
     pub keypair: Option<String>,
     pub payload: Option<String>,
+    pub gas_value: Option<String>,
+    pub token_id: Option<String>,
 }
 
 /// Cache file for storing SenderReceiver address per chain.
@@ -377,14 +398,46 @@ fn auto_detect_all(
     ))
 }
 
+/// ITS cache file for storing token info per chain pair.
+fn its_cache_path(src: &str, dst: &str) -> PathBuf {
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("axe");
+    data_dir.join(format!("its-load-test-{src}-{dst}.json"))
+}
+
+pub fn read_its_cache(src: &str, dst: &str) -> serde_json::Value {
+    let path = its_cache_path(src, dst);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+pub fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) -> Result<()> {
+    let path = its_cache_path(src, dst);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(cache)?)?;
+    Ok(())
+}
+
 pub async fn run(args: LoadTestArgs) -> Result<()> {
     let run_start = Instant::now();
 
-    ui::section(&format!("Load Test: {} -> {}", args.source_chain, args.destination_chain));
+    ui::section(&format!(
+        "Load Test ({}/{}): {} -> {}",
+        args.protocol, args.test_type, args.source_chain, args.destination_chain
+    ));
 
-    match args.test_type {
-        TestType::SolToEvm => run_sol_to_evm(args, run_start).await,
-        TestType::EvmToSol => run_evm_to_sol(args, run_start).await,
+    match (args.protocol, args.test_type) {
+        (Protocol::Gmp, TestType::SolToEvm) => run_sol_to_evm(args, run_start).await,
+        (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,
+        (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
+        (Protocol::Its, TestType::SolToEvm) => {
+            eyre::bail!("ITS sol-to-evm load test not yet implemented")
+        }
     }
 }
 
@@ -600,7 +653,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     finish_report(&args, &report, run_start)
 }
 
-fn finish_report(
+pub fn finish_report(
     _args: &LoadTestArgs,
     report: &LoadTestReport,
     run_start: Instant,
@@ -629,7 +682,7 @@ fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
 }
 
 /// Validate that an RPC endpoint speaks EVM JSON-RPC (eth_chainId).
-async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
+pub async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     let provider = ProviderBuilder::new().connect_http(
         rpc_url
             .parse()
@@ -645,7 +698,7 @@ async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
 }
 
 /// Validate that an RPC endpoint speaks Solana JSON-RPC (getVersion).
-async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
+pub async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     let client = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
     client.get_version().await.map_err(|_| {
         eyre::eyre!(
@@ -656,7 +709,7 @@ async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     Ok(())
 }
 
-async fn check_evm_balance<P: alloy::providers::Provider>(
+pub async fn check_evm_balance<P: alloy::providers::Provider>(
     provider: &P,
     address: alloy::primitives::Address,
 ) -> Result<()> {
@@ -762,6 +815,14 @@ fn print_final_report(report: &LoadTestReport) {
                 "\u{251c}\u{2500} routed        ".dimmed(),
                 format!("avg {val:.1}s"),
                 "(axelar)".dimmed(),
+            );
+        }
+        if let Some(val) = v.avg_hub_approved_secs {
+            println!(
+                "  {} {}  {}",
+                "\u{251c}\u{2500} hub approved  ".dimmed(),
+                format!("avg {val:.1}s"),
+                "(axelar hub)".dimmed(),
             );
         }
         if let Some(val) = v.avg_approved_secs {
