@@ -127,6 +127,7 @@ pub async fn run(mut args: LoadTestArgs, run_start: Instant) -> eyre::Result<()>
         &args.config,
         evm_gateway_addr,
         &evm_rpc_url,
+        &rpc_client,
     )
     .await?;
 
@@ -351,6 +352,7 @@ async fn setup_its_token(
     config: &Path,
     evm_gateway_addr: Address,
     evm_rpc_url: &str,
+    rpc_client: &solana_client::rpc_client::RpcClient,
 ) -> eyre::Result<([u8; 32], [u8; 32], solana_sdk::pubkey::Pubkey)> {
     if let Some(tid_hex) = token_id_override {
         let tid_bytes = hex::decode(tid_hex.strip_prefix("0x").unwrap_or(tid_hex))
@@ -385,22 +387,46 @@ async fn setup_its_token(
             let (its_root, _) = solana::find_its_root_pda();
             let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
 
-            // Verify token still exists on-chain
-            let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-                solana_rpc,
-                solana_commitment_config::CommitmentConfig::confirmed(),
-            );
+            // Verify token still exists on-chain and deployer has enough supply
             if rpc_client.get_account_data(&mint).is_ok() {
-                ui::info(&format!("reusing cached ITS token: {mint}"));
-                return Ok((token_id, salt, mint));
+                let needed = AMOUNT_PER_TX.saturating_mul(num_txs as u64);
+                let token_program = solana_sdk::pubkey::Pubkey::from_str_const(
+                    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+                );
+                let deployer_ata = solana_sdk::pubkey::Pubkey::find_program_address(
+                    &[
+                        keypair.pubkey().as_ref(),
+                        token_program.as_ref(),
+                        mint.as_ref(),
+                    ],
+                    &solana_sdk::pubkey::Pubkey::from_str_const(
+                        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+                    ),
+                )
+                .0;
+                let deployer_balance = rpc_client
+                    .get_account_data(&deployer_ata)
+                    .ok()
+                    .filter(|data| data.len() >= 72)
+                    .map(|data| u64::from_le_bytes(data[64..72].try_into().unwrap_or([0; 8])))
+                    .unwrap_or(0);
+
+                if deployer_balance >= needed {
+                    ui::info(&format!("reusing cached ITS token: {mint}"));
+                    return Ok((token_id, salt, mint));
+                }
+                ui::warn(&format!(
+                    "cached token has insufficient supply ({deployer_balance} < {needed}), deploying fresh..."
+                ));
+            } else {
+                ui::warn("cached token no longer exists, deploying fresh...");
             }
-            ui::warn("cached token no longer exists, deploying fresh...");
         }
     }
 
     // Deploy fresh
     let salt = generate_salt();
-    let total_supply = AMOUNT_PER_TX * (num_txs as u64 + 10);
+    let total_supply = AMOUNT_PER_TX.saturating_mul(num_txs as u64 + 10);
 
     ui::info("deploying new ITS token on Solana...");
     ui::kv("name", TOKEN_NAME);
