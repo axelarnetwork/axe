@@ -32,13 +32,14 @@ solana-commitment-config = "~3.0"
 solana-axelar-gateway = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
 solana-axelar-gas-service = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
 solana-axelar-memo = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
+solana-axelar-its = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
 anchor-lang = { version = "1.0.0-rc.1", features = ["event-cpi"] }
 hex = "0.4"
 rand = "0.8"
 
 [features]
 default = ["devnet-amplifier"]
-devnet-amplifier = ["solana-axelar-gateway/devnet-amplifier", "solana-axelar-gas-service/devnet-amplifier", "solana-axelar-memo/devnet-amplifier"]
-stagenet = ["solana-axelar-gateway/stagenet", "solana-axelar-gas-service/stagenet", "solana-axelar-memo/stagenet"]
-testnet = ["solana-axelar-gateway/testnet", "solana-axelar-gas-service/testnet", "solana-axelar-memo/testnet"]
-mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet", "solana-axelar-memo/mainnet"]
+devnet-amplifier = ["solana-axelar-gateway/devnet-amplifier", "solana-axelar-gas-service/devnet-amplifier", "solana-axelar-memo/devnet-amplifier", "solana-axelar-its/devnet-amplifier"]
+stagenet = ["solana-axelar-gateway/stagenet", "solana-axelar-gas-service/stagenet", "solana-axelar-memo/stagenet", "solana-axelar-its/stagenet"]
+testnet = ["solana-axelar-gateway/testnet", "solana-axelar-gas-service/testnet", "solana-axelar-memo/testnet", "solana-axelar-its/testnet"]
+mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet", "solana-axelar-memo/mainnet", "solana-axelar-its/mainnet"]

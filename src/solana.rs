@@ -15,6 +15,63 @@ use std::time::Instant;
 
 use crate::commands::load_test::metrics::TxMetrics;
 
+// ---------------------------------------------------------------------------
+// ITS PDA helpers
+// ---------------------------------------------------------------------------
+
+const ITS_SEED: &[u8] = b"interchain-token-service";
+const TOKEN_MANAGER_SEED: &[u8] = b"token-manager";
+const INTERCHAIN_TOKEN_SEED: &[u8] = b"interchain-token";
+const PREFIX_INTERCHAIN_TOKEN_SALT: &[u8] = b"interchain-token-salt";
+const PREFIX_INTERCHAIN_TOKEN_ID: &[u8] = b"interchain-token-id";
+
+pub fn find_its_root_pda() -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[ITS_SEED], &solana_axelar_its::id())
+}
+
+pub fn find_token_manager_pda(its_root: &Pubkey, token_id: &[u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[TOKEN_MANAGER_SEED, its_root.as_ref(), token_id],
+        &solana_axelar_its::id(),
+    )
+}
+
+pub fn find_interchain_token_pda(its_root: &Pubkey, token_id: &[u8]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[INTERCHAIN_TOKEN_SEED, its_root.as_ref(), token_id],
+        &solana_axelar_its::id(),
+    )
+}
+
+fn spl_associated_token_account_program_id() -> Pubkey {
+    Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+}
+
+fn mpl_token_metadata_program_id() -> Pubkey {
+    Pubkey::from_str_const("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
+}
+
+fn get_associated_token_address(wallet: &Pubkey, mint: &Pubkey, token_program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[wallet.as_ref(), token_program.as_ref(), mint.as_ref()],
+        &spl_associated_token_account_program_id(),
+    )
+    .0
+}
+
+/// Derive the interchain token ID from deployer and salt.
+pub fn interchain_token_id(deployer: &Pubkey, salt: &[u8; 32]) -> [u8; 32] {
+    let chain_name_hash = solana_axelar_its::CHAIN_NAME_HASH;
+    let deploy_salt = solana_sdk::keccak::hashv(&[
+        PREFIX_INTERCHAIN_TOKEN_SALT,
+        &chain_name_hash,
+        deployer.as_ref(),
+        salt,
+    ])
+    .to_bytes();
+    solana_sdk::keccak::hashv(&[PREFIX_INTERCHAIN_TOKEN_ID, &deploy_salt]).to_bytes()
+}
+
 /// Load a Solana keypair from a file path, or fall back to ~/.config/solana/id.json.
 pub fn load_keypair(path: Option<&str>) -> Result<Keypair> {
     let key_path = match path {
@@ -155,6 +212,296 @@ pub fn solana_call_contract_index() -> u8 {
     { 2 }
     #[cfg(feature = "devnet-amplifier")]
     { 1 }
+}
+
+// ---------------------------------------------------------------------------
+// ITS instruction builders
+// ---------------------------------------------------------------------------
+
+/// Deploy an interchain token on Solana.
+/// Returns the transaction signature.
+#[allow(clippy::too_many_arguments)]
+pub fn send_its_deploy_interchain_token(
+    rpc_url: &str,
+    keypair: &dyn Signer,
+    salt: &[u8; 32],
+    name: &str,
+    symbol: &str,
+    decimals: u8,
+    initial_supply: u64,
+    minter: Option<&Pubkey>,
+) -> Result<String> {
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let fee_payer = keypair.pubkey();
+    let deployer = fee_payer;
+
+    let token_id = interchain_token_id(&deployer, salt);
+    let (its_root_pda, _) = find_its_root_pda();
+    let (mint, _) = find_interchain_token_pda(&its_root_pda, &token_id);
+    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, &token_id);
+
+    let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let associated_token_program = spl_associated_token_account_program_id();
+    let mpl_metadata_program = mpl_token_metadata_program_id();
+
+    let deployer_ata = get_associated_token_address(&deployer, &mint, &token_program);
+    let token_manager_ata = get_associated_token_address(&token_manager_pda, &mint, &token_program);
+
+    let (mpl_metadata_account, _) = Pubkey::find_program_address(
+        &[b"metadata", mpl_metadata_program.as_ref(), mint.as_ref()],
+        &mpl_metadata_program,
+    );
+
+    let (event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+
+    let (minter_account, minter_roles_pda) = if let Some(m) = minter {
+        let (roles, _) = Pubkey::find_program_address(
+            &[b"user-roles", token_manager_pda.as_ref(), m.as_ref()],
+            &solana_axelar_its::id(),
+        );
+        (*m, roles)
+    } else {
+        (solana_axelar_its::id(), solana_axelar_its::id())
+    };
+
+    let accounts = vec![
+        AccountMeta::new(fee_payer, true),
+        AccountMeta::new_readonly(deployer, true),
+        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(its_root_pda, false),
+        AccountMeta::new(token_manager_pda, false),
+        AccountMeta::new(mint, false),
+        AccountMeta::new(token_manager_ata, false),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new_readonly(associated_token_program, false),
+        AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+        AccountMeta::new_readonly(mpl_metadata_program, false),
+        AccountMeta::new(mpl_metadata_account, false),
+        AccountMeta::new(deployer_ata, false),
+        AccountMeta::new_readonly(minter_account, false),
+        AccountMeta::new(minter_roles_pda, false),
+        AccountMeta::new_readonly(event_authority, false),
+        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+    ];
+
+    let ix_data = solana_axelar_its::instruction::DeployInterchainToken {
+        salt: *salt,
+        name: name.to_string(),
+        symbol: symbol.to_string(),
+        decimals,
+        initial_supply,
+    }
+    .data();
+
+    let ix = Instruction {
+        program_id: solana_axelar_its::id(),
+        accounts,
+        data: ix_data,
+    };
+
+    let blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &blockhash);
+    let mut transaction = Transaction::new_unsigned(message);
+    transaction.sign(&[keypair], blockhash);
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    Ok(signature.to_string())
+}
+
+/// Deploy a remote interchain token from Solana to a destination chain.
+/// Returns the transaction signature.
+pub fn send_its_deploy_remote_interchain_token(
+    rpc_url: &str,
+    keypair: &dyn Signer,
+    salt: &[u8; 32],
+    destination_chain: &str,
+    gas_value: u64,
+) -> Result<String> {
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let fee_payer = keypair.pubkey();
+    let deployer = fee_payer;
+
+    let token_id = interchain_token_id(&deployer, salt);
+    let (its_root_pda, _) = find_its_root_pda();
+    let (mint, _) = find_interchain_token_pda(&its_root_pda, &token_id);
+    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, &token_id);
+
+    let mpl_metadata_program = mpl_token_metadata_program_id();
+    let (metadata_account, _) = Pubkey::find_program_address(
+        &[b"metadata", mpl_metadata_program.as_ref(), mint.as_ref()],
+        &mpl_metadata_program,
+    );
+
+    let gateway_program = solana_axelar_gateway::id();
+    let (gateway_root_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_program);
+    let (call_contract_signing_pda, _) =
+        Pubkey::find_program_address(&[b"gtw-call-contract"], &solana_axelar_its::id());
+    let (gateway_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gateway_program);
+
+    let gas_service_program = solana_axelar_gas_service::id();
+    let (gas_treasury, _) = Pubkey::find_program_address(&[b"gas-service"], &gas_service_program);
+    let (gas_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gas_service_program);
+
+    let (event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+
+    let accounts = vec![
+        AccountMeta::new(fee_payer, true),
+        AccountMeta::new_readonly(deployer, true),
+        AccountMeta::new_readonly(mint, false),
+        AccountMeta::new_readonly(metadata_account, false),
+        AccountMeta::new_readonly(token_manager_pda, false),
+        AccountMeta::new_readonly(gateway_root_pda, false),
+        AccountMeta::new_readonly(gateway_program, false),
+        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(its_root_pda, false),
+        AccountMeta::new_readonly(call_contract_signing_pda, false),
+        AccountMeta::new_readonly(gateway_event_authority, false),
+        AccountMeta::new(gas_treasury, false),
+        AccountMeta::new_readonly(gas_service_program, false),
+        AccountMeta::new_readonly(gas_event_authority, false),
+        AccountMeta::new_readonly(event_authority, false),
+        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+    ];
+
+    let ix_data = solana_axelar_its::instruction::DeployRemoteInterchainToken {
+        salt: *salt,
+        destination_chain: destination_chain.to_string(),
+        gas_value,
+    }
+    .data();
+
+    let ix = Instruction {
+        program_id: solana_axelar_its::id(),
+        accounts,
+        data: ix_data,
+    };
+
+    let blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &blockhash);
+    let mut transaction = Transaction::new_unsigned(message);
+    transaction.sign(&[keypair], blockhash);
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    Ok(signature.to_string())
+}
+
+/// Send an ITS `InterchainTransfer` instruction.
+/// Returns the transaction signature and per-tx metrics.
+#[allow(clippy::too_many_arguments)]
+pub fn send_its_interchain_transfer(
+    rpc_url: &str,
+    keypair: &dyn Signer,
+    token_id: &[u8; 32],
+    source_account: &Pubkey,
+    mint: &Pubkey,
+    destination_chain: &str,
+    destination_address: &[u8],
+    amount: u64,
+    gas_value: u64,
+) -> Result<(String, TxMetrics)> {
+    let submit_start = Instant::now();
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let fee_payer = keypair.pubkey();
+
+    let (its_root_pda, _) = find_its_root_pda();
+    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, token_id);
+
+    let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let token_manager_ata = get_associated_token_address(&token_manager_pda, mint, &token_program);
+
+    let gateway_program = solana_axelar_gateway::id();
+    let (gateway_root_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_program);
+    let (call_contract_signing_pda, _) =
+        Pubkey::find_program_address(&[b"gtw-call-contract"], &solana_axelar_its::id());
+    let (gateway_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gateway_program);
+
+    let gas_service_program = solana_axelar_gas_service::id();
+    let (gas_treasury, _) = Pubkey::find_program_address(&[b"gas-service"], &gas_service_program);
+    let (gas_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gas_service_program);
+
+    let (event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+
+    let accounts = vec![
+        AccountMeta::new(fee_payer, true),
+        AccountMeta::new_readonly(fee_payer, true), // authority = fee_payer
+        AccountMeta::new_readonly(gateway_root_pda, false),
+        AccountMeta::new_readonly(gateway_event_authority, false),
+        AccountMeta::new_readonly(gateway_program, false),
+        AccountMeta::new_readonly(call_contract_signing_pda, false),
+        AccountMeta::new(gas_treasury, false),
+        AccountMeta::new_readonly(gas_service_program, false),
+        AccountMeta::new_readonly(gas_event_authority, false),
+        AccountMeta::new_readonly(its_root_pda, false),
+        AccountMeta::new(token_manager_pda, false),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new(*mint, false),
+        AccountMeta::new(*source_account, false),
+        AccountMeta::new(token_manager_ata, false),
+        AccountMeta::new_readonly(Pubkey::from_str_const("11111111111111111111111111111111"), false),
+        AccountMeta::new_readonly(event_authority, false),
+        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+    ];
+
+    let ix_data = solana_axelar_its::instruction::InterchainTransfer {
+        token_id: *token_id,
+        destination_chain: destination_chain.to_string(),
+        destination_address: destination_address.to_vec(),
+        amount,
+        gas_value,
+        caller_program_id: None,
+        caller_pda_seeds: None,
+        data: None,
+    }
+    .data();
+
+    let ix = Instruction {
+        program_id: solana_axelar_its::id(),
+        accounts,
+        data: ix_data,
+    };
+
+    let blockhash = rpc_client.get_latest_blockhash()?;
+    let message = Message::new_with_blockhash(&[ix], Some(&fee_payer), &blockhash);
+    let mut transaction = Transaction::new_unsigned(message);
+    transaction.sign(&[keypair], blockhash);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let submit_time_ms = submit_start.elapsed().as_millis() as u64;
+
+    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let confirm_time_ms = submit_start.elapsed().as_millis() as u64;
+    let latency_ms = confirm_time_ms.saturating_sub(submit_time_ms);
+
+    let (compute_units, slot) = fetch_tx_details(&rpc_client, &signature).unwrap_or((None, None));
+
+    let metrics = TxMetrics {
+        signature: signature.to_string(),
+        submit_time_ms,
+        confirm_time_ms: Some(confirm_time_ms),
+        latency_ms: Some(latency_ms),
+        compute_units,
+        slot,
+        success: true,
+        error: None,
+        payload_hash: String::new(),
+        source_address: String::new(),
+        gmp_destination_chain: String::new(),
+        gmp_destination_address: String::new(),
+        payload: Vec::new(),
+        send_instant: None,
+        amplifier_timing: None,
+    };
+
+    Ok((signature.to_string(), metrics))
 }
 
 fn fetch_tx_details(

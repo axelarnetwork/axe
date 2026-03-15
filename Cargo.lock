@@ -1481,6 +1481,7 @@ dependencies = [
  "serde_json",
  "solana-axelar-gas-service",
  "solana-axelar-gateway",
+ "solana-axelar-its",
  "solana-axelar-memo",
  "solana-client",
  "solana-commitment-config",

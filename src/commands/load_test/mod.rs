@@ -1,5 +1,6 @@
 pub mod evm_to_sol;
 pub mod its_evm_to_sol;
+pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
 pub mod sol_to_evm;
@@ -435,9 +436,7 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         (Protocol::Gmp, TestType::SolToEvm) => run_sol_to_evm(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,
         (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
-        (Protocol::Its, TestType::SolToEvm) => {
-            eyre::bail!("ITS sol-to-evm load test not yet implemented")
-        }
+        (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
     }
 }
 
