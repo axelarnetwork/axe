@@ -62,6 +62,7 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum TestCommands {
     /// Test GMP source flow: deploy SenderReceiver, send a loopback callContract
     Gmp {

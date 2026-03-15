@@ -832,50 +832,45 @@ fn print_final_report(report: &LoadTestReport) {
         let dst = &report.destination_chain;
         if let Some(val) = report.avg_latency_ms {
             println!(
-                "  {} {}  {}",
+                "  {} avg {:.1}s  {}",
                 "\u{251c}\u{2500} confirm       ".dimmed(),
-                format!("avg {:.1}s", val / 1000.0),
-                format!("({src})").dimmed(),
+                val / 1000.0,
+                format_args!("({src})").dimmed(),
             );
         }
         if let Some(val) = v.avg_voted_secs {
             println!(
-                "  {} {}  {}",
+                "  {} avg {val:.1}s  {}",
                 "\u{251c}\u{2500} voted         ".dimmed(),
-                format!("avg {val:.1}s"),
                 "(axelar)".dimmed(),
             );
         }
         if let Some(val) = v.avg_routed_secs {
             println!(
-                "  {} {}  {}",
+                "  {} avg {val:.1}s  {}",
                 "\u{251c}\u{2500} routed        ".dimmed(),
-                format!("avg {val:.1}s"),
                 "(axelar)".dimmed(),
             );
         }
         if let Some(val) = v.avg_hub_approved_secs {
             println!(
-                "  {} {}  {}",
+                "  {} avg {val:.1}s  {}",
                 "\u{251c}\u{2500} hub approved  ".dimmed(),
-                format!("avg {val:.1}s"),
                 "(axelar hub)".dimmed(),
             );
         }
         if let Some(val) = v.avg_approved_secs {
             println!(
-                "  {} {}  {}",
+                "  {} avg {val:.1}s  {}",
                 "\u{251c}\u{2500} approved      ".dimmed(),
-                format!("avg {val:.1}s"),
-                format!("({dst})").dimmed(),
+                format_args!("({dst})").dimmed(),
             );
         }
         if let Some(val) = v.avg_executed_secs {
             println!(
-                "  {} {}  {}",
+                "  {} avg {val:.1}s  {}",
                 "\u{2514}\u{2500} executed      ".dimmed(),
-                format!("avg {val:.1}s"),
-                format!("({dst})").dimmed(),
+                format_args!("({dst})").dimmed(),
             );
         }
 
