@@ -172,6 +172,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
                         dest,
                         total_supply,
                         src,
+                        gas_value,
                     )
                     .await?
                 }
@@ -184,6 +185,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
                 dest,
                 total_supply,
                 src,
+                gas_value,
             )
             .await?
         }
@@ -374,6 +376,7 @@ async fn deploy_its_token<P: Provider>(
     dest_chain: &str,
     total_supply: U256,
     source_chain: &str,
+    gas_value: U256,
 ) -> eyre::Result<(FixedBytes<32>, Address)> {
     let salt = generate_salt();
 
@@ -411,9 +414,9 @@ async fn deploy_its_token<P: Provider>(
     // Deploy remote interchain token
     ui::info(&format!("deploying remote token to {dest_chain}..."));
 
-    // On devnet, gas service payment is not required (0 value).
     let remote_call = factory
-        .deployRemoteInterchainToken(salt, dest_chain.to_string(), U256::ZERO);
+        .deployRemoteInterchainToken(salt, dest_chain.to_string(), gas_value)
+        .value(gas_value);
 
     let pending = remote_call.send().await?;
     let tx_hash = *pending.tx_hash();
