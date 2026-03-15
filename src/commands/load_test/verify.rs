@@ -1566,6 +1566,10 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                             txs[i].phase = Phase::HubApproved;
                         }
                         Phase::HubApproved => {
+                            // Hub approved implies voted
+                            if txs[i].timing.voted_secs.is_none() {
+                                txs[i].timing.voted_secs = Some(elapsed);
+                            }
                             txs[i].timing.hub_approved_secs = Some(elapsed);
                             txs[i].phase = Phase::DiscoverSecondLeg;
                         }
@@ -1608,6 +1612,9 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                 }
                 CheckOutcome::AlreadyExecuted { elapsed } => {
                     let elapsed = *elapsed;
+                    if txs[i].timing.voted_secs.is_none() {
+                        txs[i].timing.voted_secs = Some(elapsed);
+                    }
                     if txs[i].timing.approved_secs.is_none() {
                         txs[i].timing.approved_secs = Some(elapsed);
                     }
