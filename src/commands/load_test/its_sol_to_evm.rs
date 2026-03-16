@@ -37,7 +37,7 @@ fn default_gas_value() -> u64 {
     { 100_000 }
 }
 
-pub async fn run(mut args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
+pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // --source-rpc overrides the Solana (source) RPC
     if let Some(rpc) = args.source_rpc.take() {
         args.solana_rpc = rpc;
@@ -333,7 +333,7 @@ pub async fn run(mut args: LoadTestArgs, run_start: Instant) -> eyre::Result<()>
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, run_start)
+    finish_report(&args, &report, test_start)
 }
 
 // ---------------------------------------------------------------------------

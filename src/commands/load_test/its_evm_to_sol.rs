@@ -42,7 +42,7 @@ fn default_gas_value_wei(source_chain: &str) -> u128 {
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
-pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
+pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
@@ -400,7 +400,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, run_start)
+    finish_report(&args, &report, test_start)
 }
 
 /// Deploy a new interchain token and its remote counterpart.

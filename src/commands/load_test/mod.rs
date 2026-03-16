@@ -440,7 +440,7 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     }
 }
 
-async fn run_sol_to_evm(mut args: LoadTestArgs, run_start: Instant) -> Result<()> {
+async fn run_sol_to_evm(mut args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     // --source-rpc overrides the Solana (source) RPC
     if let Some(rpc) = args.source_rpc.take() {
         args.solana_rpc = rpc;
@@ -544,6 +544,7 @@ async fn run_sol_to_evm(mut args: LoadTestArgs, run_start: Instant) -> Result<()
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
     let destination_address = format!("{sender_receiver_addr}");
 
+    let test_start = Instant::now();
     let mut report =
         sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?;
 
@@ -559,10 +560,10 @@ async fn run_sol_to_evm(mut args: LoadTestArgs, run_start: Instant) -> Result<()
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, run_start)
+    finish_report(&args, &report, test_start)
 }
 
-async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
+async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
@@ -666,6 +667,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
+    let test_start = Instant::now();
     let mut report = evm_to_sol::run_load_test_with_metrics(
         &args,
         sender_receiver_addr,
@@ -686,7 +688,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, run_start: Instant) -> Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, run_start)
+    finish_report(&args, &report, test_start)
 }
 
 pub fn finish_report(
