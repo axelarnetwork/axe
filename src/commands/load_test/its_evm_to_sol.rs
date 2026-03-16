@@ -126,7 +126,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
 
     // --- Token setup ---
     let num_txs = args.num_txs.max(1) as usize;
-    let amount_per_tx = U256::from(1u64) * U256::from(10u64).pow(U256::from(TOKEN_DECIMALS));
+    let amount_per_tx = U256::from(1_000_000u64); // small amount, sufficient for load testing
     let total_supply = amount_per_tx * U256::from(num_txs + 10); // extra buffer
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
