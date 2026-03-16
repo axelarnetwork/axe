@@ -508,22 +508,113 @@ fn fetch_tx_details(
     rpc_client: &RpcClient,
     signature: &Signature,
 ) -> Result<(Option<u64>, Option<u64>)> {
-    // Transaction details may not be immediately available after confirmation.
-    // Retry a few times with a short delay.
-    for _ in 0..3 {
+    let tx = fetch_confirmed_tx(rpc_client, signature)?;
+    match tx {
+        Some(tx) => {
+            let slot = Some(tx.slot);
+            let compute_units = tx
+                .transaction
+                .meta
+                .and_then(|m| Option::from(m.compute_units_consumed));
+            Ok((compute_units, slot))
+        }
+        None => Ok((None, None)),
+    }
+}
+
+/// Fetch a confirmed transaction with retries.
+fn fetch_confirmed_tx(
+    rpc_client: &RpcClient,
+    signature: &Signature,
+) -> Result<Option<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta>> {
+    for i in 0..10 {
         match rpc_client.get_transaction(signature, UiTransactionEncoding::Json) {
-            Ok(tx) => {
-                let slot = Some(tx.slot);
-                let compute_units = tx
-                    .transaction
-                    .meta
-                    .and_then(|m| Option::from(m.compute_units_consumed));
-                return Ok((compute_units, slot));
-            }
+            Ok(tx) => return Ok(Some(tx)),
             Err(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                // Testnet/stagenet RPCs can be slow to index transactions.
+                // Use exponential backoff: 500ms, 1s, 2s, ...
+                let delay = std::cmp::min(500 * (1 << i), 5000);
+                std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
     }
-    Ok((None, None))
+    Ok(None)
+}
+
+/// Extract the ITS gateway message ID from a confirmed transaction.
+///
+/// ITS instructions invoke the gateway's `call_contract` via CPI. The Solana
+/// message ID format is `{signature}-{top_ix}.{inner_ix}` where `inner_ix` is
+/// the index of the gateway CPI in the flattened inner-instruction list.
+///
+/// The inner index varies depending on whether the ITS program calls `pay_gas`
+/// before `call_contract` (gas_value > 0 adds extra CPIs), and on the
+/// program version / instruction layout.
+///
+/// We parse the transaction logs and count every CPI invocation (depth >= 2)
+/// sequentially. Each such invocation corresponds to one entry in the
+/// inner_instructions array. We find the last gateway invoke, which is the
+/// `call_contract` that emits the `CallContractEvent`.
+pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<String> {
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let sig: Signature = signature_str
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
+
+    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
+        .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
+
+    let meta = tx
+        .transaction
+        .meta
+        .ok_or_else(|| eyre::eyre!("transaction has no metadata"))?;
+
+    let logs: Vec<String> = match meta.log_messages {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(logs) => logs,
+        _ => return Err(eyre::eyre!("transaction has no log messages")),
+    };
+
+    let gateway_id = solana_axelar_gateway::id().to_string();
+
+    // Each "Program X invoke [N]" log with N >= 2 corresponds to one entry
+    // in the inner_instructions array (a CPI within the top-level instruction).
+    // We count them sequentially and find the gateway call_contract CPI.
+    //
+    // The message ID uses the index of the gateway `call_contract` invocation
+    // in the inner instructions array. After call_contract, the gateway emits
+    // an event via `emit_cpi!` — this does NOT create a separate "invoke" log
+    // but IS a separate entry in the inner_instructions array. So the message
+    // ID index = gateway_invoke_index + 1 (for the event emit that follows).
+    let mut inner_ix_counter: u32 = 0;
+    let mut last_gateway_idx: Option<u32> = None;
+
+    for log in &logs {
+        if let Some(rest) = log.strip_prefix("Program ") {
+            if rest.ends_with(" invoke [1]") {
+                continue;
+            }
+            if rest.contains(" invoke [") {
+                if rest.split(" invoke [").next() == Some(gateway_id.as_str()) {
+                    last_gateway_idx = Some(inner_ix_counter);
+                }
+                inner_ix_counter += 1;
+            }
+        }
+    }
+
+    // The emit_cpi! after call_contract adds one more inner instruction that
+    // doesn't produce an "invoke" log. The message ID references that emit
+    // instruction, so we add 1.
+    let last_gateway_idx = last_gateway_idx.map(|idx| idx + 1);
+
+    match last_gateway_idx {
+        Some(idx) => {
+            // Top-level instruction is index 0 (0-based), displayed as 1 (1-based)
+            // in the message ID format.
+            Ok(format!("{signature_str}-1.{idx}"))
+        }
+        None => Err(eyre::eyre!(
+            "could not find gateway call_contract CPI in transaction logs"
+        )),
+    }
 }

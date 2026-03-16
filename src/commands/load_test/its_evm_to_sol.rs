@@ -27,7 +27,11 @@ const TOKEN_NAME: &str = "AXE Load Test";
 const TOKEN_SYMBOL: &str = "AXELT";
 const TOKEN_DECIMALS: u8 = 18;
 /// Default gas value for ITS cross-chain transfers.
-/// Flow: 0.1 ETH (higher gas costs). Others: 0.01 ETH.
+#[cfg(feature = "devnet-amplifier")]
+fn default_gas_value_wei(_source_chain: &str) -> u128 {
+    0 // devnet-amplifier relayer doesn't require gas payment
+}
+#[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
         200_000_000_000_000_000 // 0.2 FLOW

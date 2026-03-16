@@ -201,7 +201,8 @@ pub async fn run(mut args: LoadTestArgs, run_start: Instant) -> eyre::Result<()>
                 Ok((_sig, mut metrics)) => {
                     // Format message_id: the ITS program CPI's gateway.call_contract
                     // at inner instruction index 1.4 (discovered empirically).
-                    metrics.signature = format!("{}-1.4", metrics.signature);
+                    metrics.signature = solana::extract_its_message_id(&rpc, &metrics.signature)
+                        .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
                     metrics.source_address = source_addr;
                     metrics.send_instant = Some(submit_start);
                     // ITS always routes through the hub
@@ -463,7 +464,11 @@ async fn setup_its_token(
 
     // Wait for the remote deploy to propagate through the hub and execute on EVM.
     // The deploy message ID is {signature}-1.3 (empirically determined).
-    let deploy_message_id = format!("{remote_sig}-1.3");
+    let deploy_message_id = solana::extract_its_message_id(solana_rpc, &remote_sig)
+        .unwrap_or_else(|e| {
+            ui::warn(&format!("could not extract message ID from tx logs: {e}, falling back to -1.3"));
+            format!("{remote_sig}-1.3")
+        });
     super::verify::wait_for_its_remote_deploy(
         config,
         src,

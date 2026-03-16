@@ -1712,6 +1712,7 @@ pub async fn wait_for_its_remote_deploy(
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
 
+    ui::kv("deploy message ID", deploy_message_id);
     let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub...");
     let start = Instant::now();
     let timeout = Duration::from_secs(300);

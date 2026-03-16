@@ -32,12 +32,8 @@ pub fn memo_program_id() -> Pubkey {
 /// Flow: 0.1 ETH (higher gas costs).
 /// Other environments: 0.02 ETH.
 #[cfg(feature = "devnet-amplifier")]
-fn default_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        200_000_000_000_000_000 // 0.2 FLOW
-    } else {
-        20_000_000_000_000_000 // 0.02 ETH
-    }
+fn default_gas_value_wei(_source_chain: &str) -> u128 {
+    0 // devnet-amplifier relayer doesn't require gas payment
 }
 #[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
