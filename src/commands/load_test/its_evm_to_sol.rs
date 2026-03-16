@@ -23,8 +23,8 @@ use crate::commands::test_its::{extract_contract_call_event, extract_token_deplo
 use crate::ui;
 use crate::utils::read_contract_address;
 
-const TOKEN_NAME: &str = "AXE Load Test";
-const TOKEN_SYMBOL: &str = "AXELT";
+const TOKEN_NAME: &str = "AXE";
+const TOKEN_SYMBOL: &str = "AXE";
 const TOKEN_DECIMALS: u8 = 18;
 /// Default gas value for ITS cross-chain transfers.
 #[cfg(feature = "devnet-amplifier")]
