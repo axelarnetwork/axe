@@ -1861,6 +1861,129 @@ pub async fn wait_for_its_remote_deploy(
     Ok(())
 }
 
+/// Wait for a remote ITS token deploy to propagate through the hub and reach Solana.
+///
+/// Similar to `wait_for_its_remote_deploy` but for EVM→Solana direction.
+/// Polls: Voted → HubApproved → DiscoverSecondLeg → Routed → Done
+/// (We don't check Solana approval/execution — once routed, the Solana relayer
+/// handles it. We just need the token to exist before sending transfers.)
+pub async fn wait_for_its_remote_deploy_to_solana(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    deploy_message_id: &str,
+    solana_rpc: &str,
+) -> Result<()> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let rpc = read_axelar_rpc(config)?;
+
+    let axelarnet_gateway = read_axelar_contract_field(
+        config,
+        "/axelar/contracts/AxelarnetGateway/address",
+    )?;
+
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let sol_rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+        solana_rpc,
+        solana_commitment_config::CommitmentConfig::confirmed(),
+    );
+
+    ui::kv("deploy message ID", deploy_message_id);
+    let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub to Solana...");
+    let start = Instant::now();
+    let timeout = Duration::from_secs(300);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeployPhase {
+        HubApproved,
+        DiscoverSecondLeg,
+        Routed,
+        Approved,
+        Done,
+    }
+
+    let mut phase = DeployPhase::HubApproved;
+    let mut second_leg_id: Option<String> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            spinner.finish_and_clear();
+            eyre::bail!("remote deploy timed out after {}s at phase {phase:?}", timeout.as_secs());
+        }
+
+        match phase {
+            DeployPhase::HubApproved => {
+                if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: hub approved");
+                    phase = DeployPhase::DiscoverSecondLeg;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for hub approval...");
+            }
+            DeployPhase::DiscoverSecondLeg => {
+                match discover_second_leg(&rpc, deploy_message_id).await {
+                    Ok(Some(info)) => {
+                        spinner.set_message(format!(
+                            "remote deploy: second leg discovered ({})",
+                            info.message_id
+                        ));
+                        second_leg_id = Some(info.message_id);
+                        phase = DeployPhase::Routed;
+                        continue;
+                    }
+                    Ok(None) => {
+                        spinner.set_message("remote deploy: discovering second leg...");
+                    }
+                    Err(e) => {
+                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
+                    }
+                }
+            }
+            DeployPhase::Routed => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: routed to Solana");
+                    phase = DeployPhase::Approved;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for routing...");
+            }
+            DeployPhase::Approved => {
+                // Check if the Solana gateway has the incoming message
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
+                let cmd_id: [u8; 32] = keccak256(&input).into();
+                match check_solana_incoming_message(&sol_rpc_client, &cmd_id) {
+                    Ok(Some(_)) => {
+                        phase = DeployPhase::Done;
+                        continue;
+                    }
+                    _ => {
+                        spinner.set_message("remote deploy: waiting for Solana approval...");
+                    }
+                }
+            }
+            DeployPhase::Done => break,
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    spinner.finish_and_clear();
+    ui::success("remote token deployed on Solana");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Single-shot check helpers
 // ---------------------------------------------------------------------------

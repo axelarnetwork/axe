@@ -130,12 +130,14 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
 
     // --- Token setup ---
     let num_txs = args.num_txs.max(1) as usize;
-    let amount_per_tx = U256::from(1_000_000u64); // small amount, sufficient for load testing
+    // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
+    // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
+    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
     let total_supply = amount_per_tx * U256::from(num_txs + 10); // extra buffer
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 
-    let (token_id, token_addr) = if let Some(ref tid) = args.token_id {
+    let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
         // User provided a token ID
         let token_id: FixedBytes<32> = tid.parse()
             .map_err(|e| eyre!("invalid --token-id: {e}"))?;
@@ -146,7 +148,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
             .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
-        (token_id, addr)
+        (token_id, addr, None)
     } else {
         // Check cache
         let cache = read_its_cache(src, dest);
@@ -165,7 +167,7 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
                 Ok(_) => {
                     ui::info(&format!("reusing cached ITS token: {addr}"));
                     ui::kv("token ID (cached)", &format!("{tid}"));
-                    (tid, addr)
+                    (tid, addr, None)
                 }
                 Err(_) => {
                     ui::warn("cached token no longer exists, deploying fresh...");
@@ -195,6 +197,18 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
         }
     };
 
+    // Wait for the remote deploy to propagate through the hub to Solana.
+    if let Some(ref deploy_msg_id) = deploy_message_id {
+        super::verify::wait_for_its_remote_deploy_to_solana(
+            &args.config,
+            src,
+            dest,
+            deploy_msg_id,
+            &args.solana_rpc,
+        )
+        .await?;
+    }
+
     // --- Derive N EVM signers ---
     let derived = keypairs::derive_evm_signers(&main_key, num_txs)?;
     ui::info(&format!("derived {} EVM signing keys", derived.len()));
@@ -220,8 +234,12 @@ pub async fn run(args: LoadTestArgs, run_start: Instant) -> eyre::Result<()> {
     let mut tasks = Vec::with_capacity(num_txs);
     let dest_chain = dest.to_string();
 
-    // Receiver address on Solana (32 bytes zero = burn address)
-    let receiver_bytes = Bytes::from(vec![0u8; 32]);
+    // Receiver address on Solana — use the default Solana keypair's pubkey.
+    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
+    let receiver_bytes = {
+        use solana_sdk::signer::Signer;
+        Bytes::from(sol_keypair.pubkey().to_bytes().to_vec())
+    };
 
     for derived_signer in &derived {
         let metrics_clone = Arc::clone(&metrics_list);
@@ -381,7 +399,7 @@ async fn deploy_its_token<P: Provider>(
     total_supply: U256,
     source_chain: &str,
     gas_value: U256,
-) -> eyre::Result<(FixedBytes<32>, Address)> {
+) -> eyre::Result<(FixedBytes<32>, Address, Option<String>)> {
     let salt = generate_salt();
 
     ui::info("deploying new ITS token...");
@@ -435,6 +453,16 @@ async fn deploy_its_token<P: Provider>(
         receipt.block_number.unwrap_or(0)
     ));
 
+    // Extract the remote deploy message ID from the receipt
+    let deploy_message_id = match extract_contract_call_event(&receipt) {
+        Ok((event_index, _, _, _, _)) => {
+            let msg_id = format!("{tx_hash:#x}-{event_index}");
+            ui::kv("remote deploy message ID", &msg_id);
+            Some(msg_id)
+        }
+        Err(_) => None,
+    };
+
     // Save to cache
     let cache = serde_json::json!({
         "tokenId": format!("{token_id}"),
@@ -443,7 +471,7 @@ async fn deploy_its_token<P: Provider>(
     });
     save_its_cache(source_chain, dest_chain, &cache)?;
 
-    Ok((token_id, token_addr))
+    Ok((token_id, token_addr, deploy_message_id))
 }
 
 /// Distribute ITS tokens from deployer to all derived wallets.
