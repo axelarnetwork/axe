@@ -208,7 +208,7 @@ fn try_print_its(data: &[u8], indent: &str, depth: usize) -> bool {
     };
 
     let tuple_type = DynSolType::Tuple(types.clone());
-    let Ok(DynSolValue::Tuple(values)) = tuple_type.abi_decode(data) else {
+    let Ok(DynSolValue::Tuple(values)) = tuple_type.abi_decode_params(data) else {
         return false;
     };
 
@@ -254,6 +254,11 @@ fn try_print_fallback(data: &[u8], indent: &str) -> bool {
             println!("{indent}Decoded as ({type_str}):");
             for (i, (value, ty)) in values.iter().zip(pattern.iter()).enumerate() {
                 println!("{indent}  arg{i} ({ty}): {}", format_value(value));
+                if let (DynSolType::Bytes, DynSolValue::Bytes(b)) = (ty, value)
+                    && b.len() >= 4
+                {
+                    try_print_nested(b, &format!("{indent}    "), 1);
+                }
             }
             return true;
         }
