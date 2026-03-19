@@ -34,7 +34,7 @@ fn default_gas_value_wei(_source_chain: &str) -> u128 {
 #[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
-        200_000_000_000_000_000 // 0.2 FLOW
+        300_000_000_000_000_000 // 0.3 FLOW
     } else {
         10_000_000_000_000_000 // 0.01 ETH
     }
@@ -232,7 +232,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let funding_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    keypairs::ensure_funded_evm(&funding_provider, &signer, &derived).await?;
+    keypairs::ensure_funded_evm_with_extra(&funding_provider, &signer, &derived, gas_value_wei).await?;
 
     // --- Distribute ITS tokens to derived wallets ---
     distribute_tokens(&write_provider, token_addr, &derived, amount_per_key).await?;
