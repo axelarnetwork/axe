@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::eyre;
 use futures::future::join_all;
@@ -115,7 +115,16 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
-    let num_txs = args.num_txs.max(1) as usize;
+    let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
+    let (num_keys, total_expected) = if burst_mode {
+        let n = args.num_txs.max(1) as usize;
+        (n, args.num_txs.max(1))
+    } else {
+        let tps = args.tps.unwrap() as usize;
+        let dur = args.duration_secs.unwrap();
+        (tps * args.key_cycle as usize, tps as u64 * dur)
+    };
+    let _num_txs = num_keys;
 
     // --- Token setup ---
     let (token_id, _salt, mint) = setup_its_token(
@@ -123,7 +132,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         &main_keypair,
         src,
         dest,
-        num_txs,
+        num_keys,
         gas_value,
         args.token_id.as_deref(),
         &args.config,
@@ -137,17 +146,23 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     ui::address("mint", &mint.to_string());
 
     // --- Derive and fund keypairs ---
-    let keypairs = prepare_keypairs(&args.solana_rpc, num_txs, &main_keypair)?;
+    let keypairs = prepare_keypairs(&args.solana_rpc, num_keys, &main_keypair)?;
     let key_count = keypairs.len();
 
     // --- Create ATAs and distribute tokens ---
+    let amount_per_key_dist = if burst_mode {
+        AMOUNT_PER_KEY
+    } else {
+        let txs_per_key = (args.duration_secs.unwrap() + 2) / 3;
+        AMOUNT_PER_TX * txs_per_key * 2
+    };
     distribute_its_tokens(
         &args.solana_rpc,
         &main_keypair,
         &keypairs,
         &mint,
         &token_id,
-        AMOUNT_PER_KEY,
+        amount_per_key_dist,
     )?;
 
     // --- ITS hub routing info ---
@@ -156,6 +171,191 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         &args.config,
         "/axelar/contracts/AxelarnetGateway/address",
     )?;
+
+    // === SUSTAINED MODE ===
+    if !burst_mode {
+        let tps_n = args.tps.unwrap() as usize;
+        let duration_secs = args.duration_secs.unwrap();
+
+        let metrics_list_s: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
+        let src_confirmed_s = Arc::new(AtomicU64::new(0));
+        let src_failed_s = Arc::new(AtomicU64::new(0));
+        let fired_ctr = Arc::new(AtomicU64::new(0));
+
+        let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained ITS send..."));
+        let test_start = Instant::now();
+
+        let dest_chain_s = dest.to_string();
+        let da_s = dest_address_bytes.clone();
+        let rpc_s = args.solana_rpc.clone();
+        let axelarnet_gw_s = axelarnet_gw_addr.clone();
+        let token_program_s = solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+        let ata_program_s = solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+
+        let mut all_tasks_s: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(total_expected as usize);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let mut tick_s: u64 = 0;
+        loop {
+            interval.tick().await;
+            if tick_s >= duration_secs {
+                break;
+            }
+
+            let batch_start = (tick_s as usize % args.key_cycle as usize) * tps_n;
+            for i in 0..tps_n {
+                let key_idx = batch_start + i;
+                let kp = keypairs[key_idx].clone();
+
+                let metrics_clone = Arc::clone(&metrics_list_s);
+                let confirmed_ctr = Arc::clone(&src_confirmed_s);
+                let failed_ctr = Arc::clone(&src_failed_s);
+                let fired = Arc::clone(&fired_ctr);
+                let dc = dest_chain_s.clone();
+                let da = da_s.clone();
+                let rpc = rpc_s.clone();
+                let tid = token_id;
+                let m = mint;
+                let gv = gas_value;
+                let gmp_dest = axelarnet_gw_s.clone();
+
+                fired.fetch_add(1, Ordering::Relaxed);
+
+                let handle = tokio::spawn(async move {
+                    let submit_start = Instant::now();
+                    let source_addr = kp.pubkey().to_string();
+
+                    let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
+                        &[
+                            kp.pubkey().as_ref(),
+                            token_program_s.as_ref(),
+                            m.as_ref(),
+                        ],
+                        &ata_program_s,
+                    ).0;
+
+                    match solana::send_its_interchain_transfer(
+                        &rpc, &kp, &tid, &source_ata, &m, &dc, &da, AMOUNT_PER_TX, gv,
+                    ) {
+                        Ok((_sig, mut metrics)) => {
+                            metrics.signature = solana::extract_its_message_id(&rpc, &metrics.signature)
+                                .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
+                            metrics.source_address = source_addr;
+                            metrics.send_instant = Some(submit_start);
+                            metrics.gmp_destination_chain = "axelar".to_string();
+                            metrics.gmp_destination_address = gmp_dest;
+                            confirmed_ctr.fetch_add(1, Ordering::Relaxed);
+                            metrics_clone.lock().await.push(metrics);
+                        }
+                        Err(e) => {
+                            #[allow(clippy::cast_possible_truncation)]
+                            let elapsed_ms = submit_start.elapsed().as_millis() as u64;
+                            failed_ctr.fetch_add(1, Ordering::Relaxed);
+                            let metrics = TxMetrics {
+                                signature: String::new(),
+                                submit_time_ms: elapsed_ms,
+                                confirm_time_ms: None,
+                                latency_ms: None,
+                                compute_units: None,
+                                slot: None,
+                                success: false,
+                                error: Some(e.to_string()),
+                                payload: Vec::new(),
+                                payload_hash: String::new(),
+                                source_address: String::new(),
+                                gmp_destination_chain: String::new(),
+                                gmp_destination_address: String::new(),
+                                send_instant: None,
+                                amplifier_timing: None,
+                            };
+                            metrics_clone.lock().await.push(metrics);
+                        }
+                    }
+                });
+                all_tasks_s.push(handle);
+            }
+
+            let elapsed_s = test_start.elapsed().as_secs();
+            let f = fired_ctr.load(Ordering::Relaxed);
+            let c = src_confirmed_s.load(Ordering::Relaxed);
+            let fail = src_failed_s.load(Ordering::Relaxed);
+            spinner.set_message(format!(
+                "[{elapsed_s}/{duration_secs}s]  fired: {f}/{total_expected}  src-confirmed: {c}  failed: {fail}  (target: {tps_n} tx/s)"
+            ));
+            tick_s += 1;
+        }
+
+        let total_submitted_s = all_tasks_s.len() as u64;
+        spinner.set_message(format!(
+            "waiting for {} in-flight receipts...",
+            total_submitted_s.saturating_sub(src_confirmed_s.load(Ordering::Relaxed) + src_failed_s.load(Ordering::Relaxed))
+        ));
+        join_all(all_tasks_s).await;
+
+        let test_duration_s = test_start.elapsed().as_secs_f64();
+        let confirmed_count_s = src_confirmed_s.load(Ordering::Relaxed);
+        spinner.finish_and_clear();
+        ui::success(&format!(
+            "send phase complete: {confirmed_count_s}/{total_submitted_s} src-confirmed in {test_duration_s:.1}s"
+        ));
+
+        let metrics_s = metrics_list_s.lock().await.clone();
+        let total_confirmed_s = metrics_s.iter().filter(|m| m.success).count() as u64;
+        let total_failed_s = metrics_s.iter().filter(|m| !m.success).count() as u64;
+
+        if total_failed_s > 0 {
+            let mut error_counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            for m in metrics_s.iter().filter(|m| !m.success) {
+                let reason = m.error.as_deref().unwrap_or("unknown").chars().take(120).collect::<String>();
+                *error_counts.entry(reason).or_default() += 1;
+            }
+            for (reason, count) in &error_counts {
+                ui::warn(&format!("{count} txs failed: {reason}"));
+            }
+        }
+
+        let latencies_s: Vec<u64> = metrics_s.iter().filter_map(|m| m.latency_ms).collect();
+        let compute_units_s: Vec<u64> = metrics_s.iter().filter_map(|m| m.compute_units).collect();
+
+        #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+        let mut report = LoadTestReport {
+            source_chain: src.to_string(),
+            destination_chain: dest.to_string(),
+            destination_address: format!("{its_proxy_addr}"),
+            num_txs: total_expected,
+            num_keys: num_keys,
+            total_submitted: total_submitted_s,
+            total_confirmed: total_confirmed_s,
+            total_failed: total_failed_s,
+            test_duration_secs: test_duration_s,
+            tps_submitted: if test_duration_s > 0.0 { total_submitted_s as f64 / test_duration_s } else { 0.0 },
+            tps_confirmed: if test_duration_s > 0.0 { total_confirmed_s as f64 / test_duration_s } else { 0.0 },
+            landing_rate: if total_submitted_s > 0 { total_confirmed_s as f64 / total_submitted_s as f64 } else { 0.0 },
+            avg_latency_ms: if latencies_s.is_empty() { None } else { Some(latencies_s.iter().sum::<u64>() as f64 / latencies_s.len() as f64) },
+            min_latency_ms: latencies_s.iter().min().copied(),
+            max_latency_ms: latencies_s.iter().max().copied(),
+            avg_compute_units: if compute_units_s.is_empty() { None } else { Some(compute_units_s.iter().sum::<u64>() as f64 / compute_units_s.len() as f64) },
+            min_compute_units: compute_units_s.iter().min().copied(),
+            max_compute_units: compute_units_s.iter().max().copied(),
+            verification: None,
+            transactions: metrics_s,
+        };
+
+        let verification = super::verify::verify_onchain_evm_its(
+            &args.config,
+            &args.source_chain,
+            &args.destination_chain,
+            &format!("{its_proxy_addr}"),
+            evm_gateway_addr,
+            &evm_rpc_url,
+            &mut report.transactions,
+        ).await?;
+        report.verification = Some(verification);
+
+        return finish_report(&args, &report, test_start);
+    }
+    // === END SUSTAINED MODE ===
 
     // --- Parallel sends ---
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));

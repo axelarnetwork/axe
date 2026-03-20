@@ -81,6 +81,9 @@ pub struct LoadTestArgs {
     pub payload: Option<String>,
     pub gas_value: Option<String>,
     pub token_id: Option<String>,
+    pub tps: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub key_cycle: u64,
 }
 
 /// Cache file for storing SenderReceiver address per chain.
@@ -579,8 +582,11 @@ async fn run_sol_to_evm(mut args: LoadTestArgs, _run_start: Instant) -> Result<(
     let destination_address = format!("{sender_receiver_addr}");
 
     let test_start = Instant::now();
-    let mut report =
-        sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?;
+    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
+        sol_to_evm::run_sustained_load_test_with_metrics(&args, &destination_address).await?
+    } else {
+        sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?
+    };
 
     let verification = verify::verify_onchain(
         &args.config,
@@ -702,25 +708,82 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("destination program", destination_address);
 
     let test_start = Instant::now();
-    let mut report = evm_to_sol::run_load_test_with_metrics(
-        &args,
-        sender_receiver_addr,
-        &main_key,
-        &evm_rpc_url,
-        destination_address,
-    )
-    .await?;
+    let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let verification = verify::verify_onchain_solana(
-        &args.config,
-        &args.source_chain,
-        &args.destination_chain,
-        destination_address,
-        &args.solana_rpc,
-        &mut report.transactions,
-    )
-    .await?;
-    report.verification = Some(verification);
+    let report = if sustained {
+        // Sustained mode: run verification concurrently with the send phase.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // The MultiProgress + spinners are created inside the send function AFTER
+        // funding completes, so they don't flicker during setup. The verify spinner
+        // is sent to the verify task via a oneshot channel.
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        // Spawn verification in a background task.
+        let vconfig = args.config.clone();
+        let vsource = args.source_chain.clone();
+        let vdest = args.destination_chain.clone();
+        let vdest_addr = destination_address.to_string();
+        let vsolana_rpc = args.solana_rpc.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            verify::verify_onchain_solana_streaming(
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                &vsolana_rpc,
+                verify_rx,
+                vdone,
+                spinner,
+            )
+            .await
+        });
+
+        let mut report = evm_to_sol::run_sustained_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &evm_rpc_url,
+            destination_address,
+            Some(verify_tx),
+            Some(send_done),
+            spinner_tx,
+        ).await?;
+
+        // Wait for verification to finish.
+        let (verification, timings) = verify_handle.await??;
+        // Write amplifier timing back into per-tx records for JSON report & pipeline counts.
+        for (idx, timing) in timings {
+            if idx < report.transactions.len() {
+                report.transactions[idx].amplifier_timing = Some(timing);
+            }
+        }
+        report.verification = Some(verification);
+        report
+    } else {
+        let mut report = evm_to_sol::run_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &evm_rpc_url,
+            destination_address,
+        ).await?;
+
+        let verification = verify::verify_onchain_solana(
+            &args.config,
+            &args.source_chain,
+            &args.destination_chain,
+            destination_address,
+            &args.solana_rpc,
+            &mut report.transactions,
+        )
+        .await?;
+        report.verification = Some(verification);
+        report
+    };
 
     finish_report(&args, &report, test_start)
 }
@@ -735,6 +798,24 @@ pub fn finish_report(
         "load test complete ({})",
         ui::format_elapsed(run_start)
     ));
+
+    // Write full JSON report to a timestamped file so failures can be inspected afterwards.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let log_dir = std::path::Path::new("axe-load-test-logs");
+    let log_path = log_dir.join(format!("axe-load-test-{ts}.json"));
+    match std::fs::create_dir_all(log_dir) {
+        Ok(()) => match serde_json::to_string_pretty(report) {
+            Ok(json) => match std::fs::write(&log_path, &json) {
+                Ok(()) => ui::info(&format!("report written to {}", log_path.display())),
+                Err(e) => ui::warn(&format!("could not write report to {}: {e}", log_path.display())),
+            },
+            Err(e) => ui::warn(&format!("could not serialize report: {e}")),
+        },
+        Err(e) => ui::warn(&format!("could not create log dir {}: {e}", log_dir.display())),
+    }
 
     Ok(())
 }
@@ -839,6 +920,25 @@ fn print_final_report(report: &LoadTestReport) {
     if let Some(ref v) = report.verification {
         println!();
 
+        // Per-stage pipeline counts (computed from transaction records).
+        // Shown even when verification times out so partial progress is visible.
+        let total = report.total_confirmed;
+        let voted = report.transactions.iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.voted_secs.is_some()))
+            .count() as u64;
+        let routed = report.transactions.iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.routed_secs.is_some()))
+            .count() as u64;
+        let approved = report.transactions.iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.approved_secs.is_some()))
+            .count() as u64;
+        let executed = report.transactions.iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(|a| a.executed_secs.is_some()))
+            .count() as u64;
+        println!(
+            "  pipeline         voted {voted}/{total}  routed {routed}/{total}  approved {approved}/{total}  executed {executed}/{total}"
+        );
+
         // End-to-end line
         match (v.avg_executed_secs, v.min_executed_secs, v.max_executed_secs) {
             (Some(avg), Some(min), Some(max)) => {
@@ -863,48 +963,64 @@ fn print_final_report(report: &LoadTestReport) {
             println!("  throughput       {throughput:.2} tx/s");
         }
 
-        // Segment breakdown
+        // Segment breakdown — show step duration + cumulative total.
+        // Each avg_*_secs value is cumulative from tx send. Step = current - previous.
         let src = &report.source_chain;
         let dst = &report.destination_chain;
-        if let Some(val) = report.avg_latency_ms {
+
+        // Track the cumulative time of the previous step to compute step deltas.
+        let confirm_secs = report.avg_latency_ms.map(|ms| ms / 1000.0);
+        let mut prev: Option<f64> = None;
+
+        if let Some(total) = confirm_secs {
+            let step = total; // first step, no previous
             println!(
-                "  {} avg {:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{251c}\u{2500} confirm       ".dimmed(),
-                val / 1000.0,
                 format_args!("({src})").dimmed(),
             );
+            prev = Some(total);
         }
-        if let Some(val) = v.avg_voted_secs {
+        if let Some(total) = v.avg_voted_secs {
+            let step = prev.map_or(total, |p| total - p);
             println!(
-                "  {} avg {val:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{251c}\u{2500} voted         ".dimmed(),
                 "(axelar)".dimmed(),
             );
+            prev = Some(total);
         }
-        if let Some(val) = v.avg_routed_secs {
+        if let Some(total) = v.avg_routed_secs {
+            let step = prev.map_or(total, |p| total - p);
             println!(
-                "  {} avg {val:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{251c}\u{2500} routed        ".dimmed(),
                 "(axelar)".dimmed(),
             );
+            prev = Some(total);
         }
-        if let Some(val) = v.avg_hub_approved_secs {
+        if let Some(total) = v.avg_hub_approved_secs {
+            let step = prev.map_or(total, |p| total - p);
             println!(
-                "  {} avg {val:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{251c}\u{2500} hub approved  ".dimmed(),
                 "(axelar hub)".dimmed(),
             );
+            prev = Some(total);
         }
-        if let Some(val) = v.avg_approved_secs {
+        if let Some(total) = v.avg_approved_secs {
+            let step = prev.map_or(total, |p| total - p);
             println!(
-                "  {} avg {val:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{251c}\u{2500} approved      ".dimmed(),
                 format_args!("({dst})").dimmed(),
             );
+            prev = Some(total);
         }
-        if let Some(val) = v.avg_executed_secs {
+        if let Some(total) = v.avg_executed_secs {
+            let step = prev.map_or(total, |p| total - p);
             println!(
-                "  {} avg {val:.1}s  {}",
+                "  {} step {step:.1}s \u{2502} total {total:.1}s  {}",
                 "\u{2514}\u{2500} executed      ".dimmed(),
                 format_args!("({dst})").dimmed(),
             );

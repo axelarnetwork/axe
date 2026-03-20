@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
                 protocol,
                 gas_value,
                 token_id,
+                tps,
+                duration_secs,
+                key_cycle,
             } => {
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
@@ -89,6 +92,9 @@ async fn main() -> Result<()> {
                     payload,
                     gas_value,
                     token_id,
+                    tps,
+                    duration_secs,
+                    key_cycle,
                 })
                 .await
             }

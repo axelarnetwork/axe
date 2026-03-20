@@ -13,9 +13,9 @@ cd axelar-contract-deployments && npm install && cd ..
 cp axe/.env.example axe/.env
 # Edit .env with your chain details, keys, and mnemonics
 
-# 3. Install
+# 3. Build and install
 cd axe
-cargo install --path .
+cargo build && cp target/debug/axe ~/.cargo/bin/axe
 
 # 4. Initialize and deploy
 axe init
@@ -67,15 +67,57 @@ axe test its
 Deploys an interchain token locally, deploys it remotely to a destination chain via the ITS Hub, then sends a cross-chain transfer and verifies the balance on the destination. Relays through the full Amplifier pipeline (verify → vote → route → execute on hub).
 
 # Load Tests
-The axe test load-test command sends cross-chain transactions through the Axelar amplifier pipeline and verifies them end-to-end.
 
-**GMP (default):** Sol → EVM derives N independent Solana keypairs, funds them, then sends all N CallContract transactions in parallel. EVM → Sol sends N callContract transactions from a single EVM signer with a 200ms stagger.
+The `axe test load-test` command sends cross-chain transactions through the Axelar Amplifier pipeline and verifies them end-to-end. It supports two modes: **burst** (send N transactions as fast as possible) and **sustained** (send at a fixed TPS rate for a fixed duration).
 
-**ITS (`--protocol its`):** Deploys an interchain token on the source chain, deploys the remote counterpart on the destination, then sends N InterchainTransfer transactions through the ITS Hub. Supports both EVM → Sol and Sol → EVM directions.
+## Modes
 
-**Verification:** After all transactions are submitted, polling covers the full pipeline: voted → routed → approved → executed (GMP), or voted → hub-approved → second-leg discovery → routed → approved → executed (ITS). Results are printed as a timing summary and saved to report.json.
+### Burst mode (default)
 
-## Load Test (SOL -> EVM)
+Send a fixed number of transactions all at once. All keys are funded upfront and all transactions are fired in parallel.
+
+```bash
+axe test load-test --num-txs 50 ...
+```
+
+### Sustained mode
+
+Send transactions at a controlled rate for a set duration. Use `--tps` and `--duration-secs` together:
+
+```bash
+axe test load-test --tps 10 --duration-secs 300 ...
+# sends 10 tx/s for 5 minutes = 3000 transactions total
+```
+
+**How it works:**
+
+- A pool of `tps × key_cycle` wallets is derived and funded upfront (e.g. 30 wallets for 10 TPS with a 3s cycle).
+- Each second, `tps` transactions are fired using the next batch of keys from the pool.
+- Keys rotate on a configurable cycle (default 3 seconds): second 1 uses keys 0–9, second 2 uses keys 10–19, second 3 uses keys 20–29, second 4 reuses keys 0–9, etc. This ensures each key has time for its previous transaction to land before its nonce is reused.
+- Use `--key-cycle N` to control the cycle length. Higher values use more wallets and reduce per-address mempool pressure on chains with aggressive mempool limits (e.g. `--key-cycle 6` doubles the wallet pool).
+- **Concurrent send + verify:** In sustained mode, the Amplifier verification pipeline starts immediately as transactions confirm — it does not wait for the send phase to finish. Both phases run concurrently with live progress on separate lines:
+  ```
+  \ [42/300s]  fired: 420/3000  src-confirmed: 410  failed: 2  (target: 10 tx/s)
+  - voted: 350/410  routed: 280/410  approved: 120/410  executed: 80/410
+  ```
+- The final summary shows end-to-end latency (avg/min/max), throughput, per-phase step and cumulative timing, pipeline counts, and any stuck transactions.
+- A JSON report is written to `axe-load-test-logs/axe-load-test-<timestamp>.json` after each run for post-mortem analysis.
+
+**Protocols supported in sustained mode:** GMP and ITS, both directions (Sol → EVM and EVM → Sol).
+
+**ITS note:** Token deployment happens once upfront (cached across runs). Each pool key is pre-funded with enough tokens for its share of the total transfers before the send phase begins.
+
+---
+
+**GMP (default):** Sends ABI-encoded string payloads via `callContract` through a deployed `SenderReceiver` contract. The contract address is cached after first deploy and reused across runs.
+
+**ITS (`--protocol its`):** Deploys an interchain token on the source chain, deploys the remote counterpart on the destination via the ITS Hub, then sends `InterchainTransfer` transactions. Supports both EVM → Sol and Sol → EVM directions.
+
+**Verification:** Polling covers the full pipeline: `voted → routed → approved → executed` (GMP), or `voted → hub-approved → second-leg discovery → routed → approved → executed` (ITS). In sustained mode, verification runs concurrently with sending. In burst mode, it runs after all sends complete. Inactivity timeout is 200 seconds — the poller resets the timeout each time any transaction makes progress.
+
+## Burst examples
+
+### GMP: SOL → EVM
 
 ```bash
 axe test load-test \
@@ -84,27 +126,17 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-## Load Test (EVM -> SOL)
+### GMP: EVM → SOL
 
 ```bash
 axe test load-test \
   --source-chain avalanche-fuji \
   --destination-chain solana-18 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
-```
-
-Override the number of transactions (default: 5):
-
-```bash
-axe test load-test \
-  --source-chain avalanche-fuji \
-  --destination-chain solana-18 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json \
   --num-txs 50 \
-  --source-rpc https://example.avalanche.fuji.rpc.com
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-## Load Test ITS (SOL -> EVM)
+### ITS: SOL → EVM
 
 ```bash
 axe test load-test \
@@ -114,7 +146,7 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-## Load Test ITS (EVM -> SOL)
+### ITS: EVM → SOL
 
 ```bash
 axe test load-test \
@@ -124,30 +156,79 @@ axe test load-test \
   --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
 ```
 
-## Load Test (stagenet)
+## Sustained examples
+
+### GMP: 10 tx/s for 5 minutes, SOL → EVM
+
+```bash
+axe test load-test \
+  --source-chain solana-18 \
+  --destination-chain avalanche-fuji \
+  --tps 10 \
+  --duration-secs 300 \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+```
+
+### GMP: 5 tx/s for 2 minutes, EVM → SOL
+
+```bash
+axe test load-test \
+  --source-chain avalanche-fuji \
+  --destination-chain solana-18 \
+  --tps 5 \
+  --duration-secs 120 \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+```
+
+### ITS: sustained EVM → SOL
+
+```bash
+axe test load-test \
+  --source-chain avalanche-fuji \
+  --destination-chain solana-18 \
+  --protocol its \
+  --tps 3 \
+  --duration-secs 180 \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+```
+
+## Stagenet / testnet / mainnet
 
 On stagenet/testnet/mainnet the relayer requires gas payment. Build with the appropriate feature flag:
 
 ```bash
-cargo install --path . --no-default-features --features stagenet
+# Build (use cargo build, not cargo install — see note below)
+cargo build --no-default-features --features stagenet
+cp target/debug/axe ~/.cargo/bin/axe
+
+# Burst
 axe test load-test \
-  --source-chain solana-stagenet-3 \
-  --destination-chain flow \
+  --source-chain flow \
+  --destination-chain solana-stagenet-3 \
+  --num-txs 100 \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json
+
+# Sustained with larger wallet pool for Flow
+EVM_PRIVATE_KEY=0x... axe test load-test \
+  --source-chain flow \
+  --destination-chain solana-stagenet-3 \
+  --tps 2 \
+  --duration-secs 120 \
+  --key-cycle 6 \
   --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
-  --num-txs 100
-```
+  --source-rpc https://your-flow-rpc-endpoint
 
-## Load Test ITS (stagenet)
-
-```bash
-cargo install --path . --no-default-features --features stagenet
+# ITS sustained
 axe test load-test \
-  --source-chain solana-stagenet-3 \
-  --destination-chain flow \
+  --source-chain flow \
+  --destination-chain solana-stagenet-3 \
   --protocol its \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
-  --num-txs 100
+  --tps 3 \
+  --duration-secs 120 \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json
 ```
+
+> **Note:** `cargo install --path .` does a clean compile which triggers a known borsh derive bug in `solana-axelar-std`. Use `cargo build` (incremental) + manual copy instead.
 
 Run `axe test load-test --help` for all options.
 
