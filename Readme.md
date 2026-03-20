@@ -190,3 +190,4 @@ All config lives in `.env` — see [`.env.example`](.env.example) for the full t
 | `MNEMONIC`                                                   | `test gmp`, `test its` (Amplifier routing) |
 | `ITS_*` vars                                                 | `deploy` (ITS steps), `test its`           |
 | `TARGET_JSON`                                                | all commands (reads chain config)          |
+| `ALCHEMY_TOKEN` (optional)                                   | `decode tx` (archive RPCs)                 |
