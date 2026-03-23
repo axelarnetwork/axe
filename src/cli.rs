@@ -109,6 +109,10 @@ pub enum TestCommands {
         #[arg(long)]
         source_rpc: Option<String>,
 
+        /// Override destination chain RPC URL (default: from config)
+        #[arg(long)]
+        destination_rpc: Option<String>,
+
         /// Hex-encoded payload to send (default: random test message)
         #[arg(long)]
         payload: Option<String>,
@@ -124,6 +128,20 @@ pub enum TestCommands {
         /// ITS token ID to use (hex, skips token deployment)
         #[arg(long)]
         token_id: Option<String>,
+
+        /// Transactions per second for sustained load test
+        #[arg(long)]
+        tps: Option<u64>,
+
+        /// Duration in seconds for sustained load test (use with --tps)
+        #[arg(long)]
+        duration_secs: Option<u64>,
+
+        /// Key cycle interval in seconds (default: 3). Each signing key waits this
+        /// many seconds before reuse. pool_size = tps × key_cycle. Higher values
+        /// use more wallets, reducing per-address mempool pressure.
+        #[arg(long, default_value = "3")]
+        key_cycle: u64,
     },
 }
 

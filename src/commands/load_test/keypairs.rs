@@ -1,8 +1,8 @@
-use anchor_lang::prelude::system_instruction;
-use alloy::primitives::keccak256;
 use alloy::primitives::U256;
+use alloy::primitives::keccak256;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
+use anchor_lang::prelude::system_instruction;
 use eyre::{Result, eyre};
 use indicatif::{ProgressBar, ProgressStyle};
 use solana_client::rpc_client::RpcClient;
@@ -50,11 +50,7 @@ pub fn derive_keypairs(main: &Keypair, count: usize) -> Result<Vec<Keypair>> {
 ///
 /// Shows a progress bar during funding. Returns the per-key balance after funding.
 #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
-pub fn ensure_funded(
-    rpc_url: &str,
-    main: &Keypair,
-    derived: &[Keypair],
-) -> Result<Vec<u64>> {
+pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Result<Vec<u64>> {
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
 
@@ -88,7 +84,10 @@ pub fn ensure_funded(
     }
 
     // Check main wallet has enough
-    let total_needed: u64 = to_fund.iter().map(|(_, deficit)| deficit + TRANSFER_FEE).sum();
+    let total_needed: u64 = to_fund
+        .iter()
+        .map(|(_, deficit)| deficit + TRANSFER_FEE)
+        .sum();
     if main_balance < total_needed + FUNDING_RESERVE {
         let needed_sol = (total_needed + FUNDING_RESERVE) as f64 / 1e9;
         let have_sol = main_balance as f64 / 1e9;
@@ -179,7 +178,10 @@ pub async fn ensure_funded_evm_with_extra<P: Provider>(
             .progress_chars("=> "),
     );
     for (i, signer) in derived.iter().enumerate() {
-        let balance = provider.get_balance(signer.address()).await.unwrap_or_default();
+        let balance = provider
+            .get_balance(signer.address())
+            .await
+            .unwrap_or_default();
         let bal: u128 = balance.to();
         if bal < min_needed {
             let deficit = target.saturating_sub(bal);

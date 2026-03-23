@@ -2,6 +2,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+/// How long to wait for an EVM tx receipt before giving up.
+/// Flow confirms in ~8s; other chains typically <20s. 30s catches everything real
+/// without wasting time on txs that were silently dropped by the mempool.
+const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(30);
+
 use alloy::{
     primitives::{Address, Bytes, FixedBytes, U256},
     providers::{Provider, ProviderBuilder},
@@ -13,13 +18,15 @@ use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::{LoadTestArgs, finish_report, read_its_cache, save_its_cache, validate_evm_rpc, validate_solana_rpc, check_evm_balance};
-use crate::cosmos::read_axelar_contract_field;
-use crate::evm::{
-    ERC20, InterchainTokenFactory,
-    InterchainTokenService,
+use super::{
+    LoadTestArgs, check_evm_balance, finish_report, read_its_cache, save_its_cache,
+    validate_evm_rpc, validate_solana_rpc,
 };
-use crate::commands::test_its::{extract_contract_call_event, extract_token_deployed_event, generate_salt};
+use crate::commands::test_its::{
+    extract_contract_call_event, extract_token_deployed_event, generate_salt,
+};
+use crate::cosmos::read_axelar_contract_field;
+use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -125,24 +132,39 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     #[allow(clippy::float_arithmetic)]
     {
-        ui::kv("gas value", &format!("{gas_value_wei} wei ({:.6} ETH)", gas_value_wei as f64 / 1e18));
+        ui::kv(
+            "gas value",
+            &format!(
+                "{gas_value_wei} wei ({:.6} ETH)",
+                gas_value_wei as f64 / 1e18
+            ),
+        );
     }
 
     // --- Token setup ---
-    let num_txs = args.num_txs.max(1) as usize;
+    let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
+    let (num_keys, total_expected) = if burst_mode {
+        let n = args.num_txs.max(1) as usize;
+        (n, args.num_txs.max(1))
+    } else {
+        let tps = args.tps.unwrap() as usize;
+        let dur = args.duration_secs.unwrap();
+        (tps * args.key_cycle as usize, tps as u64 * dur)
+    };
+    // Keep num_txs as alias for burst compat (equals num_keys in burst mode)
+    let num_txs = num_keys;
     // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
     // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
     let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
     // Distribute 1000x per key so cached tokens last across many runs.
     let amount_per_key = amount_per_tx * U256::from(1000);
-    let total_supply = amount_per_key * U256::from(num_txs + 10);
+    let total_supply = amount_per_key * U256::from(num_keys + 10);
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 
     let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
         // User provided a token ID
-        let token_id: FixedBytes<32> = tid.parse()
-            .map_err(|e| eyre!("invalid --token-id: {e}"))?;
+        let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
             .interchainTokenAddress(token_id)
             .call()
@@ -154,10 +176,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     } else {
         // Check cache
         let cache = read_its_cache(src, dest);
-        let cached = cache.get("tokenId").and_then(|v| v.as_str())
+        let cached = cache
+            .get("tokenId")
+            .and_then(|v| v.as_str())
             .and_then(|tid| tid.parse::<FixedBytes<32>>().ok())
             .and_then(|tid| {
-                cache.get("tokenAddress").and_then(|v| v.as_str())
+                cache
+                    .get("tokenAddress")
+                    .and_then(|v| v.as_str())
                     .and_then(|a| a.parse::<Address>().ok())
                     .map(|addr| (tid, addr))
             });
@@ -165,8 +191,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         if let Some((tid, addr)) = cached {
             // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
-            let needed = amount_per_key * U256::from(num_txs);
-            let balance = token.balanceOf(deployer_address).call().await.unwrap_or_default();
+            let needed = amount_per_key * U256::from(num_keys);
+            let balance = token
+                .balanceOf(deployer_address)
+                .call()
+                .await
+                .unwrap_or_default();
             if balance >= needed {
                 ui::info(&format!("reusing cached ITS token: {addr}"));
                 ui::kv("token ID (cached)", &format!("{tid}"));
@@ -225,17 +255,242 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     }
 
     // --- Derive N EVM signers ---
-    let derived = keypairs::derive_evm_signers(&main_key, num_txs)?;
+    let derived = keypairs::derive_evm_signers(&main_key, num_keys)?;
     ui::info(&format!("derived {} EVM signing keys", derived.len()));
 
-    // Fund derived wallets — each needs gas + gas_value for the interchain transfer
+    // Fund derived wallets.
+    // Burst: each key fires once → gas + 1× gas_value.
+    // Sustained: each key fires once every 3s → gas + ceil(duration/3)× gas_value.
     let funding_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    keypairs::ensure_funded_evm_with_extra(&funding_provider, &signer, &derived, gas_value_wei).await?;
+    let gas_extra_per_key = if burst_mode {
+        gas_value_wei
+    } else {
+        let dur = args.duration_secs.unwrap();
+        let rounds = dur.div_ceil(args.key_cycle);
+        let buffered = rounds + rounds / 5 + 1;
+        gas_value_wei.saturating_mul(buffered as u128)
+    };
+    keypairs::ensure_funded_evm_with_extra(&funding_provider, &signer, &derived, gas_extra_per_key)
+        .await?;
 
     // --- Distribute ITS tokens to derived wallets ---
     distribute_tokens(&write_provider, token_addr, &derived, amount_per_key).await?;
+
+    // Receiver address on Solana — use the default Solana keypair's pubkey.
+    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
+    let receiver_bytes = {
+        use solana_sdk::signer::Signer;
+        Bytes::from(sol_keypair.pubkey().to_bytes().to_vec())
+    };
+
+    // === SUSTAINED MODE ===
+    if !burst_mode {
+        let tps = args.tps.unwrap() as usize;
+        let duration_secs = args.duration_secs.unwrap();
+        let rpc_url_str = evm_rpc_url.clone();
+
+        // Pre-fetch nonces for all pool keys to avoid RPC "pending" unreliability.
+        let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+        let mut nonces: Vec<u64> = Vec::with_capacity(num_keys);
+        for signer in &derived {
+            let n = nonce_provider
+                .get_transaction_count(signer.address())
+                .await?;
+            nonces.push(n);
+        }
+
+        let metrics_list_s: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
+        let src_confirmed_s = Arc::new(AtomicU64::new(0));
+        let src_failed_s = Arc::new(AtomicU64::new(0));
+        let fired_ctr = Arc::new(AtomicU64::new(0));
+
+        let spinner = ui::wait_spinner(&format!(
+            "[0/{duration_secs}s] starting sustained ITS send..."
+        ));
+        let test_start = Instant::now();
+
+        let dest_chain_s = dest.to_string();
+
+        let mut all_tasks_s: Vec<tokio::task::JoinHandle<()>> =
+            Vec::with_capacity(total_expected as usize);
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let mut tick: u64 = 0;
+        loop {
+            interval.tick().await;
+            if tick >= duration_secs {
+                break;
+            }
+
+            let batch_start = (tick as usize % args.key_cycle as usize) * tps;
+            for i in 0..tps {
+                let key_idx = batch_start + i;
+
+                let nonce = nonces[key_idx];
+                nonces[key_idx] += 1;
+
+                let metrics_clone = Arc::clone(&metrics_list_s);
+                let confirmed_ctr = Arc::clone(&src_confirmed_s);
+                let failed_ctr = Arc::clone(&src_failed_s);
+                let fired = Arc::clone(&fired_ctr);
+                let dc = dest_chain_s.clone();
+                let gv = gas_value;
+                let rb = receiver_bytes.clone();
+                let amt = amount_per_tx;
+                let its_proxy = its_proxy_addr;
+                let tid = token_id;
+                let url = rpc_url_str.clone();
+
+                let provider = ProviderBuilder::new()
+                    .wallet(derived[key_idx].clone())
+                    .connect_http(url.parse()?);
+
+                fired.fetch_add(1, Ordering::Relaxed);
+
+                let handle = tokio::spawn(async move {
+                    let result = execute_interchain_transfer(
+                        &provider,
+                        its_proxy,
+                        tid,
+                        &dc,
+                        &rb,
+                        amt,
+                        gv,
+                        Some(nonce),
+                    )
+                    .await;
+                    if result.success {
+                        confirmed_ctr.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        failed_ctr.fetch_add(1, Ordering::Relaxed);
+                    }
+                    metrics_clone.lock().await.push(result);
+                });
+                all_tasks_s.push(handle);
+            }
+
+            let elapsed_s = test_start.elapsed().as_secs();
+            let f = fired_ctr.load(Ordering::Relaxed);
+            let c = src_confirmed_s.load(Ordering::Relaxed);
+            let fail = src_failed_s.load(Ordering::Relaxed);
+            spinner.set_message(format!(
+                "[{elapsed_s}/{duration_secs}s]  fired: {f}/{total_expected}  src-confirmed: {c}  failed: {fail}  (target: {tps} tx/s)"
+            ));
+            tick += 1;
+        }
+
+        let total_submitted_s = all_tasks_s.len() as u64;
+        {
+            let sp = spinner.clone();
+            let confirmed_c = Arc::clone(&src_confirmed_s);
+            let failed_c = Arc::clone(&src_failed_s);
+            let total = total_submitted_s;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    let c = confirmed_c.load(Ordering::Relaxed);
+                    let f = failed_c.load(Ordering::Relaxed);
+                    let in_flight = total.saturating_sub(c + f);
+                    sp.set_message(format!(
+                        "waiting for receipts: {c} confirmed  {f} failed  {in_flight} in-flight"
+                    ));
+                    if in_flight == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+        join_all(all_tasks_s).await;
+
+        let test_duration_s = test_start.elapsed().as_secs_f64();
+        let confirmed_count_s = src_confirmed_s.load(Ordering::Relaxed);
+        spinner.finish_and_clear();
+        ui::success(&format!(
+            "send phase complete: {confirmed_count_s}/{total_submitted_s} src-confirmed in {test_duration_s:.1}s"
+        ));
+
+        let metrics_s = metrics_list_s.lock().await.clone();
+        let total_confirmed_s = metrics_s.iter().filter(|m| m.success).count() as u64;
+        let total_failed_s = metrics_s.iter().filter(|m| !m.success).count() as u64;
+
+        if total_failed_s > 0 {
+            let mut error_counts: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
+            for m in metrics_s.iter().filter(|m| !m.success) {
+                let reason = m
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .chars()
+                    .take(120)
+                    .collect::<String>();
+                *error_counts.entry(reason).or_default() += 1;
+            }
+            for (reason, count) in &error_counts {
+                ui::warn(&format!("{count} txs failed: {reason}"));
+            }
+        }
+
+        let latencies_s: Vec<u64> = metrics_s.iter().filter_map(|m| m.latency_ms).collect();
+
+        #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+        let mut report = LoadTestReport {
+            source_chain: src.to_string(),
+            destination_chain: dest.to_string(),
+            destination_address: format!("{its_proxy_addr}"),
+            num_txs: total_expected,
+            num_keys,
+            total_submitted: total_submitted_s,
+            total_confirmed: total_confirmed_s,
+            total_failed: total_failed_s,
+            test_duration_secs: test_duration_s,
+            tps_submitted: if test_duration_s > 0.0 {
+                total_submitted_s as f64 / test_duration_s
+            } else {
+                0.0
+            },
+            tps_confirmed: if test_duration_s > 0.0 {
+                total_confirmed_s as f64 / test_duration_s
+            } else {
+                0.0
+            },
+            landing_rate: if total_submitted_s > 0 {
+                total_confirmed_s as f64 / total_submitted_s as f64
+            } else {
+                0.0
+            },
+            avg_latency_ms: if latencies_s.is_empty() {
+                None
+            } else {
+                Some(latencies_s.iter().sum::<u64>() as f64 / latencies_s.len() as f64)
+            },
+            min_latency_ms: latencies_s.iter().min().copied(),
+            max_latency_ms: latencies_s.iter().max().copied(),
+            avg_compute_units: None,
+            min_compute_units: None,
+            max_compute_units: None,
+            verification: None,
+            transactions: metrics_s,
+        };
+
+        let verification = super::verify::verify_onchain_solana_its(
+            &args.config,
+            &args.source_chain,
+            &args.destination_chain,
+            &format!("{its_proxy_addr}"),
+            &args.solana_rpc,
+            &mut report.transactions,
+        )
+        .await?;
+        report.verification = Some(verification);
+
+        return finish_report(&args, &report, test_start);
+    }
+    // === END SUSTAINED MODE ===
 
     // --- Parallel interchainTransfer sends via ITS Service ---
     // Each derived key calls ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)
@@ -248,13 +503,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let mut tasks = Vec::with_capacity(num_txs);
     let dest_chain = dest.to_string();
-
-    // Receiver address on Solana — use the default Solana keypair's pubkey.
-    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-    let receiver_bytes = {
-        use solana_sdk::signer::Signer;
-        Bytes::from(sol_keypair.pubkey().to_bytes().to_vec())
-    };
 
     for derived_signer in &derived {
         let metrics_clone = Arc::clone(&metrics_list);
@@ -278,16 +526,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result = execute_interchain_transfer(
-                    &provider,
-                    its_proxy,
-                    tid,
-                    &dc,
-                    &rb,
-                    amt,
-                    gv,
-                )
-                .await;
+                let result =
+                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, None)
+                        .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);
@@ -498,25 +739,28 @@ async fn distribute_tokens<P: Provider>(
 ) -> eyre::Result<()> {
     let token = ERC20::new(token_addr, provider);
 
-    let spinner = ui::wait_spinner(&format!(
-        "distributing tokens to {} keys...",
-        derived.len()
-    ));
+    let spinner = ui::wait_spinner(&format!("distributing tokens to {} keys...", derived.len()));
 
     for (i, signer) in derived.iter().enumerate() {
         // Check existing balance first
-        let balance = token.balanceOf(signer.address()).call().await.unwrap_or_default();
+        let balance = token
+            .balanceOf(signer.address())
+            .call()
+            .await
+            .unwrap_or_default();
         if balance >= amount_per_key {
             continue;
         }
 
         let call = token.transfer(signer.address(), amount_per_key);
-        let pending = call.send().await.map_err(|e| {
-            eyre!("failed to transfer tokens to key {i}: {e}")
-        })?;
-        pending.get_receipt().await.map_err(|e| {
-            eyre!("token transfer to key {i} failed: {e}")
-        })?;
+        let pending = call
+            .send()
+            .await
+            .map_err(|e| eyre!("failed to transfer tokens to key {i}: {e}"))?;
+        pending
+            .get_receipt()
+            .await
+            .map_err(|e| eyre!("token transfer to key {i} failed: {e}"))?;
 
         spinner.set_message(format!(
             "distributing tokens ({}/{} done)...",
@@ -526,10 +770,7 @@ async fn distribute_tokens<P: Provider>(
     }
 
     spinner.finish_and_clear();
-    ui::success(&format!(
-        "distributed tokens to {} keys",
-        derived.len()
-    ));
+    ui::success(&format!("distributed tokens to {} keys", derived.len()));
     Ok(())
 }
 
@@ -537,6 +778,10 @@ async fn distribute_tokens<P: Provider>(
 ///
 /// Calls `ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)`
 /// which internally wraps the payload as SEND_TO_HUB and emits a ContractCall to "axelar".
+///
+/// `explicit_nonce`: when `Some`, bypasses alloy's RPC-based nonce fetch to avoid
+/// collisions when the same key fires again before the previous tx confirms.
+#[allow(clippy::too_many_arguments)]
 async fn execute_interchain_transfer<P: Provider>(
     provider: &P,
     its_proxy: Address,
@@ -545,11 +790,12 @@ async fn execute_interchain_transfer<P: Provider>(
     receiver_bytes: &Bytes,
     amount: U256,
     gas_value: U256,
+    explicit_nonce: Option<u64>,
 ) -> TxMetrics {
     let submit_start = Instant::now();
 
     let its = InterchainTokenService::new(its_proxy, provider);
-    let call = its
+    let base_call = its
         .interchainTransfer(
             token_id,
             dest_chain.to_string(),
@@ -559,18 +805,28 @@ async fn execute_interchain_transfer<P: Provider>(
             gas_value,
         )
         .value(gas_value);
+    let call = match explicit_nonce {
+        Some(n) => base_call.nonce(n),
+        None => base_call,
+    };
 
     match call.send().await {
         Ok(pending) => {
             let tx_hash = *pending.tx_hash();
-            match tokio::time::timeout(Duration::from_secs(120), pending.get_receipt()).await {
+            match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
                     #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     // Extract full ContractCall event data
                     match extract_contract_call_event(&receipt) {
-                        Ok((event_index, _payload, payload_hash_bytes, dest_chain, dest_address)) => {
+                        Ok((
+                            event_index,
+                            _payload,
+                            payload_hash_bytes,
+                            dest_chain,
+                            dest_address,
+                        )) => {
                             let message_id = format!("{tx_hash:#x}-{event_index}");
                             let source_address = format!("{its_proxy}");
                             let payload_hash = alloy::hex::encode(payload_hash_bytes.as_slice());
@@ -593,11 +849,13 @@ async fn execute_interchain_transfer<P: Provider>(
                                 amplifier_timing: None,
                             }
                         }
-                        Err(e) => make_failure(submit_start, &format!("no ContractCall event: {e}")),
+                        Err(e) => {
+                            make_failure(submit_start, &format!("no ContractCall event: {e}"))
+                        }
                     }
                 }
-                Ok(Err(e)) => make_failure(submit_start, &e.to_string()),
-                Err(_) => make_failure(submit_start, "tx timed out"),
+                Ok(Err(e)) => make_failure_with_hash(submit_start, &e.to_string(), Some(tx_hash)),
+                Err(_) => make_failure_with_hash(submit_start, "tx timed out", Some(tx_hash)),
             }
         }
         Err(e) => make_failure(submit_start, &e.to_string()),
@@ -605,10 +863,18 @@ async fn execute_interchain_transfer<P: Provider>(
 }
 
 fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
+    make_failure_with_hash(submit_start, error, None)
+}
+
+fn make_failure_with_hash(
+    submit_start: Instant,
+    error: &str,
+    tx_hash: Option<alloy::primitives::TxHash>,
+) -> TxMetrics {
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
-        signature: String::new(),
+        signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),
         submit_time_ms: elapsed_ms,
         confirm_time_ms: None,
         latency_ms: None,

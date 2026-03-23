@@ -2,3 +2,5 @@
 .env
 cache/
 output/
+.claude/
+axe-load-test-logs/
