@@ -375,7 +375,6 @@ async fn execute_and_record_evm<P: Provider>(
 /// Uses a rotating pool of `tps * 3` derived wallets, cycling each key every 3 seconds.
 /// Sends `tps` txs per second for `duration_secs` seconds total.
 #[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     sender_receiver_addr: Address,
@@ -520,11 +519,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 // Lock once: get idx, stream to verify, then push.
                 let mut guard = metrics_clone.lock().await;
                 let idx = guard.len();
-                if result.success {
-                    if let Some(ref tx_sender) = vtx {
+                if result.success
+                    && let Some(ref tx_sender) = vtx {
                         let pending = super::verify::tx_to_pending_solana(&result, idx, &sc, has_vv);
                         let _ = tx_sender.send(pending);
-                    }
                 }
                 guard.push(result);
             });

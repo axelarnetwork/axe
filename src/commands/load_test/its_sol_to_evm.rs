@@ -153,7 +153,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     let amount_per_key_dist = if burst_mode {
         AMOUNT_PER_KEY
     } else {
-        let txs_per_key = (args.duration_secs.unwrap() + 2) / 3;
+        let txs_per_key = args.duration_secs.unwrap().div_ceil(3);
         AMOUNT_PER_TX * txs_per_key * 2
     };
     distribute_its_tokens(
@@ -324,7 +324,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
             destination_chain: dest.to_string(),
             destination_address: format!("{its_proxy_addr}"),
             num_txs: total_expected,
-            num_keys: num_keys,
+            num_keys,
             total_submitted: total_submitted_s,
             total_confirmed: total_confirmed_s,
             total_failed: total_failed_s,

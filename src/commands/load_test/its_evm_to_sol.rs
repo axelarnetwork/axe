@@ -443,7 +443,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             destination_chain: dest.to_string(),
             destination_address: format!("{its_proxy_addr}"),
             num_txs: total_expected,
-            num_keys: num_keys,
+            num_keys,
             total_submitted: total_submitted_s,
             total_confirmed: total_confirmed_s,
             total_failed: total_failed_s,
@@ -781,6 +781,7 @@ async fn distribute_tokens<P: Provider>(
 ///
 /// `explicit_nonce`: when `Some`, bypasses alloy's RPC-based nonce fetch to avoid
 /// collisions when the same key fires again before the previous tx confirms.
+#[allow(clippy::too_many_arguments)]
 async fn execute_interchain_transfer<P: Provider>(
     provider: &P,
     its_proxy: Address,

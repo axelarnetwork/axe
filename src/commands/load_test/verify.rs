@@ -246,7 +246,7 @@ async fn poll_pipeline<P: Provider>(
             }
         }
 
-        let sending_complete = send_done.map_or(true, |f| f.load(Ordering::Relaxed));
+        let sending_complete = send_done.is_none_or(|f| f.load(Ordering::Relaxed));
 
         let total = txs.len();
         if total == 0 {
