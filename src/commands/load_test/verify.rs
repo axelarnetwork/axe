@@ -11,7 +11,7 @@ use serde_json::json;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
-use super::metrics::{AmplifierTiming, FailureCategory, TxMetrics, VerificationReport};
+use super::metrics::{AmplifierTiming, FailureCategory, PeakThroughput, TxMetrics, VerificationReport};
 use crate::cosmos::{
     lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
     rpc_tx_search_event,
@@ -234,7 +234,7 @@ async fn poll_pipeline<P: Provider>(
     mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
     send_done: Option<&AtomicBool>,
     external_spinner: Option<indicatif::ProgressBar>,
-) {
+) -> PeakThroughput {
     let spinner = external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
     let mut last_progress = Instant::now();
 
@@ -574,6 +574,8 @@ async fn poll_pipeline<P: Provider>(
         ),
         label,
     );
+
+    compute_peak_throughput(txs)
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,7 +1077,7 @@ pub async fn verify_onchain<P: Provider>(
         gw_contract: &gw_contract,
     };
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1092,7 +1094,7 @@ pub async fn verify_onchain<P: Provider>(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1162,7 +1164,7 @@ pub async fn verify_onchain_solana_streaming(
 
     let mut txs: Vec<PendingTx> = Vec::new();
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1179,7 +1181,7 @@ pub async fn verify_onchain_solana_streaming(
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut []);
+    let report = compute_verification_report(&txs, &mut [], peaks);
     let timings: Vec<(usize, AmplifierTiming)> = txs
         .iter()
         .map(|tx| (tx.idx, tx.timing.clone()))
@@ -1273,7 +1275,7 @@ pub async fn verify_onchain_solana(
             _phantom: std::marker::PhantomData,
         };
 
-    poll_pipeline(
+    let peaks = poll_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1290,7 +1292,7 @@ pub async fn verify_onchain_solana(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1394,7 +1396,8 @@ pub async fn verify_onchain_solana_its(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let peaks = compute_peak_throughput(&txs);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -1493,7 +1496,8 @@ pub async fn verify_onchain_evm_its(
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics);
+    let peaks = compute_peak_throughput(&txs);
+    let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
 }
 
@@ -2231,12 +2235,52 @@ async fn check_evm_is_message_approved<P: Provider>(
 // Shared report computation
 // ---------------------------------------------------------------------------
 
+/// Compute peak throughput per pipeline step using 5-second sliding windows
+/// over the absolute completion timestamps.
+/// Compute sustained throughput per pipeline step: count / (last - first) on
+/// absolute completion timestamps. The lowest value is the pipeline bottleneck.
+#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
+    let Some(epoch) = txs.iter().map(|t| t.send_instant).min() else {
+        return PeakThroughput::default();
+    };
+
+    let mut voted_times: Vec<f64> = Vec::new();
+    let mut routed_times: Vec<f64> = Vec::new();
+    let mut approved_times: Vec<f64> = Vec::new();
+    let mut executed_times: Vec<f64> = Vec::new();
+
+    for tx in txs {
+        let base = tx.send_instant.duration_since(epoch).as_secs_f64();
+        if let Some(s) = tx.timing.voted_secs { voted_times.push(base + s); }
+        if let Some(s) = tx.timing.routed_secs { routed_times.push(base + s); }
+        if let Some(s) = tx.timing.approved_secs { approved_times.push(base + s); }
+        if let Some(s) = tx.timing.executed_secs { executed_times.push(base + s); }
+    }
+
+    fn sustained_rate(times: &[f64]) -> Option<f64> {
+        if times.len() < 2 { return None; }
+        let min = times.iter().cloned().reduce(f64::min)?;
+        let max = times.iter().cloned().reduce(f64::max)?;
+        let span = max - min;
+        if span > 0.0 { Some(times.len() as f64 / span) } else { None }
+    }
+
+    PeakThroughput {
+        voted_tps: sustained_rate(&voted_times),
+        routed_tps: sustained_rate(&routed_times),
+        approved_tps: sustained_rate(&approved_times),
+        executed_tps: sustained_rate(&executed_times),
+    }
+}
+
 /// Compute the `VerificationReport` from pending tx results, writing timings
 /// back into the original metrics array.
 #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 fn compute_verification_report(
     txs: &[PendingTx],
     metrics: &mut [TxMetrics],
+    peak_throughput: PeakThroughput,
 ) -> VerificationReport {
     let mut successful = 0u64;
     let mut failed = 0u64;
@@ -2326,6 +2370,7 @@ fn compute_verification_report(
         min_executed_secs: min_executed,
         max_executed_secs: max_executed,
         time_to_last_success_secs: time_to_last_success,
+        peak_throughput,
         stuck: stuck_count,
         stuck_at,
     }

@@ -1004,46 +1004,18 @@ fn print_final_report(report: &LoadTestReport) {
             _ => {}
         }
 
-        // Throughput: compute on a common clock.
-        // absolute_execution = submit_time_ms/1000 + executed_secs (both relative to test start).
+        // Sustained throughput per pipeline step (tx/s over each step's full span).
         {
-            let mut abs_times: Vec<f64> = report
-                .transactions
-                .iter()
-                .filter_map(|t| {
-                    let exec = t.amplifier_timing.as_ref()?.executed_secs?;
-                    Some(t.submit_time_ms as f64 / 1000.0 + exec)
-                })
-                .collect();
-            abs_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = abs_times.len();
-            if n > 1 {
-                let first = abs_times[0];
-                let last = abs_times[n - 1];
-                let window = last - first;
-                if window > 0.0 {
-                    let throughput = n as f64 / window;
-                    println!("  throughput       {throughput:.1} tx/s");
-
-                    // Percentile throughputs with symmetric trim: for pN, drop
-                    // (100-N)/2 % from each tail, then compute exit rate on the middle.
-                    // e.g. p90 = drop slowest 5% and fastest 5%, rate of middle 90%.
-                    let mut parts = Vec::new();
-                    for (label, pct) in [("p50", 0.50), ("p90", 0.90), ("p99", 0.99)] {
-                        let trim = (1.0 - pct) / 2.0;
-                        let lo = (n as f64 * trim) as usize;
-                        let hi = ((n as f64 * (1.0 - trim)) as usize).min(n - 1);
-                        if hi > lo {
-                            let count = hi - lo + 1;
-                            let p_window = abs_times[hi] - abs_times[lo];
-                            if p_window > 0.0 {
-                                parts.push(format!("{label} {:.1} tx/s", count as f64 / p_window));
-                            }
-                        }
-                    }
-                    if !parts.is_empty() {
-                        println!("    {}", parts.join(" │ "));
-                    }
+            let p = &v.peak_throughput;
+            let mut parts = Vec::new();
+            if let Some(t) = p.voted_tps { parts.push(("voted", t)); }
+            if let Some(t) = p.routed_tps { parts.push(("routed", t)); }
+            if let Some(t) = p.approved_tps { parts.push(("approved", t)); }
+            if let Some(t) = p.executed_tps { parts.push(("executed", t)); }
+            if !parts.is_empty() {
+                println!("  throughput (sustained, tx/s)");
+                for (name, rate) in &parts {
+                    println!("    {name:<14} {rate:.1}");
                 }
             }
         }

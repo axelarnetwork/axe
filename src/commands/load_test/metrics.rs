@@ -101,10 +101,22 @@ pub struct VerificationReport {
     pub max_executed_secs: Option<f64>,
     /// Seconds from earliest send to last successful execution (for throughput).
     pub time_to_last_success_secs: Option<f64>,
+    /// Peak throughput (tx/s) observed per pipeline step in a 5s sliding window.
+    #[serde(default)]
+    pub peak_throughput: PeakThroughput,
     /// Number of txs that timed out before completing all phases.
     pub stuck: u64,
     /// Which phase each stuck tx got stuck at.
     pub stuck_at: Vec<FailureCategory>,
+}
+
+/// Peak throughput per pipeline step, measured in 5-second sliding windows.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PeakThroughput {
+    pub voted_tps: Option<f64>,
+    pub routed_tps: Option<f64>,
+    pub approved_tps: Option<f64>,
+    pub executed_tps: Option<f64>,
 }
 
 /// Categorized failure count.
