@@ -996,15 +996,6 @@ pub enum SourceChainType {
 /// 3. **Approved** — EVM gateway isMessageApproved
 /// 4. **Executed** — EVM approval consumed
 #[allow(clippy::too_many_arguments)]
-/// Source chain type — determines how message IDs are constructed.
-#[derive(Clone, Copy)]
-pub enum SourceChainType {
-    /// Solana source: message ID = `{signature}-{group}.{index}`
-    Svm,
-    /// EVM source: message ID = `{tx_hash}-{event_index}` (already in tx.signature)
-    Evm,
-}
-
 pub async fn verify_onchain<P: Provider>(
     config: &Path,
     source_chain: &str,
