@@ -19,25 +19,27 @@ async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Commands::Init => commands::init::run().await,
-        cli::Commands::Status { axelar_id } => commands::status::run(axelar_id),
-        cli::Commands::Deploy {
-            axelar_id,
-            private_key,
-            artifact_path,
-            salt,
-            proxy_artifact_path,
-        } => {
-            commands::deploy::run(
+        cli::Commands::Deploy { subcommand } => match subcommand {
+            cli::DeployCommands::Init => commands::init::run().await,
+            cli::DeployCommands::Status { axelar_id } => commands::status::run(axelar_id),
+            cli::DeployCommands::Run {
                 axelar_id,
                 private_key,
                 artifact_path,
                 salt,
                 proxy_artifact_path,
-            )
-            .await
-        }
-        cli::Commands::Reset { axelar_id } => commands::reset::run(axelar_id),
+            } => {
+                commands::deploy::run(
+                    axelar_id,
+                    private_key,
+                    artifact_path,
+                    salt,
+                    proxy_artifact_path,
+                )
+                .await
+            }
+            cli::DeployCommands::Reset { axelar_id } => commands::reset::run(axelar_id),
+        },
         cli::Commands::Decode { subcommand } => match subcommand {
             cli::DecodeCommands::Calldata { hex } => {
                 let joined = hex.join("");

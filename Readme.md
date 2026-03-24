@@ -18,8 +18,8 @@ cd axe
 cargo build && cp target/debug/axe ~/.cargo/bin/axe
 
 # 4. Initialize and deploy
-axe init
-axe deploy
+axe deploy init
+axe deploy run
 ```
 
 ```
@@ -32,10 +32,10 @@ workspace/
 
 | Command              | Description                                   | Relayer |
 | -------------------- | --------------------------------------------- | ------- |
-| `axe init`           | Initialize a new chain deployment from `.env` | -       |
-| `axe deploy`         | Run all deployment steps sequentially         | -       |
-| `axe status`         | Show deployment progress                      | -       |
-| `axe reset`          | Reset all steps to pending                    | -       |
+| `axe deploy init`    | Initialize a new chain deployment from `.env` | -       |
+| `axe deploy run`     | Run all deployment steps sequentially         | -       |
+| `axe deploy status`  | Show deployment progress                      | -       |
+| `axe deploy reset`   | Reset all steps to pending                    | -       |
 | `axe test gmp`       | End-to-end GMP loopback test                  | no      |
 | `axe test its`       | Deploy + transfer an interchain token         | no      |
 | `axe test load-test` | Cross-chain load test                         | yes     |
@@ -45,9 +45,9 @@ workspace/
 ## Deploy
 
 ```bash
-axe deploy              # runs all 23 steps sequentially
-axe status              # shows progress
-axe reset               # start over
+axe deploy run          # runs all 23 steps sequentially
+axe deploy status       # shows progress
+axe deploy reset        # start over
 ```
 
 ## Test GMP

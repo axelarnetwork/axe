@@ -14,6 +14,27 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Deploy and manage chain deployments
+    Deploy {
+        #[command(subcommand)]
+        subcommand: DeployCommands,
+    },
+
+    /// Test GMP or ITS functionality
+    Test {
+        #[command(subcommand)]
+        subcommand: TestCommands,
+    },
+
+    /// Decode EVM calldata or full transactions
+    Decode {
+        #[command(subcommand)]
+        subcommand: DecodeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DeployCommands {
     /// Initialize a new chain deployment (reads all config from .env / environment)
     Init,
 
@@ -24,7 +45,7 @@ pub enum Commands {
     },
 
     /// Run all pending deployment steps
-    Deploy {
+    Run {
         #[arg(long)]
         axelar_id: Option<String>,
         /// Private key override (auto-resolved per step by default)
@@ -45,18 +66,6 @@ pub enum Commands {
     Reset {
         #[arg(long)]
         axelar_id: Option<String>,
-    },
-
-    /// Test GMP or ITS functionality
-    Test {
-        #[command(subcommand)]
-        subcommand: TestCommands,
-    },
-
-    /// Decode EVM calldata or full transactions
-    Decode {
-        #[command(subcommand)]
-        subcommand: DecodeCommands,
     },
 }
 
