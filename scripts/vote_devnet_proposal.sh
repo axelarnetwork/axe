@@ -26,7 +26,14 @@ echo "$pods"
 echo ""
 
 for pod in $pods; do
-    cmd="kubectl exec -n $namespace -it $pod -c axelar-core-node -- /bin/sh -c \"echo \\\"\\\$KEYRING_PASSWORD\\\" | axelard tx gov vote $proposal_id yes --from validator --gas 80000 --gas-adjustment 1.4\""
+    # alpha pod uses "axelar-core-node" container, others use "core"
+    if echo "$pod" | grep -q "alpha"; then
+        container="axelar-core-node"
+    else
+        container="core"
+    fi
+
+    cmd="kubectl exec -n $namespace -it $pod -c $container -- /bin/sh -c \"echo \\\"\\\$KEYRING_PASSWORD\\\" | axelard tx gov vote $proposal_id yes --from validator --gas 80000 --gas-adjustment 1.4\""
     if [ "$dry_run" = true ]; then
         echo "[DRY RUN] $cmd"
     else
