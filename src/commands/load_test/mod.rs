@@ -72,8 +72,8 @@ pub struct LoadTestArgs {
     pub protocol: Protocol,
     pub destination_chain: String,
     pub source_chain: String,
-    pub solana_rpc: String,
-    pub source_rpc: Option<String>,
+    pub source_rpc: String,
+    pub destination_rpc: String,
     pub private_key: Option<String>,
     pub num_txs: u64,
     pub keypair: Option<String>,
@@ -155,8 +155,8 @@ pub struct ResolvedConfig {
     pub test_type: TestType,
     pub source_chain: String,
     pub destination_chain: String,
-    pub solana_rpc: String,
-    pub source_rpc: Option<String>,
+    pub source_rpc: String,
+    pub destination_rpc: String,
     pub private_key: Option<String>,
 }
 
@@ -213,29 +213,31 @@ pub fn resolve_from_config(
     };
 
     // --- Read RPCs ---
-    let solana_rpc = match test_type {
-        TestType::SolToEvm => chains
-            .get(&source_chain)
-            .and_then(|v| v.get("rpc"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre::eyre!("no RPC URL for source chain '{source_chain}' in config"))?
-            .to_string(),
-        TestType::EvmToSol => chains
-            .get(&destination_chain)
-            .and_then(|v| v.get("rpc"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                eyre::eyre!("no RPC URL for destination chain '{destination_chain}' in config")
-            })?
-            .to_string(),
-    };
+    let source_rpc = chains
+        .get(&source_chain)
+        .and_then(|v| v.get("rpc"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("no RPC URL for source chain '{source_chain}' in config"))?
+        .to_string();
+    let destination_rpc = chains
+        .get(&destination_chain)
+        .and_then(|v| v.get("rpc"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            eyre::eyre!("no RPC URL for destination chain '{destination_chain}' in config")
+        })?
+        .to_string();
+
+    let resolved_source_rpc = source_rpc_override.unwrap_or(source_rpc);
+    ui::kv("source RPC", &resolved_source_rpc);
+    ui::kv("destination RPC", &destination_rpc);
 
     Ok(ResolvedConfig {
         test_type,
         source_chain,
         destination_chain,
-        solana_rpc,
-        source_rpc: source_rpc_override,
+        source_rpc: resolved_source_rpc,
+        destination_rpc,
         private_key: private_key_override,
     })
 }
@@ -490,26 +492,18 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     }
 }
 
-async fn run_sol_to_evm(mut args: LoadTestArgs, _run_start: Instant) -> Result<()> {
-    // --source-rpc overrides the Solana (source) RPC
-    if let Some(rpc) = args.source_rpc.take() {
-        args.solana_rpc = rpc;
-    }
+async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let dest = &args.destination_chain;
     let src = &args.source_chain;
 
-    // --- Read chain info from chains config JSON ---
     let config_content = std::fs::read_to_string(&args.config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
     let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
 
-    let rpc_url = config_root
-        .pointer(&format!("/chains/{dest}/rpc"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no rpc URL for chain '{dest}' in config"))?;
+    let rpc_url = &args.destination_rpc;
 
     // Validate RPCs before doing any work
-    validate_solana_rpc(&args.solana_rpc).await?;
+    validate_solana_rpc(&args.source_rpc).await?;
     validate_evm_rpc(rpc_url).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
@@ -620,23 +614,15 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    // --- Read SOURCE EVM chain info ---
     let config_content = std::fs::read_to_string(&args.config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
     let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
 
-    let evm_rpc_url = match &args.source_rpc {
-        Some(rpc) => rpc.clone(),
-        None => config_root
-            .pointer(&format!("/chains/{src}/rpc"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre::eyre!("no rpc URL for source chain '{src}' in config"))?
-            .to_string(),
-    };
+    let evm_rpc_url = args.source_rpc.clone();
 
     // Validate RPCs before doing any work
     validate_evm_rpc(&evm_rpc_url).await?;
-    validate_solana_rpc(&args.solana_rpc).await?;
+    validate_solana_rpc(&args.destination_rpc).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
     if read_axelar_contract_field(
@@ -736,7 +722,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let vsource = args.source_chain.clone();
         let vdest = args.destination_chain.clone();
         let vdest_addr = destination_address.to_string();
-        let vsolana_rpc = args.solana_rpc.clone();
+        let vdest_rpc = args.destination_rpc.clone();
         let vdone = std::sync::Arc::clone(&send_done);
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
@@ -745,7 +731,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
                 &vsource,
                 &vdest,
                 &vdest_addr,
-                &vsolana_rpc,
+                &vdest_rpc,
                 verify_rx,
                 vdone,
                 spinner,
@@ -790,7 +776,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &args.source_chain,
             &args.destination_chain,
             destination_address,
-            &args.solana_rpc,
+            &args.destination_rpc,
             &mut report.transactions,
         )
         .await?;

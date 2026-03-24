@@ -63,7 +63,6 @@ async fn main() -> Result<()> {
                 private_key,
                 keypair,
                 source_rpc,
-                destination_rpc,
                 payload,
                 protocol,
                 gas_value,
@@ -81,17 +80,14 @@ async fn main() -> Result<()> {
                     source_rpc,
                 )?;
 
-                // Use --destination-rpc override if provided, otherwise fall back to config.
-                let solana_rpc = destination_rpc.unwrap_or(resolved.solana_rpc);
-
                 commands::load_test::run(commands::load_test::LoadTestArgs {
                     config,
                     test_type: resolved.test_type,
                     protocol,
                     destination_chain: resolved.destination_chain,
                     source_chain: resolved.source_chain,
-                    solana_rpc,
                     source_rpc: resolved.source_rpc,
+                    destination_rpc: resolved.destination_rpc,
                     private_key: resolved.private_key,
                     num_txs,
                     keypair,

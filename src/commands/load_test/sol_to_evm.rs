@@ -82,7 +82,7 @@ pub async fn run_load_test_with_metrics(
 
     // Check main wallet balance
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        &args.solana_rpc,
+        &args.source_rpc,
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
     let pubkey = main_keypair.pubkey();
@@ -97,7 +97,7 @@ pub async fn run_load_test_with_metrics(
     }
 
     // Derive and fund keypairs (1 key per tx to avoid nonce contention)
-    let keypairs = prepare_keypairs(&args.solana_rpc, num_txs, &main_keypair)?;
+    let keypairs = prepare_keypairs(&args.source_rpc, num_txs, &main_keypair)?;
     let keypairs = Arc::new(keypairs);
     let key_count = keypairs.len();
 
@@ -110,7 +110,7 @@ pub async fn run_load_test_with_metrics(
     let mut pending_tasks = Vec::new();
 
     let test_start = Instant::now();
-    let solana_rpc = args.solana_rpc.clone();
+    let solana_rpc = args.source_rpc.clone();
 
     let confirmed_counter = Arc::new(AtomicU64::new(0));
     let spinner = ui::wait_spinner(&format!("sending (0/{key_count} confirmed)..."));
@@ -265,7 +265,7 @@ pub async fn run_sustained_load_test_with_metrics(
 
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        &args.solana_rpc,
+        &args.source_rpc,
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
     let pubkey = main_keypair.pubkey();
@@ -285,7 +285,7 @@ pub async fn run_sustained_load_test_with_metrics(
     };
 
     // Derive and fund pool
-    let keypairs_pool = prepare_keypairs(&args.solana_rpc, pool_size, &main_keypair)?;
+    let keypairs_pool = prepare_keypairs(&args.source_rpc, pool_size, &main_keypair)?;
     let keypairs_pool = Arc::new(keypairs_pool);
     ui::info(&format!(
         "derived {} Solana signing keys (pool: {} tx/s × {}s cycle)",
@@ -296,7 +296,7 @@ pub async fn run_sustained_load_test_with_metrics(
 
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
-    let solana_rpc = args.solana_rpc.clone();
+    let solana_rpc = args.source_rpc.clone();
 
     let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
         let kp = Arc::clone(&keypairs_pool[key_idx]);

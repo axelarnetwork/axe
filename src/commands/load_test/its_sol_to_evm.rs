@@ -41,28 +41,14 @@ fn default_gas_value() -> u64 {
     }
 }
 
-pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
-    // --source-rpc overrides the Solana (source) RPC
-    if let Some(rpc) = args.source_rpc.take() {
-        args.solana_rpc = rpc;
-    }
-
+pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    // --- Read config ---
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
-    let evm_rpc_url = config_root
-        .pointer(&format!("/chains/{dest}/rpc"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("no rpc URL for destination chain '{dest}' in config"))?
-        .to_string();
+    let evm_rpc_url = args.destination_rpc.clone();
 
     // Validate RPCs
-    validate_solana_rpc(&args.solana_rpc).await?;
+    validate_solana_rpc(&args.source_rpc).await?;
     validate_evm_rpc(&evm_rpc_url).await?;
 
     // Check verification contracts exist
@@ -89,7 +75,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     // --- Solana keypair ---
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        &args.solana_rpc,
+        &args.source_rpc,
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
     let pubkey = main_keypair.pubkey();
@@ -131,7 +117,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
 
     // --- Token setup ---
     let (token_id, _salt, mint) = setup_its_token(
-        &args.solana_rpc,
+        &args.source_rpc,
         &main_keypair,
         src,
         dest,
@@ -149,7 +135,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
     ui::address("mint", &mint.to_string());
 
     // --- Derive and fund keypairs ---
-    let keypairs = prepare_keypairs(&args.solana_rpc, num_keys, &main_keypair)?;
+    let keypairs = prepare_keypairs(&args.source_rpc, num_keys, &main_keypair)?;
     let key_count = keypairs.len();
 
     // --- Create ATAs and distribute tokens ---
@@ -160,7 +146,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         AMOUNT_PER_TX * txs_per_key * 2
     };
     distribute_its_tokens(
-        &args.solana_rpc,
+        &args.source_rpc,
         &main_keypair,
         &keypairs,
         &mint,
@@ -186,7 +172,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
 
         let dest_chain_s = dest.to_string();
         let da_s = dest_address_bytes.clone();
-        let rpc_s = args.solana_rpc.clone();
+        let rpc_s = args.source_rpc.clone();
         let axelarnet_gw_s = axelarnet_gw_addr.clone();
         let token_program_s = solana_sdk::pubkey::Pubkey::from_str_const(
             "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
@@ -311,7 +297,7 @@ pub async fn run(mut args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()
         let counter = Arc::clone(&confirmed_counter);
         let sp = spinner.clone();
         let total = key_count;
-        let rpc = args.solana_rpc.clone();
+        let rpc = args.source_rpc.clone();
         let dc = dest.to_string();
         let da = dest_address_bytes.clone();
         let tid = token_id;

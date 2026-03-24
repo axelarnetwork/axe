@@ -118,10 +118,6 @@ pub enum TestCommands {
         #[arg(long)]
         source_rpc: Option<String>,
 
-        /// Override destination chain RPC URL (default: from config)
-        #[arg(long)]
-        destination_rpc: Option<String>,
-
         /// Hex-encoded payload to send (default: random test message)
         #[arg(long)]
         payload: Option<String>,
