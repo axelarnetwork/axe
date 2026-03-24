@@ -22,7 +22,7 @@ use crate::ui;
 
 /// Generate a unique ABI-encoded payload compatible with `SenderReceiver._execute`.
 /// The contract does `abi.decode(payload_, (string))`, so we must ABI-encode the string.
-fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
+pub fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
     match custom {
         Some(p) => p.clone(),
         None => {

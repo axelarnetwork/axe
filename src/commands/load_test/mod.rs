@@ -37,6 +37,8 @@ pub enum TestType {
     SolToEvm,
     /// EVM -> Solana cross-chain load test
     EvmToSol,
+    /// EVM -> EVM cross-chain load test
+    EvmToEvm,
 }
 
 impl std::fmt::Display for TestType {
@@ -44,6 +46,7 @@ impl std::fmt::Display for TestType {
         match self {
             TestType::SolToEvm => write!(f, "sol-to-evm"),
             TestType::EvmToSol => write!(f, "evm-to-sol"),
+            TestType::EvmToEvm => write!(f, "evm-to-evm"),
         }
     }
 }
@@ -143,9 +146,10 @@ fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
     match (source_type, dest_type) {
         ("svm", "evm") => Ok(TestType::SolToEvm),
         ("evm", "svm") => Ok(TestType::EvmToSol),
+        ("evm", "evm") => Ok(TestType::EvmToEvm),
         _ => Err(eyre::eyre!(
             "unsupported chain type combination: {source_type} -> {dest_type}. \
-             Supported: svm -> evm, evm -> svm"
+             Supported: svm -> evm, evm -> svm, evm -> evm"
         )),
     }
 }
@@ -322,6 +326,37 @@ fn auto_detect_chains(
             };
             Ok((source, dest))
         }
+        TestType::EvmToEvm => {
+            let source = match source_override {
+                Some(s) => s,
+                None => {
+                    let evm = find_chains_by_type(chains, "evm", true);
+                    if evm.len() < 2 {
+                        return Err(eyre::eyre!(
+                            "need at least 2 EVM chains in config for evm-to-evm"
+                        ));
+                    }
+                    ui::info(&format!("auto-detected source: {}", evm[0]));
+                    evm[0].clone()
+                }
+            };
+            let dest = match dest_override {
+                Some(d) => d,
+                None => {
+                    let evm = find_chains_by_type(chains, "evm", true);
+                    let picked = evm
+                        .iter()
+                        .find(|c| **c != source)
+                        .ok_or_else(|| eyre::eyre!("need at least 2 EVM chains for evm-to-evm"))?;
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        picked
+                    ));
+                    picked.clone()
+                }
+            };
+            Ok((source, dest))
+        }
     }
 }
 
@@ -487,8 +522,12 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     match (args.protocol, args.test_type) {
         (Protocol::Gmp, TestType::SolToEvm) => run_sol_to_evm(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,
+        (Protocol::Gmp, TestType::EvmToEvm) => run_evm_to_evm(args, run_start).await,
         (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::EvmToEvm) => {
+            eyre::bail!("ITS EVM→EVM is not yet supported")
+        }
     }
 }
 
@@ -603,6 +642,7 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         gateway_addr,
         &provider,
         &mut report.transactions,
+        verify::SourceChainType::Svm,
     )
     .await?;
     report.verification = Some(verification);
@@ -748,6 +788,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             Some(verify_tx),
             Some(send_done),
             spinner_tx,
+            false,
         )
         .await?;
 
@@ -768,6 +809,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &main_key,
             &evm_rpc_url,
             destination_address,
+            false,
         )
         .await?;
 
@@ -785,6 +827,201 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     };
 
     finish_report(&args, &report, test_start)
+}
+
+async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    let config_content = std::fs::read_to_string(&args.config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
+    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+
+    let source_rpc_url = args.source_rpc.clone();
+    let dest_rpc_url = args.destination_rpc.clone();
+
+    // Validate RPCs before doing any work
+    validate_evm_rpc(&source_rpc_url).await?;
+    validate_evm_rpc(&dest_rpc_url).await?;
+
+    // Check that verification contracts exist
+    if read_axelar_contract_field(
+        &args.config,
+        &format!("/axelar/contracts/Gateway/{dest}/address"),
+    )
+    .is_err()
+    {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — \
+             verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
+            list_gateway_chains(&config_root).join(", ")
+        );
+    }
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+
+    // --- Set up EVM signer ---
+    let private_key = args.private_key.as_ref().ok_or_else(|| {
+        eyre::eyre!("EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key")
+    })?;
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let signer_address = signer.address();
+    let source_read_provider = ProviderBuilder::new().connect_http(source_rpc_url.parse()?);
+    check_evm_balance(&source_read_provider, signer_address).await?;
+
+    let source_write_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(source_rpc_url.parse()?);
+
+    let main_key: [u8; 32] = signer.to_bytes().into();
+
+    #[allow(clippy::float_arithmetic)]
+    {
+        let balance: u128 = source_read_provider.get_balance(signer_address).await?.to();
+        let eth = balance as f64 / 1e18;
+        ui::kv("wallet", &format!("{signer_address} ({eth:.6} ETH)"));
+    }
+
+    // --- Source chain: deploy/reuse SenderReceiver (for sending) ---
+    let src_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
+    let src_gas_service_addr =
+        read_contract_address(&args.config, src, "AxelarGasService").unwrap_or(Address::ZERO);
+    ui::address("source gateway", &format!("{src_gateway_addr}"));
+
+    let src_cache_key = &format!("{src}-evm-to-evm");
+    let src_cache = read_cache(src_cache_key);
+    let sender_receiver_addr = deploy_or_reuse_sender_receiver(
+        &src_cache,
+        src_cache_key,
+        &source_read_provider,
+        &source_write_provider,
+        src_gateway_addr,
+        src_gas_service_addr,
+        "source",
+    )
+    .await?;
+    ui::address(
+        "SenderReceiver (source)",
+        &format!("{sender_receiver_addr}"),
+    );
+
+    // --- Destination chain: deploy/reuse SenderReceiver (as receive target) ---
+    let dest_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let dest_gas_service_addr =
+        read_contract_address(&args.config, dest, "AxelarGasService").unwrap_or(Address::ZERO);
+    ui::address("destination gateway", &format!("{dest_gateway_addr}"));
+
+    let dest_read_provider = ProviderBuilder::new().connect_http(dest_rpc_url.parse()?);
+    let dest_write_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(dest_rpc_url.parse()?);
+
+    // Fund the signer on the destination chain if needed for SenderReceiver deployment
+    let dest_balance: u128 = dest_read_provider.get_balance(signer_address).await?.to();
+    if dest_balance == 0 {
+        eyre::bail!(
+            "EVM wallet {signer_address} has no funds on destination chain '{dest}'. \
+             Fund it first."
+        );
+    }
+
+    let dest_cache_key = &format!("{dest}-evm-to-evm-dest");
+    let dest_cache = read_cache(dest_cache_key);
+    let dest_sender_receiver = deploy_or_reuse_sender_receiver(
+        &dest_cache,
+        dest_cache_key,
+        &dest_read_provider,
+        &dest_write_provider,
+        dest_gateway_addr,
+        dest_gas_service_addr,
+        "destination",
+    )
+    .await?;
+    ui::address(
+        "SenderReceiver (destination)",
+        &format!("{dest_sender_receiver}"),
+    );
+
+    let destination_address = format!("{dest_sender_receiver}");
+
+    let test_start = Instant::now();
+    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
+        evm_to_sol::run_sustained_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &source_rpc_url,
+            &destination_address,
+            None,
+            None,
+            tokio::sync::oneshot::channel().0,
+            true,
+        )
+        .await?
+    } else {
+        evm_to_sol::run_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &source_rpc_url,
+            &destination_address,
+            true,
+        )
+        .await?
+    };
+
+    let verification = verify::verify_onchain(
+        &args.config,
+        &args.source_chain,
+        &args.destination_chain,
+        &destination_address,
+        dest_gateway_addr,
+        &dest_read_provider,
+        &mut report.transactions,
+        verify::SourceChainType::Evm,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &report, test_start)
+}
+
+/// Deploy or reuse a cached SenderReceiver contract.
+async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
+    cache: &serde_json::Value,
+    cache_key: &str,
+    read_provider: &R,
+    write_provider: &W,
+    gateway_addr: Address,
+    gas_service_addr: Address,
+    label: &str,
+) -> Result<Address> {
+    if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
+        let addr: Address = addr_str.parse()?;
+        let code = read_provider.get_code_at(addr).await?;
+        if code.is_empty() {
+            ui::warn(&format!(
+                "cached SenderReceiver ({label}) has no code, redeploying..."
+            ));
+            let new_addr =
+                deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
+            let mut cache = cache.clone();
+            cache["senderReceiverAddress"] = json!(format!("{new_addr}"));
+            save_cache(cache_key, &cache)?;
+            Ok(new_addr)
+        } else {
+            ui::info(&format!("SenderReceiver ({label}): reusing {addr}"));
+            Ok(addr)
+        }
+    } else {
+        ui::info(&format!("deploying SenderReceiver on {label} chain..."));
+        let addr = deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
+        let mut cache = cache.clone();
+        cache["senderReceiverAddress"] = json!(format!("{addr}"));
+        save_cache(cache_key, &cache)?;
+        Ok(addr)
+    }
 }
 
 pub fn finish_report(

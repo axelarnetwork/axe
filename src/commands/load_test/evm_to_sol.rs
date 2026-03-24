@@ -95,10 +95,13 @@ fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Ve
     full_payload
 }
 
-/// Run EVM->Sol load test with parallel sends from derived wallets.
+/// Run EVM load test with parallel sends from derived wallets.
 ///
 /// Derives N EVM signers from the main private key, funds them, then fires
 /// all callContract() txs in parallel (one per derived wallet).
+///
+/// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
+/// `SenderReceiver._execute`. When false, payloads use the Solana gateway format.
 #[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
@@ -106,6 +109,7 @@ pub async fn run_load_test_with_metrics(
     main_key: &[u8; 32],
     evm_rpc_url: &str,
     destination_address: &str,
+    evm_destination: bool,
 ) -> eyre::Result<LoadTestReport> {
     let num_txs = args.num_txs.max(1) as usize;
 
@@ -157,7 +161,11 @@ pub async fn run_load_test_with_metrics(
     let dest_addr = destination_address.to_string();
 
     for signer in &derived {
-        let tx_payload = make_executable_payload(&payload, &counter_pda);
+        let tx_payload = if evm_destination {
+            super::sol_to_evm::make_payload(&payload)
+        } else {
+            make_executable_payload(&payload, &counter_pda)
+        };
         let metrics_clone = Arc::clone(&metrics_list);
         let counter = Arc::clone(&confirmed_counter);
         let sem = Arc::clone(&semaphore);
@@ -387,6 +395,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     verify_tx: Option<tokio::sync::mpsc::UnboundedSender<super::verify::PendingTx>>,
     send_done: Option<Arc<AtomicBool>>,
     verify_spinner_tx: tokio::sync::oneshot::Sender<indicatif::ProgressBar>,
+    evm_destination: bool,
 ) -> eyre::Result<LoadTestReport> {
     let tps = args.tps.unwrap() as usize;
     let duration_secs = args.duration_secs.unwrap();
@@ -471,7 +480,11 @@ pub(super) async fn run_sustained_load_test_with_metrics(
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
-            let tx_payload = make_executable_payload(&payload, &counter_pda);
+            let tx_payload = if evm_destination {
+                super::sol_to_evm::make_payload(&payload)
+            } else {
+                make_executable_payload(&payload, &counter_pda)
+            };
             let dc = dest_chain.clone();
             let da = dest_addr.clone();
             let sr = sender_receiver_addr;
