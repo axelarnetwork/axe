@@ -854,6 +854,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             destination_address,
             &args.destination_rpc,
             &mut report.transactions,
+            verify::SourceChainType::Evm,
         )
         .await?;
         report.verification = Some(verification);
@@ -1069,6 +1070,7 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         destination_address,
         &args.destination_rpc,
         &mut report.transactions,
+        verify::SourceChainType::Svm,
     )
     .await?;
     report.verification = Some(verification);
