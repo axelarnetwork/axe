@@ -980,6 +980,15 @@ fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize, usize) {
 // Public entry points
 // ---------------------------------------------------------------------------
 
+/// Source chain type — determines how message IDs are constructed.
+#[derive(Clone, Copy)]
+pub enum SourceChainType {
+    /// Solana source: message ID = `{signature}-{group}.{index}`
+    Svm,
+    /// EVM source: message ID = `{tx_hash}-{event_index}` (already in tx.signature)
+    Evm,
+}
+
 /// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
 ///
 /// 1. **Voted** — VotingVerifier verification (source chain)
@@ -995,6 +1004,7 @@ pub async fn verify_onchain<P: Provider>(
     gateway_addr: Address,
     provider: &P,
     metrics: &mut [TxMetrics],
+    source_type: SourceChainType,
 ) -> Result<VerificationReport> {
     let confirmed: Vec<usize> = metrics
         .iter()
@@ -1037,7 +1047,12 @@ pub async fn verify_onchain<P: Provider>(
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             PendingTx {
                 idx,
-                message_id: format!("{}-{}.1", tx.signature, solana_call_contract_index()),
+                message_id: match source_type {
+                    SourceChainType::Evm => tx.signature.clone(),
+                    SourceChainType::Svm => {
+                        format!("{}-{}.1", tx.signature, solana_call_contract_index())
+                    }
+                },
                 send_instant: tx.send_instant.unwrap_or_else(Instant::now),
                 source_address: tx.source_address.clone(),
                 contract_addr,

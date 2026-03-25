@@ -54,22 +54,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let dest = &args.destination_chain;
 
     // --- Read SOURCE EVM chain info ---
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
-    let evm_rpc_url = match &args.source_rpc {
-        Some(rpc) => rpc.clone(),
-        None => config_root
-            .pointer(&format!("/chains/{src}/rpc"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre!("no rpc URL for source chain '{src}' in config"))?
-            .to_string(),
-    };
+    let evm_rpc_url = args.source_rpc.clone();
 
     // Validate RPCs
     validate_evm_rpc(&evm_rpc_url).await?;
-    validate_solana_rpc(&args.solana_rpc).await?;
+    validate_solana_rpc(&args.destination_rpc).await?;
 
     // Check that verification contracts exist
     if read_axelar_contract_field(
@@ -249,7 +238,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             src,
             dest,
             deploy_msg_id,
-            &args.solana_rpc,
+            &args.destination_rpc,
         )
         .await?;
     }
@@ -353,7 +342,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             &args.source_chain,
             &args.destination_chain,
             &format!("{its_proxy_addr}"),
-            &args.solana_rpc,
+            &args.destination_rpc,
             &mut report.transactions,
         )
         .await?;
@@ -506,7 +495,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &args.source_chain,
         &args.destination_chain,
         &format!("{its_proxy_addr}"),
-        &args.solana_rpc,
+        &args.destination_rpc,
         &mut report.transactions,
     )
     .await?;
