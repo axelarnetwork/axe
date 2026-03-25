@@ -1210,6 +1210,7 @@ pub async fn verify_onchain_solana(
     destination_address: &str,
     solana_rpc: &str,
     metrics: &mut [TxMetrics],
+    source_type: SourceChainType,
 ) -> Result<VerificationReport> {
     let confirmed: Vec<usize> = metrics
         .iter()
@@ -1247,10 +1248,16 @@ pub async fn verify_onchain_solana(
         .map(|&idx| {
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            let cmd_input = [source_chain.as_bytes(), b"-", tx.signature.as_bytes()].concat();
+            let message_id = match source_type {
+                SourceChainType::Evm => tx.signature.clone(),
+                SourceChainType::Svm => {
+                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
+                }
+            };
+            let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
             PendingTx {
                 idx,
-                message_id: tx.signature.clone(),
+                message_id,
                 send_instant: tx.send_instant.unwrap_or_else(Instant::now),
                 source_address: tx.source_address.clone(),
                 contract_addr: Address::ZERO,

@@ -1,9 +1,9 @@
-pub mod evm_to_sol;
+pub mod evm_sender;
 pub mod its_evm_to_sol;
 pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
-pub mod sol_to_evm;
+pub mod sol_sender;
 mod sustained;
 mod verify;
 
@@ -39,6 +39,8 @@ pub enum TestType {
     EvmToSol,
     /// EVM -> EVM cross-chain load test
     EvmToEvm,
+    /// Solana -> Solana cross-chain load test
+    SolToSol,
 }
 
 impl std::fmt::Display for TestType {
@@ -47,6 +49,7 @@ impl std::fmt::Display for TestType {
             TestType::SolToEvm => write!(f, "sol-to-evm"),
             TestType::EvmToSol => write!(f, "evm-to-sol"),
             TestType::EvmToEvm => write!(f, "evm-to-evm"),
+            TestType::SolToSol => write!(f, "sol-to-sol"),
         }
     }
 }
@@ -147,9 +150,10 @@ fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
         ("svm", "evm") => Ok(TestType::SolToEvm),
         ("evm", "svm") => Ok(TestType::EvmToSol),
         ("evm", "evm") => Ok(TestType::EvmToEvm),
+        ("svm", "svm") => Ok(TestType::SolToSol),
         _ => Err(eyre::eyre!(
             "unsupported chain type combination: {source_type} -> {dest_type}. \
-             Supported: svm -> evm, evm -> svm, evm -> evm"
+             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm"
         )),
     }
 }
@@ -357,6 +361,31 @@ fn auto_detect_chains(
             };
             Ok((source, dest))
         }
+        TestType::SolToSol => {
+            let source = match source_override {
+                Some(s) => s,
+                None => {
+                    let svm = find_chains_by_type(chains, "svm", false);
+                    if svm.is_empty() {
+                        return Err(eyre::eyre!("no SVM (Solana) chain found in config"));
+                    }
+                    ui::info(&format!("auto-detected source: {}", svm[0]));
+                    svm[0].clone()
+                }
+            };
+            let dest = match dest_override {
+                Some(d) => d,
+                None => {
+                    // For sol-to-sol, default to the same chain (loopback)
+                    ui::info(&format!(
+                        "auto-detected destination: {} (same as source for sol-to-sol)",
+                        source
+                    ));
+                    source.clone()
+                }
+            };
+            Ok((source, dest))
+        }
     }
 }
 
@@ -523,10 +552,15 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         (Protocol::Gmp, TestType::SolToEvm) => run_sol_to_evm(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToEvm) => run_evm_to_evm(args, run_start).await,
+        (Protocol::Gmp, TestType::SolToSol) => run_sol_to_sol(args, run_start).await,
         (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
-        (Protocol::Its, TestType::EvmToEvm) => {
-            eyre::bail!("ITS EVM→EVM is not yet supported")
+        (Protocol::Its, TestType::EvmToEvm | TestType::SolToSol) => {
+            eyre::bail!(
+                "ITS {}->{} is not yet supported",
+                args.source_chain,
+                args.destination_chain
+            )
         }
     }
 }
@@ -629,9 +663,9 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_to_evm::run_sustained_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_sustained_load_test_with_metrics(&args, true, &destination_address).await?
     } else {
-        sol_to_evm::run_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?
     };
 
     let verification = verify::verify_onchain(
@@ -740,7 +774,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
     // Destination on Solana: memo program (resolved per feature flag)
-    let destination_address = evm_to_sol::memo_program_id().to_string();
+    let destination_address = evm_sender::memo_program_id().to_string();
     let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
@@ -779,7 +813,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             .await
         });
 
-        let mut report = evm_to_sol::run_sustained_load_test_with_metrics(
+        let mut report = evm_sender::run_sustained_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -803,7 +837,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         report.verification = Some(verification);
         report
     } else {
-        let mut report = evm_to_sol::run_load_test_with_metrics(
+        let mut report = evm_sender::run_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -820,6 +854,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             destination_address,
             &args.destination_rpc,
             &mut report.transactions,
+            verify::SourceChainType::Evm,
         )
         .await?;
         report.verification = Some(verification);
@@ -947,7 +982,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        evm_to_sol::run_sustained_load_test_with_metrics(
+        evm_sender::run_sustained_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -960,7 +995,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         )
         .await?
     } else {
-        evm_to_sol::run_load_test_with_metrics(
+        evm_sender::run_load_test_with_metrics(
             &args,
             sender_receiver_addr,
             &main_key,
@@ -980,6 +1015,62 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         &dest_read_provider,
         &mut report.transactions,
         verify::SourceChainType::Evm,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &report, test_start)
+}
+
+async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    // Validate RPCs
+    validate_solana_rpc(&args.source_rpc).await?;
+    validate_solana_rpc(&args.destination_rpc).await?;
+
+    let config_content = std::fs::read_to_string(&args.config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
+    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+
+    // Check that verification contracts exist
+    if read_axelar_contract_field(
+        &args.config,
+        &format!("/axelar/contracts/Gateway/{dest}/address"),
+    )
+    .is_err()
+    {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — \
+             verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
+            list_gateway_chains(&config_root).join(", ")
+        );
+    }
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+
+    // Destination is the Solana memo program
+    let destination_address = evm_sender::memo_program_id().to_string();
+    let destination_address = destination_address.as_str();
+    ui::kv("destination program", destination_address);
+
+    let test_start = Instant::now();
+    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
+        sol_sender::run_sustained_load_test_with_metrics(&args, false, destination_address).await?
+    } else {
+        sol_sender::run_load_test_with_metrics(&args, destination_address, false).await?
+    };
+
+    let verification = verify::verify_onchain_solana(
+        &args.config,
+        &args.source_chain,
+        &args.destination_chain,
+        destination_address,
+        &args.destination_rpc,
+        &mut report.transactions,
+        verify::SourceChainType::Svm,
     )
     .await?;
     report.verification = Some(verification);

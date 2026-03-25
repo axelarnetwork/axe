@@ -67,7 +67,7 @@ sol! {
 ///
 /// Format: [0x01 (ABI scheme)] [ABI-encoded SolanaGatewayPayload]
 /// The memo program needs the counter PDA as a writable account.
-fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Vec<u8> {
+pub fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Vec<u8> {
     let memo_bytes: Vec<u8> = match custom {
         Some(p) => p.clone(),
         None => {
@@ -162,7 +162,7 @@ pub async fn run_load_test_with_metrics(
 
     for signer in &derived {
         let tx_payload = if evm_destination {
-            super::sol_to_evm::make_payload(&payload)
+            super::sol_sender::make_payload(&payload)
         } else {
             make_executable_payload(&payload, &counter_pda)
         };
@@ -481,7 +481,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let tx_payload = if evm_destination {
-                super::sol_to_evm::make_payload(&payload)
+                super::sol_sender::make_payload(&payload)
             } else {
                 make_executable_payload(&payload, &counter_pda)
             };
