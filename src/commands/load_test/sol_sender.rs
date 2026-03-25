@@ -13,6 +13,8 @@ use alloy::primitives::keccak256;
 use alloy::sol_types::SolValue;
 use rand::Rng;
 
+use solana_sdk::pubkey::Pubkey;
+
 use super::LoadTestArgs;
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
@@ -71,10 +73,14 @@ fn prepare_keypairs(
 }
 
 /// Run load test and return metrics report.
+///
+/// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
+/// `SenderReceiver._execute`. When false, payloads use the Solana executable format.
 #[allow(clippy::too_many_lines, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     destination_address: &str,
+    evm_destination: bool,
 ) -> eyre::Result<LoadTestReport> {
     let num_txs = args.num_txs.max(1) as usize;
 
@@ -106,6 +112,9 @@ pub async fn run_load_test_with_metrics(
         Option::None => Option::None,
     };
 
+    let memo_program_id = super::evm_sender::memo_program_id();
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
+
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let mut pending_tasks = Vec::new();
 
@@ -120,7 +129,11 @@ pub async fn run_load_test_with_metrics(
         let kp = Arc::clone(&keypairs[i]);
         let dest_chain = args.destination_chain.clone();
         let dest_addr = destination_address.to_string();
-        let tx_payload = make_payload(&payload);
+        let tx_payload = if evm_destination {
+            make_payload(&payload)
+        } else {
+            super::evm_sender::make_executable_payload(&payload, &counter_pda)
+        };
         let metrics_clone = Arc::clone(&metrics_list);
         let rpc = solana_rpc.clone();
         let counter = Arc::clone(&confirmed_counter);
@@ -251,10 +264,11 @@ fn send_sol_tx(
     }
 }
 
-/// Run Sol->EVM sustained load test at a controlled TPS rate.
+/// Run Solana sustained load test at a controlled TPS rate.
 #[allow(clippy::float_arithmetic)]
 pub async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
+    evm_destination: bool,
     destination_address: &str,
 ) -> eyre::Result<LoadTestReport> {
     let tps = args.tps.unwrap() as usize;
@@ -292,15 +306,23 @@ pub async fn run_sustained_load_test_with_metrics(
         pool_size, tps, key_cycle
     ));
 
+    let memo_program_id = super::evm_sender::memo_program_id();
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
+
     let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained send..."));
 
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
     let solana_rpc = args.source_rpc.clone();
+    let evm_dest = evm_destination;
 
     let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
         let kp = Arc::clone(&keypairs_pool[key_idx]);
-        let tx_payload = make_payload(&payload);
+        let tx_payload = if evm_dest {
+            make_payload(&payload)
+        } else {
+            super::evm_sender::make_executable_payload(&payload, &counter_pda)
+        };
         let dc = dest_chain.clone();
         let da = dest_addr.clone();
         let rpc = solana_rpc.clone();

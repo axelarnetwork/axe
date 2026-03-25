@@ -67,7 +67,7 @@ sol! {
 ///
 /// Format: [0x01 (ABI scheme)] [ABI-encoded SolanaGatewayPayload]
 /// The memo program needs the counter PDA as a writable account.
-fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Vec<u8> {
+pub fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -> Vec<u8> {
     let memo_bytes: Vec<u8> = match custom {
         Some(p) => p.clone(),
         None => {

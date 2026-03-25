@@ -663,9 +663,9 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_sender::run_sustained_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_sustained_load_test_with_metrics(&args, true, &destination_address).await?
     } else {
-        sol_sender::run_load_test_with_metrics(&args, &destination_address).await?
+        sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?
     };
 
     let verification = verify::verify_onchain(
@@ -1057,9 +1057,9 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        sol_sender::run_sustained_load_test_with_metrics(&args, destination_address).await?
+        sol_sender::run_sustained_load_test_with_metrics(&args, false, destination_address).await?
     } else {
-        sol_sender::run_load_test_with_metrics(&args, destination_address).await?
+        sol_sender::run_load_test_with_metrics(&args, destination_address, false).await?
     };
 
     let verification = verify::verify_onchain_solana(
