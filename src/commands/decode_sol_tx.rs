@@ -1216,18 +1216,51 @@ fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
             }
         }
         "VerifySignature" => {
+            // payload_merkle_root: [u8;32]
+            // verifier_info: SigningVerifierSetInfo {
+            //   signature: [u8;65], leaf: VerifierSetLeaf { nonce: u64, quorum: u128,
+            //   signer_pubkey: [u8;33], signer_weight: u128, position: u16, set_size: u16,
+            //   domain_separator: [u8;32] }, merkle_proof: Vec<u8>, payload_type: u8 }
             if args.len() >= 32 {
                 println!(
                     "{indent}{} {}",
                     "payload_merkle_root:".dimmed(),
                     hex::encode(&args[..32])
                 );
-                if args.len() > 32 {
+                let rest = &args[32..];
+                // signature (65 bytes) + leaf fields
+                if rest.len() >= 65 + 8 + 16 + 33 + 16 + 2 + 2 + 32 {
+                    let sig = &rest[..65];
+                    println!("{indent}{} 0x{}", "signature:".dimmed(), hex::encode(sig));
+                    let leaf = &rest[65..];
+                    let nonce = u64::from_le_bytes(leaf[..8].try_into().unwrap_or_default());
+                    let quorum = u128::from_le_bytes(leaf[8..24].try_into().unwrap_or_default());
+                    let signer_pubkey = hex::encode(&leaf[24..57]);
+                    let signer_weight =
+                        u128::from_le_bytes(leaf[57..73].try_into().unwrap_or_default());
+                    let position = u16::from_le_bytes(leaf[73..75].try_into().unwrap_or_default());
+                    let set_size = u16::from_le_bytes(leaf[75..77].try_into().unwrap_or_default());
+                    println!("{indent}{} 0x{signer_pubkey}", "signer:".dimmed(),);
                     println!(
-                        "{indent}{} {} bytes",
-                        "verifier_info:".dimmed(),
-                        args.len() - 32
+                        "{indent}{} {signer_weight} (quorum: {quorum})",
+                        "weight:".dimmed(),
                     );
+                    println!(
+                        "{indent}{} {position}/{set_size} (nonce: {nonce})",
+                        "position:".dimmed(),
+                    );
+                    let rest = &leaf[77 + 32..]; // skip domain_separator
+                    if let Ok((proof, rest)) = decode_borsh_bytes(rest) {
+                        println!("{indent}{} {} bytes", "merkle_proof:".dimmed(), proof.len());
+                        if !rest.is_empty() {
+                            let payload_type = match rest[0] {
+                                0 => "ApproveMessages",
+                                1 => "RotateSigners",
+                                _ => "Unknown",
+                            };
+                            println!("{indent}{} {payload_type}", "payload_type:".dimmed());
+                        }
+                    }
                 }
             }
         }
