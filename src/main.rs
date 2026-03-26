@@ -50,6 +50,9 @@ async fn main() -> Result<()> {
                 config,
                 chain,
             } => commands::decode_tx::run(&txid, config.as_deref(), chain.as_deref()).await,
+            cli::DecodeCommands::SolState { rpc } => {
+                commands::decode_sol_state::run(rpc.as_deref()).await
+            }
         },
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp { axelar_id } => commands::test_gmp::run(axelar_id).await,

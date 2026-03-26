@@ -172,6 +172,13 @@ pub enum DecodeCommands {
         #[arg(long)]
         chain: Option<String>,
     },
+
+    /// Dump Solana Axelar program state (Gateway config, verifier sets, ITS config)
+    SolState {
+        /// Solana RPC URL (default: tries devnet, testnet, mainnet)
+        #[arg(long)]
+        rpc: Option<String>,
+    },
 }
 
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
