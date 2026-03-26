@@ -274,22 +274,37 @@ fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
+const SOLANA_RPCS: &[(&str, &str)] = &[
+    ("devnet", "https://api.devnet.solana.com"),
+    ("testnet", "https://api.testnet.solana.com"),
+    ("mainnet", "https://api.mainnet-beta.solana.com"),
+];
+
+pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
     let sig =
         Signature::from_str(txid).map_err(|e| eyre::eyre!("invalid Solana signature: {e}"))?;
 
-    let rpc = RpcClient::new_with_commitment(solana_rpc, CommitmentConfig::confirmed());
+    // Try all Solana networks to find the transaction
+    let mut tx_data: Option<(String, EncodedConfirmedTransactionWithStatusMeta)> = None;
 
-    let tx_data: EncodedConfirmedTransactionWithStatusMeta = rpc
-        .get_transaction_with_config(
+    for (network, rpc_url) in SOLANA_RPCS {
+        let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+        if let Ok(data) = rpc.get_transaction_with_config(
             &sig,
             solana_client::rpc_config::RpcTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Json),
                 commitment: Some(CommitmentConfig::confirmed()),
                 max_supported_transaction_version: Some(0),
             },
-        )
-        .map_err(|e| eyre::eyre!("failed to fetch transaction: {e}"))?;
+        ) {
+            tx_data = Some((network.to_string(), data));
+            break;
+        }
+    }
+
+    let (network, tx_data) = tx_data.ok_or_else(|| {
+        eyre::eyre!("transaction not found on any Solana network (tried devnet, testnet, mainnet)")
+    })?;
 
     let slot = tx_data.slot;
     let block_time = tx_data.block_time.unwrap_or(0);
@@ -347,6 +362,7 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
     };
 
     // Print header
+    println!("{} Solana {}", "Network:".bold(), network.cyan());
     println!("{} {}", "Tx:".bold(), txid);
     println!("{} {}", "Slot:".bold(), slot);
     if block_time > 0 {
