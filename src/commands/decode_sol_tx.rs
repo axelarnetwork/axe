@@ -187,62 +187,87 @@ fn event_name(discriminator: &[u8]) -> Option<&'static str> {
 // Decode CallContractEvent from borsh
 // ---------------------------------------------------------------------------
 
-/// Decode the encoding scheme and structure of an Axelar Solana payload.
-fn decode_payload_info(payload: &[u8]) -> String {
+/// Try to decode the payload and return a human-readable summary.
+/// Returns (summary_line, Option<decoded_content>)
+fn decode_payload(payload: &[u8]) -> (String, Option<String>) {
     if payload.is_empty() {
-        return "empty".to_string();
+        return ("empty".to_string(), None);
     }
 
-    let encoding = match payload[0] {
-        0x00 => "Borsh",
-        0x01 => "ABI",
-        _ => {
-            return format!(
-                "{} bytes (unknown encoding 0x{:02x})",
-                payload.len(),
-                payload[0]
-            );
-        }
-    };
+    // Check if it's an Axelar encoded payload (first byte = encoding scheme)
+    if matches!(payload[0], 0x00 | 0x01)
+        && let Ok(decoded) = solana_axelar_gateway::payload::AxelarMessagePayload::decode(payload)
+    {
+        let inner = decoded.payload_without_accounts();
 
-    // Try to decode the payload to extract account count
-    match solana_axelar_gateway::payload::AxelarMessagePayload::decode(payload) {
-        Ok(decoded) => {
-            let accounts = decoded.account_meta();
-            let inner_data = decoded.payload_without_accounts();
-
-            if accounts.is_empty() {
-                format!(
-                    "{} bytes ({encoding}, no accounts, {} bytes data)",
-                    payload.len(),
-                    inner_data.len()
-                )
-            } else {
-                format!(
-                    "{} bytes ({encoding}, {} accounts, {} bytes data)",
-                    payload.len(),
-                    accounts.len(),
-                    inner_data.len()
-                )
-            }
-        }
-        Err(_) => format!("{} bytes ({encoding})", payload.len()),
+        // Try to decode the inner data
+        let content = try_decode_payload_content(inner);
+        let size = format!("{} bytes", payload.len());
+        return (size, content);
     }
+
+    // Raw payload — try to interpret as UTF-8
+    if let Ok(s) = std::str::from_utf8(payload)
+        && s.is_ascii()
+        && !s.is_empty()
+    {
+        return (format!("{} bytes", payload.len()), Some(format!("\"{s}\"")));
+    }
+
+    (format!("{} bytes", payload.len()), None)
 }
 
-fn try_decode_call_contract_event(data: &[u8]) -> Option<(String, Vec<u8>)> {
+/// Try to decode inner payload data as a known type.
+fn try_decode_payload_content(data: &[u8]) -> Option<String> {
+    use alloy::dyn_abi::DynSolType;
+
+    if data.is_empty() {
+        return None;
+    }
+
+    // Try as ABI-encoded (string) — common for GMP memo payloads
+    if let Ok(val) = DynSolType::String.abi_decode(data)
+        && let Some(s) = val.as_str()
+        && !s.is_empty()
+    {
+        return Some(format!("\"{s}\""));
+    }
+
+    // Try as ABI-encoded tuple(string) — SenderReceiver._execute format
+    if let Ok(val) = DynSolType::Tuple(vec![DynSolType::String]).abi_decode(data)
+        && let Some(vals) = val.as_tuple()
+        && let Some(s) = vals.first().and_then(|v| v.as_str())
+        && !s.is_empty()
+    {
+        return Some(format!("\"{s}\""));
+    }
+
+    // Try as raw UTF-8
+    if let Ok(s) = std::str::from_utf8(data)
+        && s.is_ascii()
+        && !s.is_empty()
+    {
+        return Some(format!("\"{s}\""));
+    }
+
+    None
+}
+
+fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
     let event = borsh::from_slice::<solana_axelar_gateway::events::CallContractEvent>(data).ok()?;
-    let payload_info = decode_payload_info(&event.payload);
-    let payload_bytes = event.payload.clone();
-    let summary = format!(
+    let (size, content) = decode_payload(&event.payload);
+    let payload_line = match content {
+        Some(decoded) => format!("{size} → {decoded}"),
+        None => size,
+    };
+    Some(format!(
         "sender: {}\n      destination_chain: \"{}\"\n      destination_address: \"{}\"\n      payload_hash: {}\n      payload: {}",
         event.sender,
         event.destination_chain,
         event.destination_contract_address,
         hex::encode(event.payload_hash),
-        payload_info,
-    );
-    Some((summary, payload_bytes))
+        payload_line,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -432,28 +457,10 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
 
                         // Try to decode event data
                         if event == "CallContractEvent"
-                            && let Some((summary, payload_bytes)) =
-                                try_decode_call_contract_event(&data_bytes[16..])
+                            && let Some(decoded) = try_decode_call_contract_event(&data_bytes[16..])
                         {
-                            for line in summary.lines() {
+                            for line in decoded.lines() {
                                 println!("      {line}");
-                            }
-                            // Try to ABI-decode the inner payload
-                            if let Some(first) = payload_bytes.first()
-                                && *first == 0x01
-                            {
-                                // ABI encoding — try to decode inner data
-                                if let Ok(decoded) =
-                                    solana_axelar_gateway::payload::AxelarMessagePayload::decode(
-                                        &payload_bytes,
-                                    )
-                                {
-                                    let inner = decoded.payload_without_accounts();
-                                    if !inner.is_empty() {
-                                        println!("      {}", "Decoded payload:".dimmed());
-                                        let _ = super::decode::decode_bytes(inner, "        ");
-                                    }
-                                }
                             }
                         }
                     } else {
