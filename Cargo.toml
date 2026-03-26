@@ -34,6 +34,8 @@ solana-axelar-gas-service = { version = "0.1.11", features = ["no-entrypoint"], 
 solana-axelar-memo = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
 solana-axelar-its = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
 anchor-lang = { version = "1.0.0-rc.1", features = ["event-cpi"] }
+borsh = "1"
+bs58 = "0.5"
 hex = "0.4"
 rand = "0.8"
 

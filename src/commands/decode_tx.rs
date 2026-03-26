@@ -57,6 +57,13 @@ fn discover_configs() -> Vec<PathBuf> {
 }
 
 pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) -> Result<()> {
+    // Detect Solana vs EVM: Solana signatures are base58, ~88 chars, no 0x prefix
+    if !txid.starts_with("0x") && txid.len() > 60 {
+        // Likely a Solana signature
+        let solana_rpc = resolve_solana_rpc(config);
+        return super::decode_sol_tx::run(txid, &solana_rpc).await;
+    }
+
     let tx_hash: TxHash = txid.parse().map_err(|_| eyre::eyre!("invalid tx hash"))?;
 
     let configs: Vec<PathBuf> = if let Some(c) = config {
@@ -326,4 +333,24 @@ async fn fetch_tx(
         "transaction not found on any chain (tried {} RPCs)",
         rpcs.len()
     )
+}
+
+/// Resolve a Solana RPC URL from the config, falling back to devnet.
+fn resolve_solana_rpc(config: Option<&Path>) -> String {
+    if let Some(cfg) = config
+        && let Ok(content) = std::fs::read_to_string(cfg)
+        && let Ok(root) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        // Find the first SVM chain's RPC
+        if let Some(chains) = root.get("chains").and_then(|v| v.as_object()) {
+            for (_name, chain) in chains {
+                if chain.get("chainType").and_then(|v| v.as_str()) == Some("svm")
+                    && let Some(rpc) = chain.get("rpc").and_then(|v| v.as_str())
+                {
+                    return rpc.to_string();
+                }
+            }
+        }
+    }
+    "https://api.devnet.solana.com".to_string()
 }
