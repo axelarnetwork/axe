@@ -56,6 +56,105 @@ fn instruction_name(discriminator: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Return human-readable account role labels for known instructions.
+fn account_labels(ix_name: &str) -> &'static [&'static str] {
+    match ix_name {
+        "CallContract" => &[
+            "sender",
+            "sender",
+            "gateway_root_pda",
+            "event_authority",
+            "gateway_program",
+        ],
+        "InitializePayloadVerificationSession" => &[
+            "payer",
+            "gateway_root_pda",
+            "verification_session",
+            "verifier_set_tracker",
+            "system_program",
+        ],
+        "VerifySignature" => &[
+            "gateway_root_pda",
+            "verification_session",
+            "verifier_set_tracker",
+        ],
+        "ApproveMessage" => &[
+            "gateway_root_pda",
+            "funder",
+            "verification_session",
+            "incoming_message",
+            "system_program",
+            "event_authority",
+            "gateway_program",
+        ],
+        "ValidateMessage" => &["incoming_message", "caller", "gateway_root_pda"],
+        "RotateSigners" => &[
+            "payer",
+            "gateway_root_pda",
+            "verification_session",
+            "new_verifier_set_tracker",
+            "system_program",
+            "event_authority",
+            "gateway_program",
+        ],
+        "PayGas" => &[
+            "sender",
+            "gas_config_pda",
+            "system_program",
+            "event_authority",
+            "gas_service_program",
+        ],
+        "SendMemo" => &[
+            "memo_program",
+            "sender",
+            "gateway_root_pda",
+            "event_authority",
+            "gateway_program",
+        ],
+        "InterchainTransfer" => &[
+            "payer",
+            "its_root_pda",
+            "token_manager",
+            "source_account",
+            "token_mint",
+            "token_program",
+            "gateway_root_pda",
+            "gas_config_pda",
+        ],
+        "DeployInterchainToken" => &[
+            "payer",
+            "its_root_pda",
+            "token_mint",
+            "token_manager",
+            "system_program",
+        ],
+        "DeployRemoteInterchainToken" => &[
+            "payer",
+            "its_root_pda",
+            "token_manager",
+            "gateway_root_pda",
+            "gas_config_pda",
+        ],
+        _ => &[],
+    }
+}
+
+/// Format an account pubkey with its known program name and role label.
+fn format_account(
+    pk: &Pubkey,
+    known: &HashMap<Pubkey, &'static str>,
+    label: Option<&str>,
+) -> String {
+    let name = known.get(pk).map(|s| format!(" ({})", s));
+    let role = label.map(|l| format!(" ← {}", l.dimmed()));
+    format!(
+        "{}{}{}",
+        pk,
+        name.unwrap_or_default(),
+        role.unwrap_or_default()
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Anchor event discriminators (sha256("event:<Name>")[0:8])
 // Anchor CPI events are prefixed with EVENT_IX_TAG_LE (8 bytes) then the
@@ -241,13 +340,12 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
                 }
             }
 
-            // Print accounts
+            // Print accounts with role labels
+            let labels = account_labels(ix_name);
             for (j, &acc_idx) in ix.accounts.iter().enumerate() {
                 let acc = all_keys.get(acc_idx as usize);
-                let acc_str = acc.map_or("?".to_string(), |pk| {
-                    let name = known.get(pk).map(|s| format!(" ({})", s));
-                    format!("{}{}", pk, name.unwrap_or_default())
-                });
+                let label = labels.get(j).copied();
+                let acc_str = acc.map_or("?".to_string(), |pk| format_account(pk, &known, label));
                 println!("    Account {}: {}", j.to_string().dimmed(), acc_str);
             }
         }
@@ -309,6 +407,16 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
                             ix_name.bold(),
                             ci.stack_height.unwrap_or(0),
                         );
+
+                        // Print inner instruction accounts with labels
+                        let inner_labels = account_labels(ix_name);
+                        for (j, &acc_idx) in ci.accounts.iter().enumerate() {
+                            let acc = all_keys.get(acc_idx as usize);
+                            let label = inner_labels.get(j).copied();
+                            let acc_str =
+                                acc.map_or("?".to_string(), |pk| format_account(pk, &known, label));
+                            println!("      Account {}: {}", j.to_string().dimmed(), acc_str);
+                        }
                     }
                 }
             }
