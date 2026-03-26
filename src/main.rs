@@ -52,7 +52,25 @@ async fn main() -> Result<()> {
             } => commands::decode_tx::run(&txid, config.as_deref(), chain.as_deref()).await,
         },
         cli::Commands::Test { subcommand } => match subcommand {
-            cli::TestCommands::Gmp { axelar_id } => commands::test_gmp::run(axelar_id).await,
+            cli::TestCommands::Gmp {
+                axelar_id,
+                config,
+                source_chain,
+                destination_chain,
+                mnemonic,
+            } => {
+                if let Some(config) = config {
+                    commands::test_gmp::run_config(
+                        config,
+                        source_chain,
+                        destination_chain,
+                        mnemonic,
+                    )
+                    .await
+                } else {
+                    commands::test_gmp::run(axelar_id).await
+                }
+            }
             cli::TestCommands::Its { axelar_id } => commands::test_its::run(axelar_id).await,
             cli::TestCommands::LoadTest {
                 config,
