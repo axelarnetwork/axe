@@ -316,29 +316,8 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
                 ix_name.bold()
             );
 
-            // Decode specific instructions
-            if ix_name == "CallContract" && data_bytes.len() > 8 {
-                if let Ok((dest_chain, rest)) = decode_borsh_string(&data_bytes[8..]) {
-                    println!("    destination_chain: \"{}\"", dest_chain);
-                    if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
-                        println!("    destination_address: \"{}\"", dest_addr);
-                        if rest.len() >= 32 {
-                            println!("    payload_hash: {}", hex::encode(&rest[..32]));
-                        }
-                    }
-                }
-            } else if ix_name == "PayGas"
-                && data_bytes.len() > 8
-                && let Ok((dest_chain, rest)) = decode_borsh_string(&data_bytes[8..])
-            {
-                println!("    destination_chain: \"{}\"", dest_chain);
-                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
-                    println!("    destination_address: \"{}\"", dest_addr);
-                    if rest.len() >= 32 {
-                        println!("    payload_hash: {}", hex::encode(&rest[..32]));
-                    }
-                }
-            }
+            // Decode instruction arguments
+            decode_instruction_args(ix_name, &data_bytes, "    ");
 
             // Print accounts with role labels
             let labels = account_labels(ix_name);
@@ -440,6 +419,68 @@ pub async fn run(txid: &str, solana_rpc: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Decode instruction arguments based on the instruction name.
+fn decode_instruction_args(ix_name: &str, data: &[u8], indent: &str) {
+    if data.len() <= 8 {
+        return;
+    }
+    let args = &data[8..]; // skip 8-byte discriminator
+
+    match ix_name {
+        "CallContract" | "PayGas" => {
+            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
+                println!("{indent}destination_chain: \"{dest_chain}\"");
+                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
+                    println!("{indent}destination_address: \"{dest_addr}\"");
+                    if rest.len() >= 32 {
+                        println!("{indent}payload_hash: {}", hex::encode(&rest[..32]));
+                        if rest.len() > 32 {
+                            println!("{indent}payload: {} bytes", rest.len() - 32);
+                        }
+                    }
+                }
+            }
+        }
+        "InitializePayloadVerificationSession" => {
+            if args.len() >= 33 {
+                println!("{indent}merkle_root: {}", hex::encode(&args[..32]));
+                let payload_type = match args[32] {
+                    0 => "ApproveMessages",
+                    1 => "RotateSigners",
+                    _ => "Unknown",
+                };
+                println!("{indent}payload_type: {payload_type}");
+            }
+        }
+        "VerifySignature" => {
+            if args.len() >= 32 {
+                println!("{indent}payload_merkle_root: {}", hex::encode(&args[..32]));
+                if args.len() > 32 {
+                    println!("{indent}verifier_info: {} bytes", args.len() - 32);
+                }
+            }
+        }
+        "SendMemo" => {
+            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
+                println!("{indent}destination_chain: \"{dest_chain}\"");
+                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
+                    println!("{indent}destination_address: \"{dest_addr}\"");
+                    if let Ok((memo, _)) = decode_borsh_string(rest) {
+                        println!("{indent}memo: \"{memo}\"");
+                    }
+                }
+            }
+        }
+        _ => {
+            if args.len() <= 64 {
+                println!("{indent}data: {}", hex::encode(args));
+            } else {
+                println!("{indent}data: {} bytes", args.len());
+            }
+        }
+    }
 }
 
 /// Decode a borsh-encoded string (4-byte little-endian length + UTF-8 bytes)
