@@ -629,3 +629,310 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
         )),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Gateway approval flow (manual relay for Solana destination)
+// ---------------------------------------------------------------------------
+
+use solana_axelar_std::execute_data::ExecuteData;
+use solana_axelar_std::{MerklizedMessage, PayloadType, SigningVerifierSetInfo};
+
+/// Deserialize the execute_data hex string from a Cosmos proof response
+/// into the Solana `ExecuteData` struct.
+#[allow(dead_code)]
+pub fn decode_execute_data(execute_data_hex: &str) -> Result<ExecuteData> {
+    let bytes = hex::decode(execute_data_hex)?;
+    let execute_data: ExecuteData = borsh::BorshDeserialize::try_from_slice(&bytes)?;
+    Ok(execute_data)
+}
+
+/// Step 7a: Initialize a payload verification session on the Solana gateway.
+/// This creates the session PDA that tracks signature verification progress.
+#[allow(dead_code)]
+pub fn initialize_verification_session(
+    rpc_url: &str,
+    payer: &Keypair,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    // Derive VerifierSetTracker PDA
+    let (verifier_set_tracker_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::VerifierSetTracker::SEED_PREFIX,
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    // Derive verification session PDA
+    let payload_type_byte: u8 = PayloadType::ApproveMessages.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let ix_data = solana_axelar_gateway::instruction::InitializePayloadVerificationSession {
+        merkle_root: payload_merkle_root,
+        payload_type: PayloadType::ApproveMessages,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(verification_session_pda, false),
+            AccountMeta::new_readonly(verifier_set_tracker_pda, false),
+            AccountMeta::new_readonly(anchor_lang::prelude::system_program::ID, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Step 7b: Verify a single signature against the verification session.
+/// Called once per signer. Can be called in parallel.
+#[allow(dead_code)]
+pub fn verify_signature(
+    rpc_url: &str,
+    payer: &Keypair,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+    verifier_info: SigningVerifierSetInfo,
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    let payload_type_byte: u8 = verifier_info.payload_type.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let (verifier_set_tracker_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::VerifierSetTracker::SEED_PREFIX,
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let ix_data = solana_axelar_gateway::instruction::VerifySignature {
+        payload_merkle_root,
+        verifier_info,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(verification_session_pda, false),
+            AccountMeta::new_readonly(verifier_set_tracker_pda, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Step 7c: Approve a message on the Solana gateway after all signatures
+/// have been verified. Creates the IncomingMessage PDA.
+#[allow(dead_code)]
+pub fn approve_message(
+    rpc_url: &str,
+    payer: &Keypair,
+    merklized_message: MerklizedMessage,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    let command_id = merklized_message.leaf.message.command_id();
+    let (incoming_message_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::IncomingMessage::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &gateway_id,
+    );
+
+    let payload_type_byte: u8 = PayloadType::ApproveMessages.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
+
+    let ix_data = solana_axelar_gateway::instruction::ApproveMessage {
+        merklized_message,
+        payload_merkle_root,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(verification_session_pda, false),
+            AccountMeta::new(incoming_message_pda, false),
+            AccountMeta::new_readonly(anchor_lang::prelude::system_program::ID, false),
+            AccountMeta::new_readonly(event_authority, false),
+            AccountMeta::new_readonly(gateway_id, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Run the full Solana gateway approval flow:
+/// 1. Initialize verification session
+/// 2. Verify all signatures
+/// 3. Approve the message
+#[allow(dead_code)]
+pub fn approve_messages_on_gateway(
+    rpc_url: &str,
+    payer: &Keypair,
+    execute_data: &ExecuteData,
+) -> Result<()> {
+    use crate::ui;
+    use solana_axelar_std::execute_data::MerklizedPayload;
+
+    // Step 7a: Initialize verification session
+    ui::info("initializing payload verification session...");
+    match initialize_verification_session(
+        rpc_url,
+        payer,
+        execute_data.payload_merkle_root,
+        execute_data.signing_verifier_set_merkle_root,
+    ) {
+        Ok(sig) => ui::tx_hash("init session", &sig.to_string()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("already in use") {
+                ui::info("verification session already initialized");
+            } else {
+                return Err(e);
+            }
+        }
+    }
+
+    // Step 7b: Verify signatures (one per signer)
+    let num_signers = execute_data.signing_verifier_set_leaves.len();
+    ui::info(&format!("verifying {num_signers} signatures..."));
+
+    for (i, verifier_info) in execute_data.signing_verifier_set_leaves.iter().enumerate() {
+        match verify_signature(
+            rpc_url,
+            payer,
+            execute_data.payload_merkle_root,
+            execute_data.signing_verifier_set_merkle_root,
+            verifier_info.clone(),
+        ) {
+            Ok(_) => {
+                ui::info(&format!("  signature {}/{num_signers} verified", i + 1));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("SlotAlreadyVerified") || msg.contains("already") {
+                    ui::info(&format!(
+                        "  signature {}/{num_signers} already verified",
+                        i + 1
+                    ));
+                } else {
+                    return Err(eyre::eyre!("failed to verify signature {}: {e}", i + 1));
+                }
+            }
+        }
+    }
+
+    // Step 7c: Approve messages
+    let messages = match &execute_data.payload_items {
+        MerklizedPayload::NewMessages { messages } => messages,
+        _ => {
+            return Err(eyre::eyre!(
+                "expected NewMessages payload, got VerifierSetRotation"
+            ));
+        }
+    };
+
+    ui::info(&format!("approving {} message(s)...", messages.len()));
+    for (i, merklized_message) in messages.iter().enumerate() {
+        match approve_message(
+            rpc_url,
+            payer,
+            merklized_message.clone(),
+            execute_data.payload_merkle_root,
+            execute_data.signing_verifier_set_merkle_root,
+        ) {
+            Ok(sig) => {
+                ui::tx_hash(&format!("approve msg {}", i + 1), &sig.to_string());
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("already in use") {
+                    ui::info(&format!("  message {} already approved", i + 1));
+                } else {
+                    return Err(eyre::eyre!("failed to approve message {}: {e}", i + 1));
+                }
+            }
+        }
+    }
+
+    ui::success("all messages approved on Solana gateway");
+    Ok(())
+}

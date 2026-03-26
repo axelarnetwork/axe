@@ -29,11 +29,13 @@ solana-sdk = "~3.0"
 solana-client = "~3.0"
 solana-transaction-status = "~3.0"
 solana-commitment-config = "~3.0"
-solana-axelar-gateway = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
-solana-axelar-gas-service = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
-solana-axelar-memo = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
-solana-axelar-its = { version = "0.1.11", features = ["no-entrypoint"], default-features = false }
-anchor-lang = { version = "1.0.0-rc.1", features = ["event-cpi"] }
+solana-axelar-gateway = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
+solana-axelar-gas-service = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
+solana-axelar-memo = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
+solana-axelar-its = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
+solana-axelar-std = "1.0.0"
+anchor-lang = { version = "1.0.0-rc.5", features = ["event-cpi"] }
+borsh = "1"
 hex = "0.4"
 rand = "0.8"
 
