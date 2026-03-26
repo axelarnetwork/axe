@@ -187,15 +187,58 @@ fn event_name(discriminator: &[u8]) -> Option<&'static str> {
 // Decode CallContractEvent from borsh
 // ---------------------------------------------------------------------------
 
+/// Decode the encoding scheme and structure of an Axelar Solana payload.
+fn decode_payload_info(payload: &[u8]) -> String {
+    if payload.is_empty() {
+        return "empty".to_string();
+    }
+
+    let encoding = match payload[0] {
+        0x00 => "Borsh",
+        0x01 => "ABI",
+        _ => {
+            return format!(
+                "{} bytes (unknown encoding 0x{:02x})",
+                payload.len(),
+                payload[0]
+            );
+        }
+    };
+
+    // Try to decode the payload to extract account count
+    match solana_axelar_gateway::payload::AxelarMessagePayload::decode(payload) {
+        Ok(decoded) => {
+            let accounts = decoded.account_meta();
+            let inner_data = decoded.payload_without_accounts();
+            if accounts.is_empty() {
+                format!(
+                    "{} bytes ({encoding}, no accounts, {} bytes data)",
+                    payload.len(),
+                    inner_data.len()
+                )
+            } else {
+                format!(
+                    "{} bytes ({encoding}, {} accounts, {} bytes data)",
+                    payload.len(),
+                    accounts.len(),
+                    inner_data.len()
+                )
+            }
+        }
+        Err(_) => format!("{} bytes ({encoding})", payload.len()),
+    }
+}
+
 fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
     let event = borsh::from_slice::<solana_axelar_gateway::events::CallContractEvent>(data).ok()?;
+    let payload_info = decode_payload_info(&event.payload);
     Some(format!(
-        "sender: {}\n      destination_chain: \"{}\"\n      destination_address: \"{}\"\n      payload_hash: {}\n      payload: {} bytes",
+        "sender: {}\n      destination_chain: \"{}\"\n      destination_address: \"{}\"\n      payload_hash: {}\n      payload: {}",
         event.sender,
         event.destination_chain,
         event.destination_contract_address,
         hex::encode(event.payload_hash),
-        event.payload.len(),
+        payload_info,
     ))
 }
 
