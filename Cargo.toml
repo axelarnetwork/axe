@@ -36,6 +36,7 @@ solana-axelar-its = { version = "1.0.0", features = ["no-entrypoint"], default-f
 solana-axelar-std = "1.0.0"
 anchor-lang = { version = "1.0.0-rc.5", features = ["event-cpi"] }
 borsh = "1"
+bs58 = "0.5"
 hex = "0.4"
 rand = "0.8"
 

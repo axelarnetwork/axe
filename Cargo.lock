@@ -1462,6 +1462,7 @@ dependencies = [
  "base64 0.22.1",
  "bip32",
  "borsh 1.6.0",
+ "bs58",
  "clap",
  "comfy-table",
  "cosmos-sdk-proto",
