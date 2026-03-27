@@ -72,10 +72,27 @@ pub enum DeployCommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum TestCommands {
-    /// Test GMP source flow: deploy SenderReceiver, send a loopback callContract
+    /// Test GMP: send a cross-chain message and relay through the full Amplifier pipeline
     Gmp {
+        /// Chain axelar ID (legacy EVM-only mode, uses state file)
         #[arg(long)]
         axelar_id: Option<String>,
+
+        /// Path to chains config JSON (config-based mode, supports EVM + Solana)
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// Source chain axelar ID
+        #[arg(long)]
+        source_chain: Option<String>,
+
+        /// Destination chain axelar ID
+        #[arg(long)]
+        destination_chain: Option<String>,
+
+        /// Cosmos mnemonic for relay transactions
+        #[arg(long, env = "MNEMONIC")]
+        mnemonic: Option<String>,
     },
 
     /// Test ITS: deploy interchain token on source, deploy remotely to flow via hub

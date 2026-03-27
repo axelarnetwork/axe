@@ -587,45 +587,546 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
 
     let gateway_id = solana_axelar_gateway::id().to_string();
 
-    // Each "Program X invoke [N]" log with N >= 2 corresponds to one entry
-    // in the inner_instructions array (a CPI within the top-level instruction).
-    // We count them sequentially and find the gateway call_contract CPI.
+    // Parse logs to find which top-level instruction invoked the gateway and
+    // which inner CPI within that instruction is the event emit.
     //
-    // The message ID uses the index of the gateway `call_contract` invocation
-    // in the inner instructions array. After call_contract, the gateway emits
-    // an event via `emit_cpi!` — this does NOT create a separate "invoke" log
-    // but IS a separate entry in the inner_instructions array. So the message
-    // ID index = gateway_invoke_index + 1 (for the event emit that follows).
-    let mut inner_ix_counter: u32 = 0;
-    let mut last_gateway_idx: Option<u32> = None;
+    // Log pattern:
+    //   "Program X invoke [1]"  → top-level instruction start (depth 1)
+    //   "Program X invoke [N]"  → CPI at depth N (inner instruction)
+    //   "Program X success"     → instruction end
+    //
+    // We track which top-level instruction we're in (1-based group index)
+    // and count inner CPIs within each group separately.
+    let mut top_level_index: u32 = 0; // 1-based
+    let mut inner_ix_counter: u32 = 0; // 0-based within current group
+    let mut found_group: Option<u32> = None;
+    let mut found_inner_idx: Option<u32> = None;
 
     for log in &logs {
         if let Some(rest) = log.strip_prefix("Program ") {
             if rest.ends_with(" invoke [1]") {
-                continue;
-            }
-            if rest.contains(" invoke [") {
+                // New top-level instruction
+                top_level_index += 1;
+                inner_ix_counter = 0;
+            } else if rest.contains(" invoke [") {
+                // Inner CPI
                 if rest.split(" invoke [").next() == Some(gateway_id.as_str()) {
-                    last_gateway_idx = Some(inner_ix_counter);
+                    found_group = Some(top_level_index);
+                    // The emit_cpi! after this invoke adds one more inner instruction
+                    // that doesn't produce an "invoke" log. The message ID references
+                    // that emit instruction, so we add 1.
+                    found_inner_idx = Some(inner_ix_counter + 1);
                 }
                 inner_ix_counter += 1;
             }
         }
     }
 
-    // The emit_cpi! after call_contract adds one more inner instruction that
-    // doesn't produce an "invoke" log. The message ID references that emit
-    // instruction, so we add 1.
-    let last_gateway_idx = last_gateway_idx.map(|idx| idx + 1);
-
-    match last_gateway_idx {
-        Some(idx) => {
-            // Top-level instruction is index 0 (0-based), displayed as 1 (1-based)
-            // in the message ID format.
-            Ok(format!("{signature_str}-1.{idx}"))
+    match (found_group, found_inner_idx) {
+        (Some(group), Some(idx)) => {
+            // Convert to 1-based indexing for the message ID format
+            Ok(format!("{signature_str}-{group}.{idx}"))
         }
-        None => Err(eyre::eyre!(
+        _ => Err(eyre::eyre!(
             "could not find gateway call_contract CPI in transaction logs"
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gateway approval flow (manual relay for Solana destination)
+// ---------------------------------------------------------------------------
+
+use solana_axelar_std::execute_data::ExecuteData;
+use solana_axelar_std::{MerklizedMessage, PayloadType, SigningVerifierSetInfo};
+
+/// Deserialize the execute_data hex string from a Cosmos proof response
+/// into the Solana `ExecuteData` struct.
+#[allow(dead_code)]
+pub fn decode_execute_data(execute_data_hex: &str) -> Result<ExecuteData> {
+    let bytes = hex::decode(execute_data_hex)?;
+    let execute_data: ExecuteData = borsh::BorshDeserialize::try_from_slice(&bytes)?;
+    Ok(execute_data)
+}
+
+/// Step 7a: Initialize a payload verification session on the Solana gateway.
+/// This creates the session PDA that tracks signature verification progress.
+#[allow(dead_code)]
+pub fn initialize_verification_session(
+    rpc_url: &str,
+    payer: &Keypair,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    // Derive VerifierSetTracker PDA
+    let (verifier_set_tracker_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::VerifierSetTracker::SEED_PREFIX,
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    // Derive verification session PDA
+    let payload_type_byte: u8 = PayloadType::ApproveMessages.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let ix_data = solana_axelar_gateway::instruction::InitializePayloadVerificationSession {
+        merkle_root: payload_merkle_root,
+        payload_type: PayloadType::ApproveMessages,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(verification_session_pda, false),
+            AccountMeta::new_readonly(verifier_set_tracker_pda, false),
+            AccountMeta::new_readonly(anchor_lang::prelude::system_program::ID, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Step 7b: Verify a single signature against the verification session.
+/// Called once per signer. Can be called in parallel.
+#[allow(dead_code)]
+pub fn verify_signature(
+    rpc_url: &str,
+    payer: &Keypair,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+    verifier_info: SigningVerifierSetInfo,
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    let payload_type_byte: u8 = verifier_info.payload_type.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let (verifier_set_tracker_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::VerifierSetTracker::SEED_PREFIX,
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let ix_data = solana_axelar_gateway::instruction::VerifySignature {
+        payload_merkle_root,
+        verifier_info,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(verification_session_pda, false),
+            AccountMeta::new_readonly(verifier_set_tracker_pda, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    // SetComputeUnitLimit: program_id = ComputeBudget111..., data = [0x02, limit_u32_le]
+    let cu_limit: u32 = 400_000;
+    let cu_ix = Instruction {
+        program_id: "ComputeBudget111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data: [&[0x02], cu_limit.to_le_bytes().as_slice()].concat(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix, ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Step 7c: Approve a message on the Solana gateway after all signatures
+/// have been verified. Creates the IncomingMessage PDA.
+#[allow(dead_code)]
+pub fn approve_message(
+    rpc_url: &str,
+    payer: &Keypair,
+    merklized_message: MerklizedMessage,
+    payload_merkle_root: [u8; 32],
+    signing_verifier_set_merkle_root: [u8; 32],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+
+    let command_id = merklized_message.leaf.message.command_id();
+    let (incoming_message_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::IncomingMessage::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &gateway_id,
+    );
+
+    let payload_type_byte: u8 = PayloadType::ApproveMessages.into();
+    let (verification_session_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::SignatureVerificationSessionData::SEED_PREFIX,
+            &payload_merkle_root,
+            &[payload_type_byte],
+            &signing_verifier_set_merkle_root,
+        ],
+        &gateway_id,
+    );
+
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
+
+    let ix_data = solana_axelar_gateway::instruction::ApproveMessage {
+        merklized_message,
+        payload_merkle_root,
+    };
+
+    let ix = Instruction {
+        program_id: gateway_id,
+        accounts: vec![
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new(payer.pubkey(), true),
+            AccountMeta::new_readonly(verification_session_pda, false),
+            AccountMeta::new(incoming_message_pda, false),
+            AccountMeta::new_readonly(anchor_lang::prelude::system_program::ID, false),
+            AccountMeta::new_readonly(event_authority, false),
+            AccountMeta::new_readonly(gateway_id, false),
+        ],
+        data: ix_data.data(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+/// Run the full Solana gateway approval flow:
+/// 1. Initialize verification session
+/// 2. Verify all signatures
+/// 3. Approve the message
+#[allow(dead_code)]
+pub fn approve_messages_on_gateway(
+    rpc_url: &str,
+    payer: &Keypair,
+    execute_data: &ExecuteData,
+) -> Result<()> {
+    use crate::ui;
+    use solana_axelar_std::execute_data::MerklizedPayload;
+
+    // Step 7a: Initialize verification session
+    ui::info("initializing payload verification session...");
+    match initialize_verification_session(
+        rpc_url,
+        payer,
+        execute_data.payload_merkle_root,
+        execute_data.signing_verifier_set_merkle_root,
+    ) {
+        Ok(sig) => ui::tx_hash("init session", &sig.to_string()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("already in use") {
+                ui::info("verification session already initialized");
+            } else {
+                return Err(e);
+            }
+        }
+    }
+
+    // Step 7b: Verify signatures (one per signer)
+    let num_signers = execute_data.signing_verifier_set_leaves.len();
+    ui::info(&format!("verifying {num_signers} signatures..."));
+
+    for (i, verifier_info) in execute_data.signing_verifier_set_leaves.iter().enumerate() {
+        // Normalize recovery ID: Cosmos signers produce 27/28 (Ethereum-style),
+        // but Solana's secp256k1_recover expects 0/1.
+        let mut info = verifier_info.clone();
+        if info.signature.0[64] >= 27 {
+            info.signature.0[64] -= 27;
+        }
+        match verify_signature(
+            rpc_url,
+            payer,
+            execute_data.payload_merkle_root,
+            execute_data.signing_verifier_set_merkle_root,
+            info,
+        ) {
+            Ok(_) => {
+                ui::info(&format!("  signature {}/{num_signers} verified", i + 1));
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("SlotAlreadyVerified") || msg.contains("already") {
+                    ui::info(&format!(
+                        "  signature {}/{num_signers} already verified",
+                        i + 1
+                    ));
+                } else {
+                    return Err(eyre::eyre!("failed to verify signature {}: {e}", i + 1));
+                }
+            }
+        }
+    }
+
+    // Step 7c: Approve messages
+    let messages = match &execute_data.payload_items {
+        MerklizedPayload::NewMessages { messages } => messages,
+        _ => {
+            return Err(eyre::eyre!(
+                "expected NewMessages payload, got VerifierSetRotation"
+            ));
+        }
+    };
+
+    ui::info(&format!("approving {} message(s)...", messages.len()));
+    for (i, merklized_message) in messages.iter().enumerate() {
+        match approve_message(
+            rpc_url,
+            payer,
+            merklized_message.clone(),
+            execute_data.payload_merkle_root,
+            execute_data.signing_verifier_set_merkle_root,
+        ) {
+            Ok(sig) => {
+                ui::tx_hash(&format!("approve msg {}", i + 1), &sig.to_string());
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("already in use") {
+                    ui::info(&format!("  message {} already approved", i + 1));
+                } else {
+                    return Err(eyre::eyre!("failed to approve message {}: {e}", i + 1));
+                }
+            }
+        }
+    }
+
+    ui::success("all messages approved on Solana gateway");
+    Ok(())
+}
+
+/// Execute an approved GMP message on the Memo program.
+/// Calls the Memo program's `execute` instruction which validates the message
+/// against the gateway and logs the memo payload.
+#[allow(dead_code)]
+pub fn execute_on_memo(
+    rpc_url: &str,
+    payer: &Keypair,
+    message: solana_axelar_std::Message,
+    payload: &[u8],
+) -> Result<Signature> {
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let gateway_id = solana_axelar_gateway::id();
+    let memo_id = solana_axelar_memo::id();
+
+    let command_id = message.command_id();
+
+    // AxelarExecuteAccounts
+    let (incoming_message_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::IncomingMessage::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &gateway_id,
+    );
+    let (signing_pda, _) = Pubkey::find_program_address(
+        &[
+            solana_axelar_gateway::ValidateMessageSigner::SEED_PREFIX,
+            command_id.as_ref(),
+        ],
+        &memo_id,
+    );
+    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let (gateway_event_authority, _) =
+        Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
+
+    // Counter PDA for the memo program
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_id);
+
+    // The payload passed to call_contract was AxelarMessagePayload-encoded (ABI scheme).
+    // The execute instruction receives the inner payload (memo bytes) and the encoding scheme.
+    // We need to decode the AxelarMessagePayload to get the inner payload.
+    let decoded = solana_axelar_gateway::payload::AxelarMessagePayload::decode(payload)
+        .map_err(|e| eyre::eyre!("failed to decode payload: {e:?}"))?;
+    let inner_payload = decoded.payload_without_accounts().to_vec();
+    let encoding_scheme = decoded.encoding_scheme();
+
+    let ix_data = solana_axelar_memo::instruction::Execute {
+        message,
+        payload: inner_payload,
+        encoding_scheme,
+    }
+    .data();
+
+    let ix = Instruction {
+        program_id: memo_id,
+        accounts: vec![
+            // AxelarExecuteAccounts (order from executable_accounts! macro)
+            AccountMeta::new(incoming_message_pda, false),
+            AccountMeta::new_readonly(signing_pda, false),
+            AccountMeta::new_readonly(gateway_config_pda, false),
+            AccountMeta::new_readonly(gateway_event_authority, false),
+            AccountMeta::new_readonly(gateway_id, false),
+            // Memo program accounts
+            AccountMeta::new(counter_pda, false),
+        ],
+        data: ix_data,
+    };
+
+    let cu_limit: u32 = 400_000;
+    let cu_ix = Instruction {
+        program_id: "ComputeBudget111111111111111111111111111111"
+            .parse()
+            .unwrap(),
+        accounts: vec![],
+        data: [&[0x02], cu_limit.to_le_bytes().as_slice()].concat(),
+    };
+
+    let recent_blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[cu_ix, ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        recent_blockhash,
+    );
+
+    let sig = rpc.send_and_confirm_transaction_with_spinner(&tx)?;
+    Ok(sig)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_testnet_gateway_pdas() {
+        // Testnet Solana gateway
+        let gateway_id: Pubkey = "gtwJ8LWDRWZpbvCqp8sDeTgy3GSyuoEsiaKC8wSXJqq"
+            .parse()
+            .unwrap();
+
+        // GatewayConfig PDA
+        let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+        println!("GatewayConfig PDA: {config_pda}");
+        assert_eq!(
+            config_pda.to_string(),
+            "8mnEaWDXqbpDwyiGLR1T8DTc8AHuk2Fs6Pf4fRDv97WY"
+        );
+
+        // VerifierSetTracker PDA for the on-chain verifier set
+        let onchain_hash =
+            hex::decode("7b8163c3123a65f351c1d5b1e94c44841e731ea57b51f55479207380cab933c5")
+                .unwrap();
+        let (tracker_pda, _) =
+            Pubkey::find_program_address(&[b"ver-set-tracker", &onchain_hash], &gateway_id);
+        println!("VerifierSetTracker PDA (on-chain):  {tracker_pda}");
+        assert_eq!(
+            tracker_pda.to_string(),
+            "F1PVLJQSGxBr28QWsRJTaTJiua7yKZQ5r97KG154uZum"
+        );
+
+        // VerifierSetTracker PDA for the MultisigProver's current set
+        let prover_hash =
+            hex::decode("046c15e70bf840b19ef2e727bbfe6fae18155077342b2aa41d766a2f6db32cb1")
+                .unwrap();
+        let (tracker_pda2, _) =
+            Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
+        println!("VerifierSetTracker PDA (prover):    {tracker_pda2}");
+
+        // These should be DIFFERENT — confirming the mismatch
+        assert_ne!(tracker_pda, tracker_pda2);
+        println!("\nVerifier set mismatch confirmed!");
+        println!("Gateway knows:      7b8163c3...");
+        println!("MultisigProver uses: 046c15e7...");
+        println!("rotate_signers needed on the Solana gateway");
+    }
+}
+
+#[test]
+fn derive_devnet_gateway_pdas() {
+    let gateway_id: Pubkey = "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9"
+        .parse()
+        .unwrap();
+
+    let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+    println!("=== DEVNET-AMPLIFIER ===");
+    println!("GatewayConfig PDA: {config_pda}");
+
+    // MultisigProver verifier set: caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed
+    let prover_hash =
+        hex::decode("caa238976160fcea5d5e5f4f3ea2ce0bed9106847e2d6d939de746c890c1faed").unwrap();
+    let (tracker_pda, _) =
+        Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
+    println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
+    println!("Check on-chain: solana account {tracker_pda} --url https://api.devnet.solana.com");
+}
+
+#[test]
+fn derive_stagenet_gateway_pdas() {
+    let gateway_id: Pubkey = "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ"
+        .parse()
+        .unwrap();
+
+    let (config_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_id);
+    println!("=== STAGENET ===");
+    println!("GatewayConfig PDA: {config_pda}");
+
+    // MultisigProver verifier set: 315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8
+    let prover_hash =
+        hex::decode("315ad3ca3e873b65dbc5dd4a446a62018ea368b5d9f29232fa090875fdaa50b8").unwrap();
+    let (tracker_pda, _) =
+        Pubkey::find_program_address(&[b"ver-set-tracker", &prover_hash], &gateway_id);
+    println!("VerifierSetTracker PDA (prover set): {tracker_pda}");
+    println!("Check on-chain: solana account {tracker_pda} --url https://api.testnet.solana.com");
 }
