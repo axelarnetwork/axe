@@ -40,7 +40,8 @@ workspace/
 | `axe test its`       | Deploy + transfer an interchain token         | no      |
 | `axe test load-test` | Cross-chain load test                         | yes     |
 | `axe decode calldata`| Decode raw EVM calldata                       | -       |
-| `axe decode tx`      | Fetch & decode a full EVM transaction          | -       |
+| `axe decode tx`      | Fetch & decode an EVM or Solana transaction   | -       |
+| `axe decode sol-activity`| Recent Solana program activity            | -       |
 
 ## Deploy
 
@@ -271,6 +272,16 @@ Set `ALCHEMY_TOKEN` to use Alchemy RPCs for supported chains (faster and more re
 export ALCHEMY_TOKEN=your_token_here
 axe decode tx 0xabc123...
 ```
+
+### Solana program activity
+
+```bash
+axe decode sol-activity --program gateway --network devnet-amplifier --limit 5
+axe decode sol-activity --network testnet                              # all programs on testnet
+axe decode sol-activity --program its --network devnet-amplifier --json # machine-readable JSON
+```
+
+Shows recent transactions for Axelar Solana programs (Gateway, ITS, GasService, Memo). Auto-discovers program addresses from the sibling `axelar-contract-deployments` config files. Decodes instruction names, args, and CPI events. Use `--json` for structured output consumable by LLMs for debugging.
 
 ## Configuration
 

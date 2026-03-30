@@ -7,119 +7,122 @@ use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use solana_transaction_status::UiTransactionEncoding;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use super::decode_sol_tx;
-use crate::cli::{SolNetwork, SolProgram};
+use crate::cli::SolProgram;
 
 // ---------------------------------------------------------------------------
-// Program registry: (network, program_type, label, address, rpc_url)
+// Config discovery
 // ---------------------------------------------------------------------------
 
-struct ProgramEntry {
-    network: &'static str,
-    rpc_url: &'static str,
-    program_type: &'static str,
-    label: &'static str,
-    address: &'static str,
+struct DiscoveredProgram {
+    network: String,
+    chain_name: String,
+    rpc_url: String,
+    _program_type: String,
+    label: String,
+    address: String,
 }
 
-const PROGRAMS: &[ProgramEntry] = &[
-    // devnet
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "gateway",
-        label: "Gateway",
-        address: "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "gas-service",
-        label: "GasService",
-        address: "gasHyxjNZSNsEiMbRLa5JGLCNx1TRsdCy1xwfMBehYB",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "memo",
-        label: "Memo",
-        address: "memKnP9ex71TveNFpsFNVqAYGEe1v9uHVsHNdFPW6FY",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "its",
-        label: "ITS",
-        address: "itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "its",
-        label: "ITS",
-        address: "itsYxmqAxNKUL5zaj3fD1K1whuVhqpxKVoiLGie1reF",
-    },
-    // stagenet (on solana testnet)
-    ProgramEntry {
-        network: "testnet",
-        rpc_url: "https://api.testnet.solana.com",
-        program_type: "gateway",
-        label: "Gateway",
-        address: "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ",
-    },
-    ProgramEntry {
-        network: "testnet",
-        rpc_url: "https://api.testnet.solana.com",
-        program_type: "gas-service",
-        label: "GasService",
-        address: "gasgy6jz24wrfZL98uMy8QFUFziVPZ3bNLGXqnyTstW",
-    },
-    ProgramEntry {
-        network: "testnet",
-        rpc_url: "https://api.testnet.solana.com",
-        program_type: "memo",
-        label: "Memo",
-        address: "mem4E22pPgkbHAvoUYHa7HybBgUKn6jFjvj1YnPdkaq",
-    },
-    ProgramEntry {
-        network: "testnet",
-        rpc_url: "https://api.testnet.solana.com",
-        program_type: "its",
-        label: "ITS",
-        address: "itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B",
-    },
-    // testnet (on solana devnet)
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "gateway",
-        label: "Gateway",
-        address: "gtwJ8LWDRWZpbvCqp8sDeTgy3GSyuoEsiaKC8wSXJqq",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "gas-service",
-        label: "GasService",
-        address: "gasq7KHHv9Rs8C82hu3dgoBD9wk5LTKpWqbdf5o5juu",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "memo",
-        label: "Memo",
-        address: "mem7UJouaeyTgySvXhQSxWtGFrWPQ89jywjc8YvQFRT",
-    },
-    ProgramEntry {
-        network: "devnet",
-        rpc_url: "https://api.devnet.solana.com",
-        program_type: "its",
-        label: "ITS",
-        address: "itsJo4kNJ3mdh3requwbtTTt7vyYTudp1pxhn2KiHMc",
-    },
-];
+fn discover_programs(
+    network_filter: Option<&str>,
+    program_filter: Option<SolProgram>,
+) -> Vec<DiscoveredProgram> {
+    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
+    let networks = if let Some(n) = network_filter {
+        vec![n.to_string()]
+    } else {
+        vec![
+            "devnet-amplifier".to_string(),
+            "stagenet".to_string(),
+            "testnet".to_string(),
+            "mainnet".to_string(),
+        ]
+    };
+
+    let program_type_filter = program_filter.map(|p| match p {
+        SolProgram::Gateway => "gateway",
+        SolProgram::Its => "its",
+        SolProgram::GasService => "gas-service",
+        SolProgram::Memo => "memo",
+    });
+
+    let mut programs = Vec::new();
+
+    for network in &networks {
+        let config_path = config_dir.join(format!("{network}.json"));
+        let config_content = match std::fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let config: serde_json::Value = match serde_json::from_str(&config_content) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let chains = match config.get("chains").and_then(|v| v.as_object()) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Find SVM chains and their RPC
+        for (chain_name, chain_config) in chains {
+            let chain_type = chain_config
+                .get("chainType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if chain_type != "svm" {
+                continue;
+            }
+
+            let rpc_url = match chain_config.get("rpc").and_then(|v| v.as_str()) {
+                Some(r) => r.to_string(),
+                None => continue,
+            };
+
+            let contracts = match chain_config.get("contracts").and_then(|v| v.as_object()) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            // Map contract names to our program types
+            let contract_map = [
+                ("AxelarGateway", "gateway", "Gateway"),
+                ("AxelarGasService", "gas-service", "GasService"),
+                ("AxelarMemo", "memo", "Memo"),
+                ("InterchainTokenService", "its", "ITS"),
+            ];
+
+            for (contract_name, prog_type, label) in &contract_map {
+                if let Some(filter) = program_type_filter
+                    && *prog_type != filter
+                {
+                    continue;
+                }
+
+                let address = contracts
+                    .get(*contract_name)
+                    .and_then(|v| v.get("address").or(Some(v)))
+                    .and_then(|v| v.as_str());
+
+                if let Some(addr) = address {
+                    programs.push(DiscoveredProgram {
+                        network: network.clone(),
+                        chain_name: chain_name.clone(),
+                        rpc_url: rpc_url.clone(),
+                        _program_type: prog_type.to_string(),
+                        label: label.to_string(),
+                        address: addr.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    programs
+}
 
 // ---------------------------------------------------------------------------
 // JSON output struct
@@ -128,6 +131,7 @@ const PROGRAMS: &[ProgramEntry] = &[
 #[derive(Serialize)]
 struct ActivityEntry {
     network: String,
+    chain: String,
     program: String,
     program_address: String,
     signature: String,
@@ -149,43 +153,28 @@ struct ActivityEntry {
 
 pub async fn run(
     program_filter: Option<SolProgram>,
-    network_filter: Option<SolNetwork>,
+    network: Option<String>,
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    let network_str = network_filter.map(|n| match n {
-        SolNetwork::Devnet => "devnet",
-        SolNetwork::Testnet => "testnet",
-        SolNetwork::Mainnet => "mainnet",
-    });
+    let programs = discover_programs(network.as_deref(), program_filter);
 
-    let program_str = program_filter.map(|p| match p {
-        SolProgram::Gateway => "gateway",
-        SolProgram::Its => "its",
-        SolProgram::GasService => "gas-service",
-        SolProgram::Memo => "memo",
-    });
-
-    let filtered: Vec<&ProgramEntry> = PROGRAMS
-        .iter()
-        .filter(|p| network_str.is_none() || network_str == Some(p.network))
-        .filter(|p| program_str.is_none() || program_str == Some(p.program_type))
-        .collect();
-
-    if filtered.is_empty() {
-        return Err(eyre::eyre!("no programs match the given filters"));
+    if programs.is_empty() {
+        return Err(eyre::eyre!(
+            "no Solana programs found. Make sure axelar-contract-deployments is a sibling directory."
+        ));
     }
 
     let known = decode_sol_tx::known_programs();
     let mut all_entries: Vec<ActivityEntry> = Vec::new();
 
-    for entry in &filtered {
-        let pubkey = match Pubkey::from_str(entry.address) {
+    for entry in &programs {
+        let pubkey = match Pubkey::from_str(&entry.address) {
             Ok(pk) => pk,
             Err(_) => continue,
         };
 
-        let rpc = RpcClient::new_with_commitment(entry.rpc_url, CommitmentConfig::confirmed());
+        let rpc = RpcClient::new_with_commitment(&entry.rpc_url, CommitmentConfig::confirmed());
 
         let sigs = match rpc.get_signatures_for_address_with_config(
             &pubkey,
@@ -206,8 +195,8 @@ pub async fn run(
             println!(
                 "\n{}",
                 format!(
-                    "━━ {} ({}) {} ━━",
-                    entry.label, entry.network, entry.address
+                    "━━ {} ({}/{}) {} ━━",
+                    entry.label, entry.network, entry.chain_name, entry.address
                 )
                 .bold()
             );
@@ -224,7 +213,6 @@ pub async fn run(
             let slot = sig_info.slot;
             let block_time = sig_info.block_time;
 
-            // Fetch full tx to identify instruction
             let (ix_name, args_json, events) = fetch_and_decode(&rpc, sig, &known);
 
             if !json_mode {
@@ -263,9 +251,10 @@ pub async fn run(
             }
 
             all_entries.push(ActivityEntry {
-                network: entry.network.to_string(),
-                program: entry.label.to_string(),
-                program_address: entry.address.to_string(),
+                network: entry.network.clone(),
+                chain: entry.chain_name.clone(),
+                program: entry.label.clone(),
+                program_address: entry.address.clone(),
                 signature: sig.clone(),
                 slot,
                 timestamp: block_time,
@@ -323,7 +312,6 @@ fn fetch_and_decode(
         _ => vec![],
     };
 
-    // Also get loaded addresses (ALTs)
     let mut all_keys = account_keys.clone();
     if let Some(meta) = &tx.transaction.meta
         && let solana_transaction_status::option_serializer::OptionSerializer::Some(loaded) =
@@ -402,7 +390,6 @@ fn format_timestamp(ts: i64) -> String {
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
 
-    // Simple date calculation (good enough for display)
     let mut y = 1970i64;
     let mut remaining_days = days_since_epoch;
     loop {
