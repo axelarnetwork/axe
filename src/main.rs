@@ -50,6 +50,12 @@ async fn main() -> Result<()> {
                 config,
                 chain,
             } => commands::decode_tx::run(&txid, config.as_deref(), chain.as_deref()).await,
+            cli::DecodeCommands::SolActivity {
+                program,
+                network,
+                limit,
+                json,
+            } => commands::decode_sol_activity::run(program, network, limit, json).await,
         },
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp {

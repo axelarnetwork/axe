@@ -15,7 +15,7 @@ use std::str::FromStr;
 // Known program IDs (resolved at runtime from crates)
 // ---------------------------------------------------------------------------
 
-fn known_programs() -> HashMap<Pubkey, &'static str> {
+pub fn known_programs() -> HashMap<Pubkey, &'static str> {
     let mut m = HashMap::new();
 
     // Compiled feature's IDs (always included)
@@ -100,7 +100,7 @@ fn known_programs() -> HashMap<Pubkey, &'static str> {
 // Anchor instruction discriminators (sha256("global:<name>")[0:8])
 // ---------------------------------------------------------------------------
 
-fn instruction_name(discriminator: &[u8]) -> Option<&'static str> {
+pub fn instruction_name(discriminator: &[u8]) -> Option<&'static str> {
     if discriminator.len() < 8 {
         return None;
     }
@@ -326,9 +326,9 @@ fn format_account(
 // event discriminator (8 bytes), then borsh-encoded event data.
 // ---------------------------------------------------------------------------
 
-const EVENT_IX_TAG_LE: &[u8] = &[0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
+pub const EVENT_IX_TAG_LE: &[u8] = &[0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
 
-fn event_name(discriminator: &[u8]) -> Option<&'static str> {
+pub fn event_name(discriminator: &[u8]) -> Option<&'static str> {
     if discriminator.len() < 8 {
         return None;
     }
@@ -860,7 +860,7 @@ fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-const SOLANA_RPCS: &[(&str, &str)] = &[
+pub const SOLANA_RPCS: &[(&str, &str)] = &[
     ("devnet", "https://api.devnet.solana.com"),
     ("testnet", "https://api.testnet.solana.com"),
     ("mainnet", "https://api.mainnet-beta.solana.com"),
@@ -1465,4 +1465,134 @@ fn decode_borsh_string(data: &[u8]) -> Result<(String, &[u8])> {
     }
     let s = String::from_utf8_lossy(&data[4..4 + len]).to_string();
     Ok((s, &data[4 + len..]))
+}
+
+/// Decode instruction arguments into a JSON map (for machine-readable output).
+pub fn decode_instruction_args_json(ix_name: &str, data: &[u8]) -> serde_json::Value {
+    use serde_json::json;
+
+    if data.len() <= 8 {
+        return json!({});
+    }
+    let args = &data[8..];
+
+    match ix_name {
+        "CallContract" => {
+            let mut m = serde_json::Map::new();
+            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
+                m.insert("destination_chain".into(), json!(dest_chain));
+                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
+                    m.insert("destination_address".into(), json!(dest_addr));
+                    if let Ok((payload, _)) = decode_borsh_bytes(rest) {
+                        m.insert("payload_size".into(), json!(payload.len()));
+                    }
+                }
+            }
+            json!(m)
+        }
+        "PayGas" => {
+            let mut m = serde_json::Map::new();
+            if let Ok((dest_chain, rest)) = decode_borsh_string(args) {
+                m.insert("destination_chain".into(), json!(dest_chain));
+                if let Ok((dest_addr, rest)) = decode_borsh_string(rest) {
+                    m.insert("destination_address".into(), json!(dest_addr));
+                    if rest.len() >= 40 {
+                        m.insert("payload_hash".into(), json!(hex::encode(&rest[..32])));
+                        let gas = u64::from_le_bytes(rest[32..40].try_into().unwrap_or_default());
+                        m.insert("gas_amount".into(), json!(gas));
+                    }
+                }
+            }
+            json!(m)
+        }
+        "InitializePayloadVerificationSession" => {
+            let mut m = serde_json::Map::new();
+            if args.len() >= 33 {
+                m.insert("merkle_root".into(), json!(hex::encode(&args[..32])));
+                let pt = match args[32] {
+                    0 => "ApproveMessages",
+                    1 => "RotateSigners",
+                    _ => "Unknown",
+                };
+                m.insert("payload_type".into(), json!(pt));
+            }
+            json!(m)
+        }
+        "VerifySignature" => {
+            let mut m = serde_json::Map::new();
+            if args.len() >= 32 {
+                m.insert(
+                    "payload_merkle_root".into(),
+                    json!(hex::encode(&args[..32])),
+                );
+                if args.len() >= 32 + 65 + 24 + 33 {
+                    let leaf = &args[32 + 65..];
+                    if leaf.len() >= 57 {
+                        m.insert("signer".into(), json!(hex::encode(&leaf[24..57])));
+                    }
+                }
+            }
+            json!(m)
+        }
+        "InterchainTransfer" => {
+            let mut m = serde_json::Map::new();
+            if args.len() >= 32 {
+                m.insert("token_id".into(), json!(hex::encode(&args[..32])));
+                let rest = &args[32..];
+                if let Ok((dest_chain, rest)) = decode_borsh_string(rest) {
+                    m.insert("destination_chain".into(), json!(dest_chain));
+                    if let Ok((dest_addr_bytes, rest)) = decode_borsh_bytes(rest) {
+                        m.insert(
+                            "destination_address".into(),
+                            json!(format_address_bytes(&dest_addr_bytes)),
+                        );
+                        if rest.len() >= 16 {
+                            let amount =
+                                u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
+                            m.insert("amount".into(), json!(amount));
+                        }
+                    }
+                }
+            }
+            json!(m)
+        }
+        "ApproveMessage" | "ValidateMessage" => {
+            let mut m = serde_json::Map::new();
+            if let Ok((chain, rest)) = decode_borsh_string(args)
+                && let Ok((id, rest)) = decode_borsh_string(rest)
+            {
+                m.insert("cc_id".into(), json!(format!("{chain}-{id}")));
+                if let Ok((source_addr, rest)) = decode_borsh_string(rest) {
+                    m.insert("source_address".into(), json!(source_addr));
+                    if let Ok((dest_chain, rest)) = decode_borsh_string(rest)
+                        && let Ok((dest_addr, rest)) = decode_borsh_string(rest)
+                    {
+                        m.insert("destination_chain".into(), json!(dest_chain));
+                        m.insert("destination_address".into(), json!(dest_addr));
+                        if rest.len() >= 32 {
+                            m.insert("payload_hash".into(), json!(hex::encode(&rest[..32])));
+                        }
+                    }
+                }
+            }
+            json!(m)
+        }
+        "Execute" => {
+            let mut m = serde_json::Map::new();
+            if let Ok((chain, rest)) = decode_borsh_string(args)
+                && let Ok((id, rest)) = decode_borsh_string(rest)
+            {
+                m.insert("cc_id".into(), json!(format!("{chain}-{id}")));
+                if let Ok((source_addr, _)) = decode_borsh_string(rest) {
+                    m.insert("source_address".into(), json!(source_addr));
+                }
+            }
+            json!(m)
+        }
+        _ => {
+            let mut m = serde_json::Map::new();
+            m.insert("raw_size".into(), json!(args.len()));
+            json!(m)
+        }
+    }
 }

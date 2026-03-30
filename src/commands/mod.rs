@@ -1,4 +1,5 @@
 pub mod decode;
+pub mod decode_sol_activity;
 pub mod decode_sol_tx;
 pub mod decode_tx;
 pub mod deploy;
