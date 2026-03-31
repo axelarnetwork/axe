@@ -18,17 +18,50 @@ This guide is for AI assistants (Claude, GPT, etc.) helping debug Axelar cross-c
 
 ### Step 1: Identify where it stopped
 
-A cross-chain message goes through these stages:
+There are **two distinct flows** depending on whether the message is GMP (direct) or ITS (hub-routed):
+
+#### Flow 1: GMP (General Message Passing) — direct chain-to-chain
+
+Messages go directly from source to destination without the ITS hub:
 
 ```
-EVM/Solana source → [verify] → [vote] → [route] → [hub execute] → [construct_proof] → [approve on dest] → [execute on dest]
+Source chain (callContract)
+  → Cosmos: verify_messages on source Gateway
+  → Cosmos: verifiers vote on VotingVerifier poll
+  → Cosmos: end_poll on VotingVerifier
+  → Cosmos: route_messages on source Gateway → Router → dest Gateway
+  → Cosmos: construct_proof on dest MultisigProver
+  → Cosmos: verifiers sign proof
+  → Dest chain: submit execute_data (approve + execute)
 ```
 
-For ITS messages (tokens), there's an extra hub step:
+The destination chain is specified in the original `ContractCall` event. One leg only.
+
+#### Flow 2: ITS (Interchain Token Service) — two-leg hub routing
+
+ITS messages always route through the Axelar ITS hub on Cosmos. This creates **two separate legs** with different message IDs:
 
 ```
-Source → Cosmos Gateway → Router → AxelarnetGateway → ITS Hub → Router → Dest Gateway → MultisigProver → Dest chain
+FIRST LEG (source → hub):
+  Source chain (ContractCall with destination="axelar")
+  → Cosmos: verify_messages on source Gateway
+  → Cosmos: verifiers vote
+  → Cosmos: route_messages → Router → AxelarnetGateway (marks as "approved")
+  → Cosmos: execute on AxelarnetGateway → ITS Hub processes message
+
+SECOND LEG (hub → destination):
+  ITS Hub emits new message with source_chain="axelar" and NEW message_id
+  → Cosmos: Router routes to dest Gateway (auto, no verification needed)
+  → Cosmos: construct_proof on dest MultisigProver
+  → Cosmos: verifiers sign proof
+  → Dest chain: submit execute_data (approve + execute)
 ```
+
+**Key differences from GMP:**
+- The `ContractCall` destination is always `"axelar"` (the ITS hub), not the final destination
+- The ITS hub creates a **second-leg message** with a new `message_id` and `source_chain="axelar"`
+- To trace the second leg, use `tx_search` on the Axelar RPC for `wasm-message_executed.message_id='<first_leg_id>'` to find the `wasm-routing` event with the second-leg message_id
+- The `ampd-event-verifier` pod (or relayer) is responsible for calling `execute` on the AxelarnetGateway — if it's down, all ITS messages get stuck at "Approving"
 
 ### Step 2: Decode the source transaction
 
