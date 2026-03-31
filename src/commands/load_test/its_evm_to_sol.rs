@@ -145,9 +145,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
     // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
     let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
-    // Distribute 1000x per key so cached tokens last across many runs.
-    let amount_per_key = amount_per_tx * U256::from(1000);
-    let total_supply = amount_per_key * U256::from(num_keys + 10);
+    // Distribute 100x per key so cached tokens last across many runs.
+    let amount_per_key = amount_per_tx * U256::from(100);
+    // Mint a large fixed supply so the token can be reused across runs without redeploying.
+    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128); // 1M tokens
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 

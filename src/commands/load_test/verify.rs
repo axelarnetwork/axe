@@ -24,9 +24,134 @@ use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
 /// Resets every time a tx makes progress, so large batches naturally get more time.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
 /// Delay between poll attempts.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Interval for recalculating rolling throughput.
+const THROUGHPUT_WINDOW: Duration = Duration::from_secs(10);
+
+// ---------------------------------------------------------------------------
+// Real-time stats (throughput + latency) for spinner display
+// ---------------------------------------------------------------------------
+
+struct RealTimeStats {
+    snapshot_time: Instant,
+    snapshot_counts: [usize; 5], // voted, routed, hub_approved, approved, executed
+    throughputs: [Option<f64>; 5],
+    latencies: Vec<f64>, // sorted executed_secs for completed txs
+}
+
+impl RealTimeStats {
+    fn new() -> Self {
+        Self {
+            snapshot_time: Instant::now(),
+            snapshot_counts: [0; 5],
+            throughputs: [None; 5],
+            latencies: Vec::new(),
+        }
+    }
+
+    /// Update throughputs every THROUGHPUT_WINDOW and collect new latencies.
+    #[allow(clippy::float_arithmetic)]
+    fn update(&mut self, counts: [usize; 5], txs: &[PendingTx]) {
+        let elapsed = self.snapshot_time.elapsed();
+        if elapsed >= THROUGHPUT_WINDOW {
+            let secs = elapsed.as_secs_f64();
+            for i in 0..5 {
+                let delta = counts[i].saturating_sub(self.snapshot_counts[i]);
+                self.throughputs[i] = if delta > 0 {
+                    Some(delta as f64 / secs)
+                } else {
+                    self.throughputs[i] // keep last known value
+                };
+            }
+            self.snapshot_counts = counts;
+            self.snapshot_time = Instant::now();
+        }
+
+        // Rebuild latencies from all completed txs (simple and correct).
+        let new_len = txs.iter().filter(|t| t.timing.executed_secs.is_some()).count();
+        if new_len != self.latencies.len() {
+            self.latencies.clear();
+            for tx in txs {
+                if let Some(secs) = tx.timing.executed_secs {
+                    self.latencies.push(secs);
+                }
+            }
+            self.latencies
+                .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    }
+
+    /// Format a single phase: "450/600(4.2/s)" or "450/600" if no throughput yet.
+    fn fmt_phase(count: usize, total: usize, tps: Option<f64>) -> String {
+        match tps {
+            Some(t) => format!("{count}/{total}({t:.1}/s)"),
+            None => format!("{count}/{total}"),
+        }
+    }
+
+    /// Format latency summary: "e2e: avg 94.5s p50 92.1s p75 96.3s p99 102.1s"
+    #[allow(clippy::float_arithmetic)]
+    fn fmt_latency(&self) -> String {
+        let n = self.latencies.len();
+        if n == 0 {
+            return String::new();
+        }
+        let sum: f64 = self.latencies.iter().sum();
+        let avg = sum / n as f64;
+        let pct = |p: f64| -> f64 {
+            let idx = ((n as f64 * p) as usize).min(n - 1);
+            self.latencies[idx]
+        };
+        let min = self.latencies[0];
+        let max = self.latencies[n - 1];
+        format!(
+            " | e2e: avg {avg:.1}s p50 {:.1}s p75 {:.1}s p99 {:.1}s min {min:.1}s max {max:.1}s",
+            pct(0.50),
+            pct(0.75),
+            pct(0.99),
+        )
+    }
+
+    /// Build the full spinner message for GMP (no hub phase).
+    fn spinner_msg_gmp(&self, counts: [usize; 5], total: usize, err: Option<&str>) -> String {
+        let [voted, routed, _, approved, executed] = counts;
+        let [tv, tr, _, ta, te] = self.throughputs;
+        let mut msg = format!(
+            "voted: {}  routed: {}  approved: {}  executed: {}",
+            Self::fmt_phase(voted, total, tv),
+            Self::fmt_phase(routed, total, tr),
+            Self::fmt_phase(approved, total, ta),
+            Self::fmt_phase(executed, total, te),
+        );
+        msg.push_str(&self.fmt_latency());
+        if let Some(e) = err {
+            msg.push_str(&format!("  (err: {e})"));
+        }
+        msg
+    }
+
+    /// Build the full spinner message for ITS (with hub phase).
+    fn spinner_msg_its(&self, counts: [usize; 5], total: usize, err: Option<&str>) -> String {
+        let [voted, routed, hub, approved, executed] = counts;
+        let [tv, tr, th, ta, te] = self.throughputs;
+        let mut msg = format!(
+            "voted: {}  hub: {}  routed: {}  approved: {}  executed: {}",
+            Self::fmt_phase(voted, total, tv),
+            Self::fmt_phase(hub, total, th),
+            Self::fmt_phase(routed, total, tr),
+            Self::fmt_phase(approved, total, ta),
+            Self::fmt_phase(executed, total, te),
+        );
+        msg.push_str(&self.fmt_latency());
+        if let Some(e) = err {
+            msg.push_str(&format!("  (err: {e})"));
+        }
+        msg
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Phase tracking
@@ -234,6 +359,7 @@ async fn poll_pipeline<P: Provider>(
     let spinner =
         external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
     let mut last_progress = Instant::now();
+    let mut rt_stats = RealTimeStats::new();
 
     loop {
         // Drain any newly-confirmed txs from the streaming channel.
@@ -497,23 +623,17 @@ async fn poll_pipeline<P: Provider>(
             }
         }
 
-        // Update spinner with multi-phase progress
+        // Update spinner with multi-phase progress + real-time throughput/latency
         let (voted, routed, hub_approved, approved, executed) = phase_counts(txs);
-        let hub_str = if axelarnet_gateway.is_some() {
-            format!("  hub: {hub_approved}/{total}")
-        } else {
-            String::new()
-        };
+        let counts = [voted, routed, hub_approved, approved, executed];
+        rt_stats.update(counts, txs);
         if voted + routed + approved + executed > 0 || error_msg.is_some() {
-            if let Some(ref err) = error_msg {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  routed: {routed}/{total}{hub_str}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
-                ));
+            let msg = if axelarnet_gateway.is_some() {
+                rt_stats.spinner_msg_its(counts, total, error_msg.as_deref())
             } else {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  routed: {routed}/{total}{hub_str}  approved: {approved}/{total}  executed: {executed}/{total}"
-                ));
-            }
+                rt_stats.spinner_msg_gmp(counts, total, error_msg.as_deref())
+            };
+            spinner.set_message(msg);
         }
 
         // If no tx has made progress for INACTIVITY_TIMEOUT (60s), stop waiting.
@@ -680,6 +800,7 @@ async fn poll_pipeline_its_hub(
 
     let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
     let mut last_progress = Instant::now();
+    let mut rt_stats = RealTimeStats::new();
 
     loop {
         let active: Vec<usize> = (0..txs.len())
@@ -897,17 +1018,11 @@ async fn poll_pipeline_its_hub(
             .iter()
             .filter(|t| t.timing.routed_secs.is_some())
             .count();
+        let counts = [voted, routed, hub_approved, approved, executed];
+        rt_stats.update(counts, txs);
 
         if voted + hub_approved + routed + approved + executed > 0 || error_msg.is_some() {
-            if let Some(ref err) = error_msg {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
-                ));
-            } else {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
-                ));
-            }
+            spinner.set_message(rt_stats.spinner_msg_its(counts, total, error_msg.as_deref()));
         }
 
         if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
@@ -1532,6 +1647,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
 
     let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
     let mut last_progress = Instant::now();
+    let mut rt_stats = RealTimeStats::new();
 
     loop {
         let active: Vec<usize> = (0..txs.len())
@@ -1772,17 +1888,11 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
             .iter()
             .filter(|t| t.timing.routed_secs.is_some())
             .count();
+        let counts = [voted, routed, hub_approved, approved, executed];
+        rt_stats.update(counts, txs);
 
         if voted + hub_approved + routed + approved + executed > 0 || error_msg.is_some() {
-            if let Some(ref err) = error_msg {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}  (err: {err})"
-                ));
-            } else {
-                spinner.set_message(format!(
-                    "voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
-                ));
-            }
+            spinner.set_message(rt_stats.spinner_msg_its(counts, total, error_msg.as_deref()));
         }
 
         if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
@@ -2064,6 +2174,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
 
     let mut phase = DeployPhase::HubApproved;
     let mut second_leg_id: Option<String> = None;
+    let mut approved_not_found_count: u32 = 0;
 
     loop {
         if start.elapsed() >= timeout {
@@ -2118,7 +2229,9 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                 spinner.set_message("remote deploy: waiting for routing...");
             }
             DeployPhase::Approved => {
-                // Check if the Solana gateway has the incoming message
+                // Check if the Solana gateway has the incoming message.
+                // The PDA may be absent if the message was already executed and
+                // the account was closed, so after enough retries we assume done.
                 let sl_id = second_leg_id.as_deref().unwrap_or("");
                 let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
                 let cmd_id: [u8; 32] = keccak256(&input).into();
@@ -2127,7 +2240,19 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                         phase = DeployPhase::Done;
                         continue;
                     }
-                    _ => {
+                    Ok(None) => {
+                        approved_not_found_count += 1;
+                        if approved_not_found_count >= 10 {
+                            // PDA never appeared — likely already executed and closed
+                            spinner.set_message(
+                                "remote deploy: PDA not found, assuming already executed",
+                            );
+                            phase = DeployPhase::Done;
+                            continue;
+                        }
+                        spinner.set_message("remote deploy: waiting for Solana approval...");
+                    }
+                    Err(_) => {
                         spinner.set_message("remote deploy: waiting for Solana approval...");
                     }
                 }
