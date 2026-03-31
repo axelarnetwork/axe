@@ -24,21 +24,12 @@ struct EvmContractEntry {
 }
 
 fn discover_contracts(
-    network_filter: Option<&str>,
-    chain_filter: Option<&str>,
+    network: &str,
+    chain: &str,
     contract_filter: Option<EvmContract>,
 ) -> Vec<EvmContractEntry> {
     let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let networks = if let Some(n) = network_filter {
-        vec![n.to_string()]
-    } else {
-        vec![
-            "devnet-amplifier".to_string(),
-            "stagenet".to_string(),
-            "testnet".to_string(),
-            "mainnet".to_string(),
-        ]
-    };
+    let networks = vec![network.to_string()];
 
     let type_filter = contract_filter.map(|c| match c {
         EvmContract::Gateway => "gateway",
@@ -73,9 +64,7 @@ fn discover_contracts(
                 continue;
             }
 
-            if let Some(filter) = chain_filter
-                && chain_name != filter
-            {
+            if chain_name != chain {
                 continue;
             }
 
@@ -151,12 +140,12 @@ struct EvmActivityEntry {
 
 pub async fn run(
     contract_filter: Option<EvmContract>,
-    network: Option<String>,
-    chain: Option<String>,
+    network: String,
+    chain: String,
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    let contracts = discover_contracts(network.as_deref(), chain.as_deref(), contract_filter);
+    let contracts = discover_contracts(&network, &chain, contract_filter);
 
     if contracts.is_empty() {
         return Err(eyre::eyre!(

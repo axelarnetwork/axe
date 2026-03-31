@@ -217,11 +217,11 @@ pub enum DecodeCommands {
 
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
         #[arg(long)]
-        network: Option<String>,
+        network: String,
 
-        /// Filter to a specific chain (e.g. avalanche-fuji)
+        /// EVM chain name (e.g. avalanche-fuji, eth-sepolia)
         #[arg(long)]
-        chain: Option<String>,
+        chain: String,
 
         /// Max number of events to show per contract (default: 20)
         #[arg(long, default_value = "20")]

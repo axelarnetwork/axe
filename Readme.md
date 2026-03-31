@@ -294,6 +294,10 @@ axe decode evm-activity --contract its --network testnet --json       # machine-
 
 Shows recent events from Axelar EVM contracts (Gateway, ITS, GasService) using `eth_getLogs`. Auto-discovers contract addresses from config files. Decodes event names and parameters using the embedded ABI database.
 
+### LLM / AI Assistant Usage
+
+See [LLM-GUIDE.md](LLM-GUIDE.md) for a complete guide on using `axe` for debugging cross-chain messages with AI assistants. Covers: tracing stuck messages, decoding transactions, inspecting on-chain state, and JSON output for programmatic use.
+
 ## Configuration
 
 All config lives in `.env` — see [`.env.example`](.env.example) for the full template.
