@@ -726,8 +726,17 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let test_start = Instant::now();
     let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
         {
-            let (spinner_tx, _spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
-            sol_sender::run_sustained_load_test_with_metrics(&args, true, &destination_address, None, None, spinner_tx).await?
+            let (spinner_tx, _spinner_rx) =
+                tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+            sol_sender::run_sustained_load_test_with_metrics(
+                &args,
+                true,
+                &destination_address,
+                None,
+                None,
+                spinner_tx,
+            )
+            .await?
         }
     } else {
         sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?
@@ -882,7 +891,12 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         // Timings are keyed by message_id (signature); match them to transactions.
         for (msg_id, timing) in timings {
             if let Some(tx) = report.transactions.iter_mut().find(|t| {
-                t.signature == msg_id || format!("{}-{}.1", t.signature, crate::solana::solana_call_contract_index()) == msg_id
+                t.signature == msg_id
+                    || format!(
+                        "{}-{}.1",
+                        t.signature,
+                        crate::solana::solana_call_contract_index()
+                    ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
             }
@@ -1154,7 +1168,12 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let (verification, timings) = verify_handle.await??;
         for (msg_id, timing) in timings {
             if let Some(tx) = report.transactions.iter_mut().find(|t| {
-                t.signature == msg_id || format!("{}-{}.1", t.signature, crate::solana::solana_call_contract_index()) == msg_id
+                t.signature == msg_id
+                    || format!(
+                        "{}-{}.1",
+                        t.signature,
+                        crate::solana::solana_call_contract_index()
+                    ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
             }

@@ -133,8 +133,14 @@ impl RealTimeStats {
             parts.push(format!("voted: {}", Self::fmt_phase(voted, total, tv)));
         }
         parts.push(format!("routed: {}", Self::fmt_phase(routed, total, tr)));
-        parts.push(format!("approved: {}", Self::fmt_phase(approved, total, ta)));
-        parts.push(format!("executed: {}", Self::fmt_phase(executed, total, te)));
+        parts.push(format!(
+            "approved: {}",
+            Self::fmt_phase(approved, total, ta)
+        ));
+        parts.push(format!(
+            "executed: {}",
+            Self::fmt_phase(executed, total, te)
+        ));
         let mut msg = parts.join("  ");
         msg.push_str(&self.fmt_latency());
         if let Some(e) = err {
@@ -649,7 +655,12 @@ async fn poll_pipeline<P: Provider>(
             let msg = if axelarnet_gateway.is_some() {
                 rt_stats.spinner_msg_its(counts, total, error_msg.as_deref())
             } else {
-                rt_stats.spinner_msg_gmp(counts, total, error_msg.as_deref(), voting_verifier.is_some())
+                rt_stats.spinner_msg_gmp(
+                    counts,
+                    total,
+                    error_msg.as_deref(),
+                    voting_verifier.is_some(),
+                )
             };
             spinner.set_message(msg);
         }

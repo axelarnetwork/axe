@@ -141,7 +141,9 @@ pub fn ensure_funded_for_sustained(
     gas_lamports: u64,
 ) -> Result<Vec<u64>> {
     let cost_per_tx = gas_lamports + TRANSFER_FEE; // gas + tx fee
-    let target = cost_per_tx.saturating_mul(fires_per_key).max(TARGET_LAMPORTS_PER_KEY);
+    let target = cost_per_tx
+        .saturating_mul(fires_per_key)
+        .max(TARGET_LAMPORTS_PER_KEY);
     let min_needed = target / 2; // top up when below half
 
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());

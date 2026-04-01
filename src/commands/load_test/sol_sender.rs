@@ -309,8 +309,13 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let gas_per_tx: u64 = 10_000_000; // must match solana.rs pay_gas amount
     #[cfg(feature = "devnet-amplifier")]
     let gas_per_tx: u64 = 0; // devnet-amplifier doesn't pay gas
-    let _balances =
-        keypairs::ensure_funded_for_sustained(&args.source_rpc, &main_keypair, &derived, fires_per_key, gas_per_tx)?;
+    let _balances = keypairs::ensure_funded_for_sustained(
+        &args.source_rpc,
+        &main_keypair,
+        &derived,
+        fires_per_key,
+        gas_per_tx,
+    )?;
     let keypairs_pool: Arc<Vec<Arc<dyn solana_sdk::signer::Signer + Send + Sync>>> = Arc::new(
         derived
             .into_iter()
@@ -386,7 +391,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 && let Some(ref tx_sender) = vtx
             {
                 let pending = super::verify::tx_to_pending_solana(
-                    &result, 0, &sc, has_vv,
+                    &result,
+                    0,
+                    &sc,
+                    has_vv,
                     super::verify::SourceChainType::Svm,
                 );
                 if tx_sender.send(pending).is_err() {

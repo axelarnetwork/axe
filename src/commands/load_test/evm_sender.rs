@@ -507,7 +507,13 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 {
                     // Use signature length as a proxy for idx — the verify task
                     // will overwrite idx from the timings vec anyway.
-                    let pending = super::verify::tx_to_pending_solana(&result, 0, &sc, has_vv, super::verify::SourceChainType::Evm);
+                    let pending = super::verify::tx_to_pending_solana(
+                        &result,
+                        0,
+                        &sc,
+                        has_vv,
+                        super::verify::SourceChainType::Evm,
+                    );
                     if tx_sender.send(pending).is_err() {
                         eprintln!("warning: verification channel closed, tx won't be verified");
                     }
