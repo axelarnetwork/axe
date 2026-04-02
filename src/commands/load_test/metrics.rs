@@ -61,6 +61,11 @@ pub struct LoadTestReport {
     pub source_chain: String,
     pub destination_chain: String,
     pub destination_address: String,
+    pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tps: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     pub num_txs: u64,
     pub num_keys: usize,
 

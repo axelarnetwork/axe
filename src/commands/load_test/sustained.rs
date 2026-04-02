@@ -140,8 +140,10 @@ pub(super) async fn run_sustained_loop(
 
     let test_duration = test_start.elapsed().as_secs_f64();
     let confirmed_count = src_confirmed.load(Ordering::Relaxed);
-    spinner.finish_and_clear();
-    ui::success(&format!(
+    // Finish the send spinner with a completion message instead of clearing +
+    // printing a separate line. This keeps MultiProgress layout clean when
+    // a verification spinner is running concurrently below.
+    spinner.finish_with_message(format!(
         "send phase complete: {confirmed_count}/{total_submitted} src-confirmed in {test_duration:.1}s"
     ));
 
@@ -199,6 +201,9 @@ pub(super) fn build_sustained_report(
         source_chain: source_chain.to_string(),
         destination_chain: destination_chain.to_string(),
         destination_address: destination_address.to_string(),
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
         num_txs: total_expected,
         num_keys,
         total_submitted: s,

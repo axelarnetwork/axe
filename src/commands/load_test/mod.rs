@@ -755,7 +755,7 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
@@ -840,7 +840,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let test_start = Instant::now();
     let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let report = if sustained {
+    let mut report = if sustained {
         // Sustained mode: run verification concurrently with the send phase.
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
         let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -928,7 +928,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         report
     };
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
@@ -1086,7 +1086,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
@@ -1126,7 +1126,7 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let test_start = Instant::now();
     let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let report = if sustained {
+    let mut report = if sustained {
         // Sustained mode: run verification concurrently with the send phase.
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
         let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1198,7 +1198,7 @@ async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         report
     };
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 /// Deploy or reuse a cached SenderReceiver contract.
@@ -1263,10 +1263,13 @@ async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
 }
 
 pub fn finish_report(
-    _args: &LoadTestArgs,
-    report: &LoadTestReport,
+    args: &LoadTestArgs,
+    report: &mut LoadTestReport,
     run_start: Instant,
 ) -> Result<()> {
+    report.protocol = format!("{}", args.protocol);
+    report.tps = args.tps;
+    report.duration_secs = args.duration_secs;
     print_final_report(report);
     ui::success(&format!(
         "load test complete ({})",
@@ -1392,6 +1395,20 @@ fn print_final_report(report: &LoadTestReport) {
     println!(
         "\u{2550}\u{2550}\u{2550} SUMMARY \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}"
     );
+    // Protocol + mode line
+    {
+        let mut mode_parts = vec![report.protocol.to_uppercase()];
+        if let (Some(tps), Some(dur)) = (report.tps, report.duration_secs) {
+            mode_parts.push(format!("{tps} tx/s"));
+            mode_parts.push(format!("{dur}s"));
+        }
+        println!(
+            "  {} -> {}  ({})",
+            report.source_chain,
+            report.destination_chain,
+            mode_parts.join(", "),
+        );
+    }
     println!(
         "  transactions     {}/{} confirmed ({:.1}% landed)",
         report.total_confirmed,

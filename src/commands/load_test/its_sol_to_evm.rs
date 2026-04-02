@@ -280,7 +280,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
         report.verification = Some(verification);
 
-        return finish_report(&args, &report, test_start);
+        return finish_report(&args, &mut report, test_start);
     }
     // === END SUSTAINED MODE ===
 
@@ -414,6 +414,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
         destination_address: format!("{its_proxy_addr}"),
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
         num_txs: args.num_txs,
         num_keys: key_count,
         total_submitted,
@@ -466,7 +469,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &report, test_start)
+    finish_report(&args, &mut report, test_start)
 }
 
 // ---------------------------------------------------------------------------
