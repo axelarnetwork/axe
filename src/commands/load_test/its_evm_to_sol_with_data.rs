@@ -3,8 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for an EVM tx receipt before giving up.
-/// Flow confirms in ~8s; other chains typically <20s. 60s gives congested
-/// networks enough room while still catching silently-dropped txs.
 const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 use alloy::{
@@ -14,6 +12,8 @@ use alloy::{
 };
 use eyre::eyre;
 use futures::future::join_all;
+use rand::Rng;
+use solana_sdk::pubkey::Pubkey;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
@@ -33,34 +33,64 @@ use crate::utils::read_contract_address;
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
 const TOKEN_DECIMALS: u8 = 18;
-/// Default gas value for ITS cross-chain transfers.
+
 #[cfg(feature = "devnet-amplifier")]
 fn default_gas_value_wei(_source_chain: &str) -> u128 {
-    0 // devnet-amplifier relayer doesn't require gas payment
+    0
 }
 #[cfg(not(feature = "devnet-amplifier"))]
 fn default_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
-        300_000_000_000_000_000 // 0.3 FLOW
+        300_000_000_000_000_000
     } else {
-        10_000_000_000_000_000 // 0.01 ETH
+        10_000_000_000_000_000
     }
 }
+
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
+
+/// Build Borsh-encoded ITS metadata that triggers the memo program on Solana.
+///
+/// Format: `[4 bytes metadata_version=0] [1 byte encoding=0x00 Borsh] [borsh payload]`
+///
+/// The Borsh payload contains the memo string as the execution data and the
+/// memo program's counter PDA as a required writable account.
+fn build_its_memo_metadata(counter_pda: &Pubkey) -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    rand::thread_rng().fill(&mut buf);
+    let memo = format!("axe load test {}", hex::encode(buf));
+    let memo_bytes = memo.as_bytes();
+
+    let counter_bytes = counter_pda.to_bytes();
+
+    // Metadata version (4 bytes, all zero)
+    let mut metadata = vec![0u8; 4];
+    // Encoding scheme: 0x00 = Borsh
+    metadata.push(0x00);
+    // Borsh payload: [u32 LE payload_length] [payload] [u32 LE account_count] [accounts...]
+    // Payload length
+    metadata.extend(&(memo_bytes.len() as u32).to_le_bytes());
+    // Payload data
+    metadata.extend_from_slice(memo_bytes);
+    // Account count = 1 (counter PDA)
+    metadata.extend(&1u32.to_le_bytes());
+    // Account: 32 bytes pubkey + 1 byte flags (bit0=signer, bit1=writable)
+    metadata.extend_from_slice(&counter_bytes);
+    metadata.push(0x02); // writable=true, signer=false
+
+    metadata
+}
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    // --- Read SOURCE EVM chain info ---
     let evm_rpc_url = args.source_rpc.clone();
 
-    // Validate RPCs
     validate_evm_rpc(&evm_rpc_url).await?;
     validate_solana_rpc(&args.destination_rpc).await?;
 
-    // Check that verification contracts exist
     if read_axelar_contract_field(
         &args.config,
         &format!("/axelar/contracts/Gateway/{dest}/address"),
@@ -72,7 +102,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         );
     }
 
-    // Check AxelarnetGateway exists (required for ITS hub routing)
     if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
         .is_err()
     {
@@ -81,9 +110,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     ui::kv("source", src);
     ui::kv("destination", dest);
-    ui::kv("protocol", "ITS (interchainTransfer via hub)");
+    ui::kv(
+        "protocol",
+        "ITS with data (interchainTransfer + memo execute)",
+    );
 
-    // --- Set up EVM signer ---
+    // --- EVM signer ---
     let private_key = args.private_key.as_ref().ok_or_else(|| {
         eyre!("EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key")
     })?;
@@ -101,7 +133,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         ui::kv("wallet", &format!("{deployer_address} ({eth:.6} ETH)"));
     }
 
-    // --- Read ITS contract addresses ---
+    // --- ITS contract addresses ---
     let its_factory_addr = read_contract_address(&args.config, src, "InterchainTokenFactory")?;
     let its_proxy_addr = read_contract_address(&args.config, src, "InterchainTokenService")?;
 
@@ -111,6 +143,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let write_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
+
+    // --- Memo program counter PDA ---
+    let memo_program_id = super::evm_sender::memo_program_id();
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
+    ui::kv("memo program", &memo_program_id.to_string());
+    ui::kv("counter PDA", &counter_pda.to_string());
 
     // --- Gas value ---
     let gas_value_wei: u128 = match &args.gas_value {
@@ -130,7 +168,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         );
     }
 
-    // --- Token setup ---
+    // --- Token setup (reuses same logic as its_evm_to_sol) ---
     let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
     let (num_keys, total_expected) = if burst_mode {
         let n = args.num_txs.max(1) as usize;
@@ -140,20 +178,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let dur = args.duration_secs.unwrap();
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
-    // Keep num_txs as alias for burst compat (equals num_keys in burst mode)
     let num_txs = num_keys;
-    // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
-    // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
-    // Distribute 100x per key so cached tokens last across many runs.
+    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 1 token
     let amount_per_key = amount_per_tx * U256::from(100);
-    // Mint a large fixed supply so the token can be reused across runs without redeploying.
-    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128); // 1M tokens
+    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
 
     let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
-        // User provided a token ID
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
             .interchainTokenAddress(token_id)
@@ -164,7 +196,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         ui::address("token address", &format!("{addr}"));
         (token_id, addr, None)
     } else {
-        // Check cache
         let cache = read_its_cache(src, dest);
         let cached = cache
             .get("tokenId")
@@ -179,7 +210,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             });
 
         if let Some((tid, addr)) = cached {
-            // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
             let needed = amount_per_key * U256::from(num_keys);
             let balance = token
@@ -191,22 +221,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 ui::info(&format!("reusing cached ITS token: {addr}"));
                 ui::kv("token ID (cached)", &format!("{tid}"));
                 (tid, addr, None)
-            } else if balance > U256::ZERO {
-                ui::warn(&format!(
-                    "cached token has insufficient supply ({balance} < {needed}), deploying fresh..."
-                ));
-                deploy_its_token(
-                    &write_provider,
-                    its_factory_addr,
-                    deployer_address,
-                    dest,
-                    total_supply,
-                    src,
-                    gas_value,
-                )
-                .await?
             } else {
-                ui::warn("cached token no longer exists, deploying fresh...");
+                ui::warn("cached token supply insufficient, deploying fresh...");
                 deploy_its_token(
                     &write_provider,
                     its_factory_addr,
@@ -249,8 +265,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::info(&format!("derived {} EVM signing keys", derived.len()));
 
     // Fund derived wallets.
-    // Burst: each key fires once → gas + 1× gas_value.
-    // Sustained: each key fires once every 3s → gas + ceil(duration/3)× gas_value.
     let funding_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
@@ -266,18 +280,18 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
 
     // --- Distribute ITS tokens to derived wallets ---
-    // Build a fresh provider so the nonce cache is not stale after deploy transactions.
     let token_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    distribute_tokens(&token_provider, token_addr, &derived, amount_per_key).await?;
+    super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, &derived, amount_per_key)
+        .await?;
 
-    // Receiver address on Solana — use the default Solana keypair's pubkey.
-    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-    let receiver_bytes = {
-        use solana_sdk::signer::Signer;
-        Bytes::from(sol_keypair.pubkey().to_bytes().to_vec())
-    };
+    // Destination is the memo program (not a wallet), since we want it to
+    // execute with the interchain token.
+    let receiver_bytes = Bytes::from(memo_program_id.to_bytes().to_vec());
+
+    // Build the metadata once (counter PDA is the same for all txs, memo varies per tx).
+    // We build per-tx in the send function so each tx gets a unique memo.
 
     // === SUSTAINED MODE ===
     if !burst_mode {
@@ -286,7 +300,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let key_cycle = args.key_cycle as usize;
         let rpc_url_str = evm_rpc_url.clone();
 
-        // Pre-fetch nonces.
         let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
         let mut nonces: Vec<u64> = Vec::with_capacity(num_keys);
         for signer in &derived {
@@ -297,10 +310,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         }
 
         let spinner = ui::wait_spinner(&format!(
-            "[0/{duration_secs}s] starting sustained ITS send..."
+            "[0/{duration_secs}s] starting sustained ITS-with-data send..."
         ));
         let test_start = Instant::now();
         let dest_chain_s = dest.to_string();
+        let counter_pda_clone = counter_pda;
 
         let make_task: super::sustained::MakeTask =
             Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -311,14 +325,17 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 let its_proxy = its_proxy_addr;
                 let tid = token_id;
                 let url = rpc_url_str.clone();
+                let cpda = counter_pda_clone;
 
                 let provider = ProviderBuilder::new()
                     .wallet(derived[key_idx].clone())
                     .connect_http(url.parse().expect("invalid RPC URL"));
 
                 Box::pin(async move {
-                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, nonce)
-                        .await
+                    execute_interchain_transfer_with_data(
+                        &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, nonce,
+                    )
+                    .await
                 })
             });
 
@@ -357,13 +374,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     }
     // === END SUSTAINED MODE ===
 
-    // --- Parallel interchainTransfer sends via ITS Service ---
-    // Each derived key calls ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)
-    // The ITS Service handles hub wrapping (SEND_TO_HUB) and emits ContractCall to "axelar".
+    // --- Burst mode: parallel sends ---
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let confirmed_counter = Arc::new(AtomicU64::new(0));
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS));
-    let spinner = ui::wait_spinner(&format!("sending (0/{num_txs} confirmed)..."));
+    let spinner = ui::wait_spinner(&format!("sending ITS-with-data (0/{num_txs} confirmed)..."));
     let test_start = Instant::now();
 
     let mut tasks = Vec::with_capacity(num_txs);
@@ -381,6 +396,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let amt = amount_per_tx;
         let its_proxy = its_proxy_addr;
         let tid = token_id;
+        let cpda = counter_pda;
 
         let provider = ProviderBuilder::new()
             .wallet(derived_signer.clone())
@@ -391,9 +407,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result =
-                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, None)
-                        .await;
+                let result = execute_interchain_transfer_with_data(
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, None,
+                )
+                .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);
@@ -413,7 +430,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             let m = m.unwrap();
             if m.success {
                 let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                sp.set_message(format!("sending ({done}/{total} confirmed)..."));
+                sp.set_message(format!(
+                    "sending ITS-with-data ({done}/{total} confirmed)..."
+                ));
             }
             metrics_clone.lock().await.push(m);
         });
@@ -427,7 +446,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let confirmed_count = confirmed_counter.load(Ordering::Relaxed);
     spinner.finish_and_clear();
     ui::success(&format!(
-        "sent {confirmed_count}/{total_submitted} confirmed"
+        "sent {confirmed_count}/{total_submitted} ITS-with-data confirmed"
     ));
 
     let metrics = metrics_list.lock().await.clone();
@@ -513,7 +532,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 }
 
 /// Deploy a new interchain token and its remote counterpart.
-/// Returns (tokenId, localTokenAddress).
 #[allow(clippy::too_many_arguments)]
 async fn deploy_its_token<P: Provider>(
     provider: &P,
@@ -557,7 +575,6 @@ async fn deploy_its_token<P: Provider>(
     ui::kv("token ID", &format!("{token_id}"));
     ui::address("token address", &format!("{token_addr}"));
 
-    // Deploy remote interchain token
     ui::info(&format!("deploying remote token to {dest_chain}..."));
 
     let remote_call = factory
@@ -577,7 +594,6 @@ async fn deploy_its_token<P: Provider>(
         receipt.block_number.unwrap_or(0)
     ));
 
-    // Extract the remote deploy message ID from the receipt
     let deploy_message_id = match extract_contract_call_event(&receipt) {
         Ok((event_index, _, _, _, _)) => {
             let msg_id = format!("{tx_hash:#x}-{event_index}");
@@ -587,7 +603,6 @@ async fn deploy_its_token<P: Provider>(
         Err(_) => None,
     };
 
-    // Save to cache
     let cache = serde_json::json!({
         "tokenId": format!("{token_id}"),
         "tokenAddress": format!("{token_addr}"),
@@ -598,59 +613,9 @@ async fn deploy_its_token<P: Provider>(
     Ok((token_id, token_addr, deploy_message_id))
 }
 
-/// Distribute ITS tokens from deployer to all derived wallets.
-pub async fn distribute_tokens<P: Provider>(
-    provider: &P,
-    token_addr: Address,
-    derived: &[PrivateKeySigner],
-    amount_per_key: U256,
-) -> eyre::Result<()> {
-    let token = ERC20::new(token_addr, provider);
-
-    let spinner = ui::wait_spinner(&format!("distributing tokens to {} keys...", derived.len()));
-
-    for (i, signer) in derived.iter().enumerate() {
-        // Check existing balance first
-        let balance = token
-            .balanceOf(signer.address())
-            .call()
-            .await
-            .unwrap_or_default();
-        if balance >= amount_per_key {
-            continue;
-        }
-
-        let call = token.transfer(signer.address(), amount_per_key);
-        let pending = call
-            .send()
-            .await
-            .map_err(|e| eyre!("failed to transfer tokens to key {i}: {e}"))?;
-        pending
-            .get_receipt()
-            .await
-            .map_err(|e| eyre!("token transfer to key {i} failed: {e}"))?;
-
-        spinner.set_message(format!(
-            "distributing tokens ({}/{} done)...",
-            i + 1,
-            derived.len()
-        ));
-    }
-
-    spinner.finish_and_clear();
-    ui::success(&format!("distributed tokens to {} keys", derived.len()));
-    Ok(())
-}
-
-/// Send a single interchainTransfer via the ITS Service and return metrics.
-///
-/// Calls `ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)`
-/// which internally wraps the payload as SEND_TO_HUB and emits a ContractCall to "axelar".
-///
-/// `explicit_nonce`: when `Some`, bypasses alloy's RPC-based nonce fetch to avoid
-/// collisions when the same key fires again before the previous tx confirms.
+/// Send a single interchainTransfer with metadata that triggers the memo program.
 #[allow(clippy::too_many_arguments)]
-async fn execute_interchain_transfer<P: Provider>(
+async fn execute_interchain_transfer_with_data<P: Provider>(
     provider: &P,
     its_proxy: Address,
     token_id: FixedBytes<32>,
@@ -658,9 +623,13 @@ async fn execute_interchain_transfer<P: Provider>(
     receiver_bytes: &Bytes,
     amount: U256,
     gas_value: U256,
+    counter_pda: &Pubkey,
     explicit_nonce: Option<u64>,
 ) -> TxMetrics {
     let submit_start = Instant::now();
+
+    // Build unique metadata per tx (random memo string)
+    let metadata = Bytes::from(build_its_memo_metadata(counter_pda));
 
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
@@ -669,7 +638,7 @@ async fn execute_interchain_transfer<P: Provider>(
             dest_chain.to_string(),
             receiver_bytes.clone(),
             amount,
-            Bytes::new(), // empty metadata
+            metadata,
             gas_value,
         )
         .value(gas_value);
@@ -686,7 +655,6 @@ async fn execute_interchain_transfer<P: Provider>(
                     #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
-                    // Extract full ContractCall event data
                     match extract_contract_call_event(&receipt) {
                         Ok((
                             event_index,

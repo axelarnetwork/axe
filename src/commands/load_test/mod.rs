@@ -1,5 +1,6 @@
 pub mod evm_sender;
 pub mod its_evm_to_sol;
+pub mod its_evm_to_sol_with_data;
 pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
@@ -54,12 +55,16 @@ impl std::fmt::Display for TestType {
     }
 }
 
-/// Protocol: GMP (callContract) or ITS (interchainTransfer).
+/// Protocol: GMP (callContract), ITS (interchainTransfer), or ITS with data
+/// (interchainTransfer that triggers a contract call on the destination).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Protocol {
     #[default]
     Gmp,
     Its,
+    /// ITS interchainTransfer with data — sends tokens AND calls the memo
+    /// program on the Solana destination chain.
+    ItsWithData,
 }
 
 impl std::fmt::Display for Protocol {
@@ -67,6 +72,7 @@ impl std::fmt::Display for Protocol {
         match self {
             Protocol::Gmp => write!(f, "gmp"),
             Protocol::Its => write!(f, "its"),
+            Protocol::ItsWithData => write!(f, "its-with-data"),
         }
     }
 }
@@ -604,6 +610,12 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
                 args.source_chain,
                 args.destination_chain
             )
+        }
+        (Protocol::ItsWithData, TestType::EvmToSol) => {
+            its_evm_to_sol_with_data::run(args, run_start).await
+        }
+        (Protocol::ItsWithData, _) => {
+            eyre::bail!("its-with-data only supports evm-to-sol currently")
         }
     }
 }

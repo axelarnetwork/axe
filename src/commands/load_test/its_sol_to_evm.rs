@@ -270,8 +270,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
         let verification = super::verify::verify_onchain_evm_its(
             &args.config,
-            &args.source_chain,
-            &args.destination_chain,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
             &format!("{its_proxy_addr}"),
             evm_gateway_addr,
             &evm_rpc_url,
@@ -459,8 +459,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // --- Verify ---
     let verification = super::verify::verify_onchain_evm_its(
         &args.config,
-        &args.source_chain,
-        &args.destination_chain,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
         &format!("{its_proxy_addr}"),
         evm_gateway_addr,
         &evm_rpc_url,
