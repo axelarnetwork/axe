@@ -1,5 +1,6 @@
 pub mod evm_sender;
 pub mod its_evm_to_sol;
+pub mod its_evm_to_sol_with_data;
 pub mod its_sol_to_evm;
 pub mod keypairs;
 pub mod metrics;
@@ -54,12 +55,16 @@ impl std::fmt::Display for TestType {
     }
 }
 
-/// Protocol: GMP (callContract) or ITS (interchainTransfer).
+/// Protocol: GMP (callContract), ITS (interchainTransfer), or ITS with data
+/// (interchainTransfer that triggers a contract call on the destination).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Protocol {
     #[default]
     Gmp,
     Its,
+    /// ITS interchainTransfer with data — sends tokens AND calls the memo
+    /// program on the Solana destination chain.
+    ItsWithData,
 }
 
 impl std::fmt::Display for Protocol {
@@ -67,6 +72,7 @@ impl std::fmt::Display for Protocol {
         match self {
             Protocol::Gmp => write!(f, "gmp"),
             Protocol::Its => write!(f, "its"),
+            Protocol::ItsWithData => write!(f, "its-with-data"),
         }
     }
 }
@@ -93,6 +99,10 @@ pub struct LoadTestArgs {
     pub tps: Option<u64>,
     pub duration_secs: Option<u64>,
     pub key_cycle: u64,
+    /// Number of extra accounts to add to ITS-with-data payloads.
+    /// The first extra account is a valid ATA for the ITS token mint;
+    /// remaining accounts are random pubkeys. Useful for testing ALT paths.
+    pub extra_accounts: u32,
 }
 
 /// Cache file for storing SenderReceiver address per chain.
@@ -605,6 +615,12 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
                 args.destination_chain
             )
         }
+        (Protocol::ItsWithData, TestType::EvmToSol) => {
+            its_evm_to_sol_with_data::run(args, run_start).await
+        }
+        (Protocol::ItsWithData, _) => {
+            eyre::bail!("its-with-data only supports evm-to-sol currently")
+        }
     }
 }
 
@@ -724,36 +740,79 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let destination_address = format!("{sender_receiver_addr}");
 
     let test_start = Instant::now();
-    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        {
-            let (spinner_tx, _spinner_rx) =
-                tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
-            sol_sender::run_sustained_load_test_with_metrics(
-                &args,
-                true,
-                &destination_address,
-                None,
-                None,
-                spinner_tx,
-            )
-            .await?
-        }
-    } else {
-        sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?
-    };
+    let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let verification = verify::verify_onchain(
-        &args.config,
-        &args.source_axelar_id,
-        &args.destination_axelar_id,
-        &destination_address,
-        gateway_addr,
-        &provider,
-        &mut report.transactions,
-        verify::SourceChainType::Svm,
-    )
-    .await?;
-    report.verification = Some(verification);
+    let mut report = if sustained {
+        // Streaming verification: run concurrently with sends.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_addr = destination_address.clone();
+        let vdest_rpc = args.destination_rpc.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let vgw = gateway_addr;
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            verify::verify_onchain_evm_streaming(
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                vgw,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
+            )
+            .await
+        });
+
+        let mut report = sol_sender::run_sustained_load_test_with_metrics(
+            &args,
+            true,
+            &destination_address,
+            Some(verify_tx),
+            Some(send_done),
+            spinner_tx,
+        )
+        .await?;
+
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report.transactions.iter_mut().find(|t| {
+                t.signature == msg_id
+                    || format!(
+                        "{}-{}.1",
+                        t.signature,
+                        crate::solana::solana_call_contract_index()
+                    ) == msg_id
+            }) {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
+        report.verification = Some(verification);
+        report
+    } else {
+        let mut report =
+            sol_sender::run_load_test_with_metrics(&args, &destination_address, true).await?;
+        let verification = verify::verify_onchain(
+            &args.config,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
+            &destination_address,
+            gateway_addr,
+            &provider,
+            &mut report.transactions,
+            verify::SourceChainType::Svm,
+        )
+        .await?;
+        report.verification = Some(verification);
+        report
+    };
 
     finish_report(&args, &mut report, test_start)
 }
@@ -1048,43 +1107,87 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let destination_address = format!("{dest_sender_receiver}");
 
     let test_start = Instant::now();
-    let mut report = if args.tps.is_some() && args.duration_secs.is_some() {
-        evm_sender::run_sustained_load_test_with_metrics(
-            &args,
-            sender_receiver_addr,
-            &main_key,
-            &source_rpc_url,
-            &destination_address,
-            None,
-            None,
-            tokio::sync::oneshot::channel().0,
-            true,
-        )
-        .await?
-    } else {
-        evm_sender::run_load_test_with_metrics(
-            &args,
-            sender_receiver_addr,
-            &main_key,
-            &source_rpc_url,
-            &destination_address,
-            true,
-        )
-        .await?
-    };
+    let sustained = args.tps.is_some() && args.duration_secs.is_some();
 
-    let verification = verify::verify_onchain(
-        &args.config,
-        &args.source_axelar_id,
-        &args.destination_axelar_id,
-        &destination_address,
-        dest_gateway_addr,
-        &dest_read_provider,
-        &mut report.transactions,
-        verify::SourceChainType::Evm,
-    )
-    .await?;
-    report.verification = Some(verification);
+    let mut report = if sustained {
+        // Streaming verification: run concurrently with sends.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_addr = destination_address.clone();
+        let vdest_rpc = dest_rpc_url.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let vgw = dest_gateway_addr;
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            verify::verify_onchain_evm_streaming(
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                vgw,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
+            )
+            .await
+        });
+
+        let mut report = evm_sender::run_sustained_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &source_rpc_url,
+            &destination_address,
+            Some(verify_tx),
+            Some(send_done),
+            spinner_tx,
+            true,
+        )
+        .await?;
+
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
+        report.verification = Some(verification);
+        report
+    } else {
+        let mut report = evm_sender::run_load_test_with_metrics(
+            &args,
+            sender_receiver_addr,
+            &main_key,
+            &source_rpc_url,
+            &destination_address,
+            true,
+        )
+        .await?;
+
+        let verification = verify::verify_onchain(
+            &args.config,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
+            &destination_address,
+            dest_gateway_addr,
+            &dest_read_provider,
+            &mut report.transactions,
+            verify::SourceChainType::Evm,
+        )
+        .await?;
+        report.verification = Some(verification);
+        report
+    };
 
     finish_report(&args, &mut report, test_start)
 }
