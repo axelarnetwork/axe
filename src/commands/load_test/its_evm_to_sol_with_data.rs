@@ -397,9 +397,37 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             nonces.push(n);
         }
 
+        // Streaming verification: run concurrently with sends.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        // Check if source chain has a voting verifier.
+        let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
+            &args.config,
+            &format!("/axelar/contracts/VotingVerifier/{}/address", args.source_chain),
+        )
+        .is_ok();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_rpc = args.destination_rpc.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            super::verify::verify_onchain_solana_its_streaming(
+                &vconfig, &vsource, &vdest, &vdest_rpc,
+                verify_rx, vdone, spinner,
+            )
+            .await
+        });
+
         let spinner = ui::wait_spinner(&format!(
             "[0/{duration_secs}s] starting sustained ITS-with-data send..."
         ));
+        let _ = spinner_tx.send(spinner.clone());
+
         let test_start = Instant::now();
         let dest_chain_s = dest.to_string();
         let counter_pda_clone = counter_pda;
@@ -416,17 +444,25 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 let tid = token_id;
                 let url = rpc_url_str.clone();
                 let cpda = counter_pda_clone;
+                let vtx = verify_tx.clone();
+                let has_vv = has_voting_verifier;
 
                 let provider = ProviderBuilder::new()
                     .wallet(derived[key_idx].clone())
                     .connect_http(url.parse().expect("invalid RPC URL"));
 
                 Box::pin(async move {
-                    execute_interchain_transfer_with_data(
+                    let result = execute_interchain_transfer_with_data(
                         &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, ea,
                         tma.as_ref(), nonce,
                     )
-                    .await
+                    .await;
+                    // Stream successful txs to the concurrent verification pipeline.
+                    if result.success {
+                        let pending = super::verify::tx_to_pending_its(&result, has_vv);
+                        let _ = vtx.send(pending);
+                    }
+                    result
                 })
             });
 
@@ -436,7 +472,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             key_cycle,
             Some(nonces),
             make_task,
-            None,
+            Some(send_done),
             spinner,
         )
         .await;
@@ -450,15 +486,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             num_keys,
         );
 
-        let verification = super::verify::verify_onchain_solana_its(
-            &args.config,
-            &args.source_axelar_id,
-            &args.destination_axelar_id,
-            &format!("{its_proxy_addr}"),
-            &args.destination_rpc,
-            &mut report.transactions,
-        )
-        .await?;
+        // Wait for verification to finish.
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report.transactions.iter_mut().find(|t| t.signature == msg_id) {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
         report.verification = Some(verification);
 
         return finish_report(&args, &mut report, test_start);

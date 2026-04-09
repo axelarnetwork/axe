@@ -381,10 +381,17 @@ async fn poll_pipeline<P: Provider>(
     let mut rt_stats = RealTimeStats::new();
     let mut received_first_tx = false;
 
+    // For EVM destinations, derive the contract_addr from destination_address
+    // so streaming PendingTx entries (which may have Address::ZERO) get the right value.
+    let default_contract_addr: Address = destination_address.parse().unwrap_or(Address::ZERO);
+
     loop {
         // Drain any newly-confirmed txs from the streaming channel.
         if let Some(ref mut receiver) = rx {
-            while let Ok(new_tx) = receiver.try_recv() {
+            while let Ok(mut new_tx) = receiver.try_recv() {
+                if new_tx.contract_addr == Address::ZERO && default_contract_addr != Address::ZERO {
+                    new_tx.contract_addr = default_contract_addr;
+                }
                 txs.push(new_tx);
             }
         }
@@ -768,7 +775,7 @@ async fn discover_second_leg(
 /// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
 #[allow(clippy::too_many_arguments)]
 async fn poll_pipeline_its_hub(
-    txs: &mut [PendingTx],
+    txs: &mut Vec<PendingTx>,
     lcd: &str,
     voting_verifier: Option<&str>,
     source_chain: &str,
@@ -776,20 +783,20 @@ async fn poll_pipeline_its_hub(
     rpc: &str,
     cosm_gateway_dest: &str,
     solana_rpc: &str,
-) {
-    let total = txs.len();
-    if total == 0 {
-        return;
-    }
+    mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
+    send_done: Option<&AtomicBool>,
+    external_spinner: Option<indicatif::ProgressBar>,
+) -> PeakThroughput {
+    let spinner =
+        external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
+    let mut last_progress = Instant::now();
+    let mut rt_stats = RealTimeStats::new();
+    let mut received_first_tx = false;
 
     let sol_rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
         solana_commitment_config::CommitmentConfig::confirmed(),
     ));
-
-    let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
-    let mut last_progress = Instant::now();
-    let mut rt_stats = RealTimeStats::new();
 
     // Skip voting phase entirely if no VotingVerifier
     if voting_verifier.is_none() {
@@ -801,12 +808,43 @@ async fn poll_pipeline_its_hub(
     }
 
     loop {
+        // Drain any newly-confirmed txs from the streaming channel.
+        if let Some(ref mut receiver) = rx {
+            while let Ok(mut new_tx) = receiver.try_recv() {
+                // Skip voting if no verifier
+                if voting_verifier.is_none() && new_tx.phase == Phase::Voted {
+                    new_tx.phase = Phase::HubApproved;
+                }
+                txs.push(new_tx);
+            }
+        }
+
+        let sending_complete = send_done.is_none_or(|f| f.load(Ordering::Relaxed));
+
+        let total = txs.len();
+        if total == 0 {
+            if sending_complete {
+                break;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+
+        if !received_first_tx {
+            received_first_tx = true;
+        }
+
         let active: Vec<usize> = (0..txs.len())
             .filter(|&i| !txs[i].failed && txs[i].phase != Phase::Done)
             .collect();
 
-        if active.is_empty() {
+        if active.is_empty() && sending_complete {
             break;
+        }
+        if active.is_empty() {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            last_progress = Instant::now();
+            continue;
         }
 
         let error_msg: Option<String> = None;
@@ -963,13 +1001,19 @@ async fn poll_pipeline_its_hub(
             spinner.set_message(rt_stats.spinner_msg_its(counts, total, error_msg.as_deref()));
         }
 
-        if last_progress.elapsed() >= INACTIVITY_TIMEOUT {
+        let timeout = if sending_complete {
+            INACTIVITY_TIMEOUT
+        } else {
+            INACTIVITY_TIMEOUT * 2
+        };
+        if last_progress.elapsed() >= timeout {
             break;
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
     // Mark remaining non-done txs as failed
+    let total = txs.len();
     for tx in txs.iter_mut() {
         if tx.failed || tx.phase == Phase::Done {
             continue;
@@ -1000,6 +1044,8 @@ async fn poll_pipeline_its_hub(
     ui::success(&format!(
         "ITS pipeline: voted: {voted}/{total}  hub: {hub_approved}/{total}  routed: {routed}/{total}  approved: {approved}/{total}  executed: {executed}/{total}"
     ));
+
+    compute_peak_throughput(txs)
 }
 
 /// Count how many txs have reached each phase (cumulative).
@@ -1151,6 +1197,67 @@ pub async fn verify_onchain<P: Provider>(
     Ok(report)
 }
 
+/// Streaming version of `verify_onchain` for EVM destinations — runs
+/// concurrently with the send phase, receiving confirmed txs via the channel.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_evm_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    gateway_addr: Address,
+    evm_rpc_url: &str,
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
+
+    let checker = DestinationChecker::Evm {
+        gw_contract: &gw_contract,
+    };
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        Some(&cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_address,
+        &checker,
+        None,
+        None,
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
+}
+
 /// Convert a confirmed TxMetrics into a PendingTx for Solana verification.
 pub(super) fn tx_to_pending_solana(
     tx: &TxMetrics,
@@ -1185,6 +1292,82 @@ pub(super) fn tx_to_pending_solana(
             Phase::Voted
         } else {
             Phase::Routed
+        },
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
+/// Convert a confirmed TxMetrics into a PendingTx for EVM GMP verification.
+#[allow(dead_code)]
+pub(super) fn tx_to_pending_evm(
+    tx: &TxMetrics,
+    _source_chain: &str,
+    contract_addr: Address,
+    has_voting_verifier: bool,
+    source_type: SourceChainType,
+) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    let message_id = match source_type {
+        SourceChainType::Evm => tx.signature.clone(),
+        SourceChainType::Svm => {
+            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+        }
+    };
+    PendingTx {
+        idx: 0,
+        message_id,
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: String::new(),
+        gmp_destination_address: String::new(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::Routed
+        },
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
+/// Convert a confirmed TxMetrics into a PendingTx for ITS hub verification.
+/// ITS messages route through the hub, so gmp_destination_chain/address are
+/// set from the TxMetrics (typically "axelar" / AxelarnetGateway).
+pub(super) fn tx_to_pending_its(
+    tx: &TxMetrics,
+    has_voting_verifier: bool,
+) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    PendingTx {
+        idx: 0,
+        message_id: tx.signature.clone(),
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr: Address::ZERO,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: tx.gmp_destination_chain.clone(),
+        gmp_destination_address: tx.gmp_destination_address.clone(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::HubApproved
         },
         second_leg_message_id: None,
         second_leg_payload_hash: None,
@@ -1459,7 +1642,7 @@ pub async fn verify_onchain_solana_its(
         &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
     )?;
 
-    poll_pipeline_its_hub(
+    let peaks = poll_pipeline_its_hub(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1468,12 +1651,69 @@ pub async fn verify_onchain_solana_its(
         &rpc,
         &cosm_gateway_dest,
         solana_rpc,
+        None,
+        None,
+        None,
     )
     .await;
 
-    let peaks = compute_peak_throughput(&txs);
     let report = compute_verification_report(&txs, metrics, peaks);
     Ok(report)
+}
+
+/// Streaming version of `verify_onchain_solana_its` — runs concurrently with
+/// the send phase, receiving confirmed txs via the channel.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_solana_its_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    solana_rpc: &str,
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        solana_rpc,
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
 }
 
 /// Verify Solana->EVM ITS transactions through the Amplifier pipeline.
