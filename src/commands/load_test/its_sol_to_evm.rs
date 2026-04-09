@@ -165,9 +165,31 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let duration_secs = args.duration_secs.unwrap();
         let key_cycle = args.key_cycle as usize;
 
+        // Streaming verification: run concurrently with sends.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_rpc = evm_rpc_url.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let vgw = evm_gateway_addr;
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            super::verify::verify_onchain_evm_its_streaming(
+                &vconfig, &vsource, &vdest, vgw, &vdest_rpc,
+                verify_rx, vdone, spinner,
+            )
+            .await
+        });
+
         let spinner = ui::wait_spinner(&format!(
             "[0/{duration_secs}s] starting sustained ITS send..."
         ));
+        let _ = spinner_tx.send(spinner.clone());
+
         let test_start = Instant::now();
 
         let dest_chain_s = dest.to_string();
@@ -191,6 +213,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 let m = mint;
                 let gv = gas_value;
                 let gmp_dest = axelarnet_gw_s.clone();
+                let vtx = verify_tx.clone();
 
                 Box::pin(async move {
                     let submit_start = Instant::now();
@@ -221,6 +244,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                             metrics.send_instant = Some(submit_start);
                             metrics.gmp_destination_chain = "axelar".to_string();
                             metrics.gmp_destination_address = gmp_dest;
+                            // Stream to concurrent verification
+                            if metrics.success {
+                                let pending = super::verify::tx_to_pending_its(&metrics, false);
+                                let _ = vtx.send(pending);
+                            }
                             metrics
                         }
                         Err(e) => {
@@ -254,7 +282,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             key_cycle,
             None,
             make_task,
-            None,
+            Some(send_done),
             spinner,
         )
         .await;
@@ -268,16 +296,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             num_keys,
         );
 
-        let verification = super::verify::verify_onchain_evm_its(
-            &args.config,
-            &args.source_axelar_id,
-            &args.destination_axelar_id,
-            &format!("{its_proxy_addr}"),
-            evm_gateway_addr,
-            &evm_rpc_url,
-            &mut report.transactions,
-        )
-        .await?;
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report.transactions.iter_mut().find(|t| t.signature == msg_id) {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
         report.verification = Some(verification);
 
         return finish_report(&args, &mut report, test_start);
