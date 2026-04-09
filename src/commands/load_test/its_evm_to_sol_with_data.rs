@@ -56,28 +56,52 @@ const MAX_RETRIES: u32 = 5;
 ///
 /// The Borsh payload contains the memo string as the execution data and the
 /// memo program's counter PDA as a required writable account.
-fn build_its_memo_metadata(counter_pda: &Pubkey) -> Vec<u8> {
+///
+/// When `extra_accounts > 0`, additional accounts are appended after the counter
+/// PDA to inflate the transaction size and exercise ALT (Address Lookup Table)
+/// paths on the relayer. The first extra account is a valid ATA for the ITS
+/// token mint (writable); the rest are random pubkeys (read-only).
+fn build_its_memo_metadata(
+    counter_pda: &Pubkey,
+    extra_accounts: u32,
+    token_mint_ata: Option<&Pubkey>,
+) -> Vec<u8> {
     let mut buf = [0u8; 16];
     rand::thread_rng().fill(&mut buf);
     let memo = format!("axe load test {}", hex::encode(buf));
     let memo_bytes = memo.as_bytes();
 
-    let counter_bytes = counter_pda.to_bytes();
+    let total_accounts = 1 + extra_accounts;
 
     // Metadata version (4 bytes, all zero)
     let mut metadata = vec![0u8; 4];
     // Encoding scheme: 0x00 = Borsh
     metadata.push(0x00);
     // Borsh payload: [u32 LE payload_length] [payload] [u32 LE account_count] [accounts...]
-    // Payload length
     metadata.extend(&(memo_bytes.len() as u32).to_le_bytes());
-    // Payload data
     metadata.extend_from_slice(memo_bytes);
-    // Account count = 1 (counter PDA)
-    metadata.extend(&1u32.to_le_bytes());
-    // Account: 32 bytes pubkey + 1 byte flags (bit0=signer, bit1=writable)
-    metadata.extend_from_slice(&counter_bytes);
+    // Account count
+    metadata.extend(&total_accounts.to_le_bytes());
+    // Account 0: counter PDA (writable, not signer)
+    metadata.extend_from_slice(&counter_pda.to_bytes());
     metadata.push(0x02); // writable=true, signer=false
+
+    // Extra accounts for ALT testing
+    for i in 0..extra_accounts {
+        if i == 0 {
+            if let Some(ata) = token_mint_ata {
+                // First extra account: valid ATA (writable)
+                metadata.extend_from_slice(&ata.to_bytes());
+                metadata.push(0x02); // writable=true, signer=false
+                continue;
+            }
+        }
+        // Remaining: random pubkeys (read-only)
+        let mut random_key = [0u8; 32];
+        rand::thread_rng().fill(&mut random_key);
+        metadata.extend_from_slice(&random_key);
+        metadata.push(0x00); // read-only, not signer
+    }
 
     metadata
 }
@@ -260,6 +284,29 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .await?;
     }
 
+    // --- Extra accounts for ALT testing ---
+    let extra_accounts = args.extra_accounts;
+    let token_mint_ata = if extra_accounts > 0 {
+        // Derive the ITS token mint on Solana and compute an ATA for the memo program.
+        let (its_root, _) = crate::solana::find_its_root_pda();
+        let (sol_mint, _) = crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
+        let token_program = Pubkey::from_str_const(
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        );
+        let ata_program = Pubkey::from_str_const(
+            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+        );
+        let ata = Pubkey::find_program_address(
+            &[memo_program_id.as_ref(), token_program.as_ref(), sol_mint.as_ref()],
+            &ata_program,
+        ).0;
+        ui::kv("extra accounts", &extra_accounts.to_string());
+        ui::address("first extra (ATA)", &ata.to_string());
+        Some(ata)
+    } else {
+        None
+    };
+
     // --- Derive N EVM signers ---
     let derived = keypairs::derive_evm_signers(&main_key, num_keys)?;
     ui::info(&format!("derived {} EVM signing keys", derived.len()));
@@ -315,6 +362,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let test_start = Instant::now();
         let dest_chain_s = dest.to_string();
         let counter_pda_clone = counter_pda;
+        let ea = extra_accounts;
+        let tma = token_mint_ata;
 
         let make_task: super::sustained::MakeTask =
             Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -333,7 +382,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
                 Box::pin(async move {
                     execute_interchain_transfer_with_data(
-                        &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, nonce,
+                        &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, ea,
+                        tma.as_ref(), nonce,
                     )
                     .await
                 })
@@ -397,6 +447,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let its_proxy = its_proxy_addr;
         let tid = token_id;
         let cpda = counter_pda;
+        let ea = extra_accounts;
+        let tma = token_mint_ata;
 
         let provider = ProviderBuilder::new()
             .wallet(derived_signer.clone())
@@ -408,7 +460,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
                 let result = execute_interchain_transfer_with_data(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, None,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, &cpda, ea,
+                    tma.as_ref(), None,
                 )
                 .await;
 
@@ -624,12 +677,14 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
     amount: U256,
     gas_value: U256,
     counter_pda: &Pubkey,
+    extra_accounts: u32,
+    token_mint_ata: Option<&Pubkey>,
     explicit_nonce: Option<u64>,
 ) -> TxMetrics {
     let submit_start = Instant::now();
 
     // Build unique metadata per tx (random memo string)
-    let metadata = Bytes::from(build_its_memo_metadata(counter_pda));
+    let metadata = Bytes::from(build_its_memo_metadata(counter_pda, extra_accounts, token_mint_ata));
 
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
