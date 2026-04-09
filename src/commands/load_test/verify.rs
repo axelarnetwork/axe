@@ -334,6 +334,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
 // Check outcome — returned from parallel checks, applied to txs afterward
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 enum CheckOutcome {
     /// No change (not ready yet, or tx was already terminal).
     NotYet,
@@ -790,6 +791,15 @@ async fn poll_pipeline_its_hub(
     let mut last_progress = Instant::now();
     let mut rt_stats = RealTimeStats::new();
 
+    // Skip voting phase entirely if no VotingVerifier
+    if voting_verifier.is_none() {
+        for tx in txs.iter_mut() {
+            if tx.phase == Phase::Voted {
+                tx.phase = Phase::HubApproved;
+            }
+        }
+    }
+
     loop {
         let active: Vec<usize> = (0..txs.len())
             .filter(|&i| !txs[i].failed && txs[i].phase != Phase::Done)
@@ -799,204 +809,144 @@ async fn poll_pipeline_its_hub(
             break;
         }
 
-        let futs: Vec<_> = active
-            .iter()
-            .map(|&i| {
-                let phase = txs[i].phase;
-                let message_id = txs[i].message_id.clone();
-                let source_address = txs[i].source_address.clone();
-                let payload_hash_hex = txs[i].payload_hash_hex.clone();
-                let send_instant = txs[i].send_instant;
-                let dest_chain = txs[i].gmp_destination_chain.clone();
-                let dest_address = txs[i].gmp_destination_address.clone();
-                let second_leg_id = txs[i].second_leg_message_id.clone();
-                let sol_client = sol_rpc_client.clone();
+        let error_msg: Option<String> = None;
 
+        // Snapshot indices by phase
+        let voted_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Voted).copied().collect();
+        let hub_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::HubApproved).copied().collect();
+        let discover_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::DiscoverSecondLeg).copied().collect();
+        let routed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Routed).copied().collect();
+        let approved_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Approved).copied().collect();
+        let executed_indices: Vec<usize> = active.iter().filter(|&&i| txs[i].phase == Phase::Executed).copied().collect();
+
+        // Build owned data for batch queries
+        let voted_data: Vec<(usize, String, String, String)> = voted_indices.iter().map(|&i| {
+            (i, txs[i].message_id.clone(), txs[i].source_address.clone(), txs[i].payload_hash_hex.clone())
+        }).collect();
+        let hub_data: Vec<(usize, String)> = hub_indices.iter().map(|&i| {
+            (i, txs[i].message_id.clone())
+        }).collect();
+        let routed_data: Vec<(usize, String)> = routed_indices.iter().map(|&i| {
+            (i, txs[i].second_leg_message_id.clone().unwrap_or_default())
+        }).collect();
+
+        // Solana destination checks: need command_id from second_leg_message_id
+        let sol_dest_indices: Vec<usize> = approved_indices.iter().chain(executed_indices.iter()).copied().collect();
+        let sol_dest_data: Vec<(usize, [u8; 32])> = sol_dest_indices.iter().map(|&i| {
+            let sl_id = txs[i].second_leg_message_id.as_deref().unwrap_or("");
+            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
+            (i, keccak256(&input).into())
+        }).collect();
+
+        // --- Fire Cosmos batch phases concurrently ---
+        let dest_chain_for_vv = txs.first().map(|t| t.gmp_destination_chain.clone()).unwrap_or_default();
+        let dest_addr_for_vv = txs.first().map(|t| t.gmp_destination_address.clone()).unwrap_or_default();
+
+        let (voted_results, hub_results, routed_results) = tokio::join!(
+            async {
+                if voted_data.is_empty() { return Vec::new(); }
+                if let Some(vv) = voting_verifier {
+                    batch_check_voting_verifier_owned(
+                        lcd, vv, source_chain, &dest_chain_for_vv, &dest_addr_for_vv, &voted_data,
+                    ).await
+                } else {
+                    voted_data.iter().map(|(i, ..)| (*i, true)).collect()
+                }
+            },
+            async {
+                if hub_data.is_empty() { return Vec::new(); }
+                batch_check_hub_approved_owned(lcd, axelarnet_gateway, source_chain, &hub_data).await
+            },
+            async {
+                if routed_data.is_empty() { return Vec::new(); }
+                batch_check_cosmos_routed_owned(lcd, cosm_gateway_dest, "axelar", &routed_data).await
+            },
+        );
+
+        // Apply Cosmos results
+        for (i, ok) in voted_results {
+            if ok {
+                txs[i].timing.voted_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                txs[i].phase = Phase::HubApproved;
+                last_progress = Instant::now();
+            }
+        }
+        for (i, ok) in hub_results {
+            if ok {
+                txs[i].timing.hub_approved_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                txs[i].phase = Phase::DiscoverSecondLeg;
+                last_progress = Instant::now();
+            }
+        }
+        for (i, ok) in routed_results {
+            if ok {
+                txs[i].timing.routed_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                txs[i].phase = Phase::Approved;
+                last_progress = Instant::now();
+            }
+        }
+
+        // --- DiscoverSecondLeg: individual RPC tx_search (can't batch) ---
+        if !discover_indices.is_empty() {
+            let discover_futs: Vec<_> = discover_indices.iter().map(|&i| {
+                let msg_id = txs[i].message_id.clone();
                 async move {
-                    let outcome = match phase {
-                        Phase::Voted => {
-                            if let Some(vv) = voting_verifier {
-                                match check_voting_verifier(
-                                    lcd,
-                                    vv,
-                                    source_chain,
-                                    &message_id,
-                                    &source_address,
-                                    &dest_chain,
-                                    &dest_address,
-                                    &payload_hash_hex,
-                                )
-                                .await
-                                {
-                                    Ok(true) => CheckOutcome::PhaseComplete {
-                                        elapsed: send_instant.elapsed().as_secs_f64(),
-                                    },
-                                    Ok(false) => CheckOutcome::NotYet,
-                                    Err(e) => CheckOutcome::Error(format!("VotingVerifier: {e}")),
-                                }
-                            } else {
-                                CheckOutcome::SkipVoting
-                            }
-                        }
-                        Phase::HubApproved => {
-                            match check_hub_approved(
-                                lcd,
-                                axelarnet_gateway,
-                                source_chain,
-                                &message_id,
-                            )
-                            .await
-                            {
-                                Ok(true) => CheckOutcome::PhaseComplete {
-                                    elapsed: send_instant.elapsed().as_secs_f64(),
-                                },
-                                Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => CheckOutcome::Error(format!("AxelarnetGateway: {e}")),
-                            }
-                        }
-                        Phase::DiscoverSecondLeg => {
-                            match discover_second_leg(rpc, &message_id).await {
-                                Ok(Some(info)) => CheckOutcome::SecondLegDiscovered {
-                                    message_id: info.message_id,
-                                    payload_hash: info.payload_hash,
-                                    source_address: info.source_address,
-                                    destination_address: info.destination_address,
-                                },
-                                Ok(None) => CheckOutcome::NotYet,
-                                Err(e) => CheckOutcome::Error(format!("second-leg discovery: {e}")),
-                            }
-                        }
-                        Phase::Routed => {
-                            let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id).await
-                            {
-                                Ok(true) => CheckOutcome::PhaseComplete {
-                                    elapsed: send_instant.elapsed().as_secs_f64(),
-                                },
-                                Ok(false) => CheckOutcome::NotYet,
-                                Err(e) => CheckOutcome::Error(format!("Gateway routing: {e}")),
-                            }
-                        }
-                        Phase::Approved => {
-                            let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
-                            let cmd_id: [u8; 32] = keccak256(&input).into();
-                            let client = sol_client;
-                            match tokio::task::spawn_blocking(move || {
-                                check_solana_incoming_message(&client, &cmd_id)
-                            })
-                            .await
-                            {
-                                Ok(Ok(Some(0))) => CheckOutcome::PhaseComplete {
-                                    elapsed: send_instant.elapsed().as_secs_f64(),
-                                },
-                                Ok(Ok(Some(_))) => CheckOutcome::AlreadyExecuted {
-                                    elapsed: send_instant.elapsed().as_secs_f64(),
-                                },
-                                Ok(Ok(None)) => CheckOutcome::NotYet,
-                                Ok(Err(e)) => CheckOutcome::Error(format!("Solana approval: {e}")),
-                                Err(e) => CheckOutcome::Error(format!("Solana approval: {e}")),
-                            }
-                        }
-                        Phase::Executed => {
-                            let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
-                            let cmd_id: [u8; 32] = keccak256(&input).into();
-                            let client = sol_client;
-                            match tokio::task::spawn_blocking(move || {
-                                check_solana_incoming_message(&client, &cmd_id)
-                            })
-                            .await
-                            {
-                                Ok(Ok(Some(status))) if status != 0 => {
-                                    CheckOutcome::PhaseComplete {
-                                        elapsed: send_instant.elapsed().as_secs_f64(),
-                                    }
-                                }
-                                Ok(Ok(_)) => CheckOutcome::NotYet,
-                                Ok(Err(e)) => CheckOutcome::Error(format!("Solana execution: {e}")),
-                                Err(e) => CheckOutcome::Error(format!("Solana execution: {e}")),
-                            }
-                        }
-                        Phase::Done => CheckOutcome::NotYet,
-                    };
-                    (i, outcome)
-                }
-            })
-            .collect();
-
-        let results: Vec<_> = futures::stream::iter(futs)
-            .buffer_unordered(20)
-            .collect()
-            .await;
-
-        let mut error_msg = None;
-        for (i, outcome) in &results {
-            let i = *i;
-            match outcome {
-                CheckOutcome::NotYet => {}
-                CheckOutcome::PhaseComplete { elapsed } => {
-                    let elapsed = *elapsed;
-                    match txs[i].phase {
-                        Phase::Voted => {
-                            txs[i].timing.voted_secs = Some(elapsed);
-                            // Skip Routed, go directly to HubApproved
-                            txs[i].phase = Phase::HubApproved;
-                        }
-                        Phase::HubApproved => {
-                            txs[i].timing.hub_approved_secs = Some(elapsed);
-                            txs[i].phase = Phase::DiscoverSecondLeg;
-                        }
-                        Phase::DiscoverSecondLeg => {
-                            // Should not happen — DiscoverSecondLeg uses SecondLegDiscovered
-                            txs[i].phase = Phase::Routed;
-                        }
-                        Phase::Routed => {
-                            txs[i].timing.routed_secs = Some(elapsed);
-                            txs[i].phase = Phase::Approved;
-                        }
-                        Phase::Approved => {
-                            txs[i].timing.approved_secs = Some(elapsed);
-                            txs[i].phase = Phase::Executed;
-                        }
-                        Phase::Executed => {
-                            txs[i].timing.executed_secs = Some(elapsed);
-                            txs[i].timing.executed_ok = Some(true);
-                            txs[i].phase = Phase::Done;
-                        }
-                        Phase::Done => {}
+                    match discover_second_leg(rpc, &msg_id).await {
+                        Ok(Some(info)) => (i, Some(info)),
+                        _ => (i, None),
                     }
-                    last_progress = Instant::now();
                 }
-                CheckOutcome::SkipVoting => {
-                    txs[i].phase = Phase::HubApproved;
-                    last_progress = Instant::now();
-                }
-                CheckOutcome::SecondLegDiscovered {
-                    message_id: sl_msg_id,
-                    payload_hash: sl_ph,
-                    source_address: sl_src,
-                    destination_address: sl_dst,
-                } => {
-                    txs[i].second_leg_message_id = Some(sl_msg_id.clone());
-                    txs[i].second_leg_payload_hash = Some(sl_ph.clone());
-                    txs[i].second_leg_source_address = Some(sl_src.clone());
-                    txs[i].second_leg_destination_address = Some(sl_dst.clone());
+            }).collect();
+            let discover_results: Vec<_> = futures::stream::iter(discover_futs)
+                .buffer_unordered(20)
+                .collect()
+                .await;
+            for (i, info) in discover_results {
+                if let Some(info) = info {
+                    txs[i].second_leg_message_id = Some(info.message_id);
+                    txs[i].second_leg_payload_hash = Some(info.payload_hash);
+                    txs[i].second_leg_source_address = Some(info.source_address);
+                    txs[i].second_leg_destination_address = Some(info.destination_address);
                     txs[i].phase = Phase::Routed;
                     last_progress = Instant::now();
                 }
-                CheckOutcome::AlreadyExecuted { elapsed } => {
-                    let elapsed = *elapsed;
-                    if txs[i].timing.approved_secs.is_none() {
-                        txs[i].timing.approved_secs = Some(elapsed);
+            }
+        }
+
+        // --- Solana destination checks (batch) ---
+        if !sol_dest_data.is_empty() {
+            let client = sol_rpc_client.clone();
+            let data = sol_dest_data;
+            let results = tokio::task::spawn_blocking(move || {
+                batch_check_solana_incoming_messages(&client, &data)
+            })
+            .await
+            .unwrap_or_default();
+
+            for (i, status) in results {
+                match (txs[i].phase, status) {
+                    (Phase::Approved, Some(0)) => {
+                        txs[i].timing.approved_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].phase = Phase::Executed;
+                        last_progress = Instant::now();
                     }
-                    txs[i].timing.executed_secs = Some(elapsed);
-                    txs[i].timing.executed_ok = Some(true);
-                    txs[i].phase = Phase::Done;
-                    last_progress = Instant::now();
-                }
-                CheckOutcome::Error(msg) => {
-                    error_msg = Some(msg.clone());
+                    (Phase::Approved, Some(_)) => {
+                        let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                        if txs[i].timing.approved_secs.is_none() {
+                            txs[i].timing.approved_secs = Some(elapsed);
+                        }
+                        txs[i].timing.executed_secs = Some(elapsed);
+                        txs[i].timing.executed_ok = Some(true);
+                        txs[i].phase = Phase::Done;
+                        last_progress = Instant::now();
+                    }
+                    (Phase::Executed, Some(s)) if s > 0 => {
+                        txs[i].timing.executed_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        txs[i].timing.executed_ok = Some(true);
+                        txs[i].phase = Phase::Done;
+                        last_progress = Instant::now();
+                    }
+                    _ => {}
                 }
             }
         }
