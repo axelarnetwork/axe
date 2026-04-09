@@ -99,6 +99,10 @@ pub struct LoadTestArgs {
     pub tps: Option<u64>,
     pub duration_secs: Option<u64>,
     pub key_cycle: u64,
+    /// Number of extra accounts to add to ITS-with-data payloads.
+    /// The first extra account is a valid ATA for the ITS token mint;
+    /// remaining accounts are random pubkeys. Useful for testing ALT paths.
+    pub extra_accounts: u32,
 }
 
 /// Cache file for storing SenderReceiver address per chain.

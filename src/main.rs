@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
                 tps,
                 duration_secs,
                 key_cycle,
+                extra_accounts,
             } => {
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
@@ -144,6 +145,7 @@ async fn main() -> Result<()> {
                     tps,
                     duration_secs,
                     key_cycle,
+                    extra_accounts,
                 })
                 .await
             }
