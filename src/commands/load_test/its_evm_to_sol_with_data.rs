@@ -88,13 +88,13 @@ fn build_its_memo_metadata(
 
     // Extra accounts for ALT testing
     for i in 0..extra_accounts {
-        if i == 0 {
-            if let Some(ata) = token_mint_ata {
-                // First extra account: valid ATA (writable)
-                metadata.extend_from_slice(&ata.to_bytes());
-                metadata.push(0x02); // writable=true, signer=false
-                continue;
-            }
+        if i == 0
+            && let Some(ata) = token_mint_ata
+        {
+            // First extra account: valid ATA (writable)
+            metadata.extend_from_slice(&ata.to_bytes());
+            metadata.push(0x02); // writable=true, signer=false
+            continue;
         }
         // Remaining: random pubkeys (read-only)
         let mut random_key = [0u8; 32];
