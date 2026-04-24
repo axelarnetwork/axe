@@ -8,6 +8,7 @@ mod state;
 mod steps;
 pub mod ui;
 mod utils;
+mod xrpl;
 
 use clap::Parser;
 use eyre::Result;
