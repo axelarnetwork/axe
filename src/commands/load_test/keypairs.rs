@@ -360,3 +360,145 @@ fn transfer_sol(
         .map_err(|e| eyre!("failed to fund {}: {e}", to))?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// XRPL key derivation + funding
+// ---------------------------------------------------------------------------
+
+use crate::xrpl::{XrplClient, XrplWallet};
+
+/// Deterministically derive `count` XRPL wallets from a main 32-byte seed.
+///
+/// Uses the same `keccak256(main_seed || index)` pattern as the Solana/EVM
+/// derivation, so re-runs always get the same ephemeral wallets and we can
+/// reuse their on-chain reserves.
+pub fn derive_xrpl_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<XrplWallet>> {
+    (0..count)
+        .map(|i| {
+            let mut seed_input = Vec::with_capacity(40);
+            seed_input.extend_from_slice(main_seed);
+            seed_input.extend_from_slice(&(i as u64).to_le_bytes());
+            let hash = keccak256(&seed_input);
+            XrplWallet::from_bytes(hash.as_ref())
+                .map_err(|e| eyre!("failed to derive XRPL wallet {i}: {e}"))
+        })
+        .collect()
+}
+
+/// Ensure every derived XRPL wallet is activated and holds at least
+/// `target_drops` of XRP. Tops up any short wallet, either via the public
+/// faucet (devnet/testnet) or via direct `Payment` from `main_wallet`.
+///
+/// The XRPL base reserve (~10 XRP) is implicitly part of `target_drops` —
+/// callers should include it when deciding how much to request.
+#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+pub async fn ensure_funded_xrpl(
+    client: &XrplClient,
+    main_wallet: Option<&XrplWallet>,
+    derived: &[XrplWallet],
+    target_drops: u64,
+    faucet_url: Option<&str>,
+) -> Result<()> {
+    // Check balances in parallel — XRPL account_info is cheap.
+    let mut balances = Vec::with_capacity(derived.len());
+    let check_pb = ProgressBar::new(derived.len() as u64);
+    check_pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} XRPL keys checked")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    for w in derived {
+        let info = client.account_info(&w.address()).await?;
+        balances.push(info.map(|i| i.balance_drops).unwrap_or(0));
+        check_pb.inc(1);
+    }
+    check_pb.finish_and_clear();
+
+    let to_fund: Vec<(usize, u64)> = balances
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &bal)| {
+            if bal < target_drops {
+                Some((i, target_drops.saturating_sub(bal)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if to_fund.is_empty() {
+        ui::success(&format!(
+            "all {} derived XRPL keys are funded (>= {:.2} XRP each)",
+            derived.len(),
+            target_drops as f64 / 1_000_000.0,
+        ));
+        return Ok(());
+    }
+
+    let total_needed: u64 = to_fund.iter().map(|(_, d)| *d).sum();
+    ui::info(&format!(
+        "funding {}/{} XRPL keys ({:.2} XRP total)...",
+        to_fund.len(),
+        derived.len(),
+        total_needed as f64 / 1_000_000.0,
+    ));
+
+    let pb = ProgressBar::new(to_fund.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template("  {bar:40.cyan/dim} {pos}/{len} XRPL keys funded")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    // Path 1: public faucet (devnet/testnet). The faucet drops a fixed amount
+    // per call and ignores our target, so call it once per short wallet.
+    // Path 2: direct Payment from main wallet (stagenet/mainnet).
+    match (faucet_url, main_wallet) {
+        (Some(faucet), _) => {
+            for (i, _) in &to_fund {
+                client
+                    .fund_from_faucet(&derived[*i].address(), faucet)
+                    .await
+                    .map_err(|e| eyre!("faucet funding failed for key {i}: {e}"))?;
+                pb.inc(1);
+            }
+        }
+        (None, Some(main)) => {
+            // Ensure main has enough (+ small fee buffer per tx).
+            let main_info = client.account_info(&main.address()).await?;
+            let main_balance = main_info.map(|i| i.balance_drops).unwrap_or(0);
+            let fee_buffer = 1_000u64.saturating_mul(to_fund.len() as u64); // ~100 drops/tx overhead
+            if main_balance < total_needed + fee_buffer {
+                return Err(eyre!(
+                    "XRPL main wallet has {:.4} XRP but needs {:.4} XRP to fund {} keys. \
+                     Fund the main wallet ({}) first.",
+                    main_balance as f64 / 1_000_000.0,
+                    (total_needed + fee_buffer) as f64 / 1_000_000.0,
+                    to_fund.len(),
+                    main.address(),
+                ));
+            }
+            for (i, amount) in &to_fund {
+                client
+                    .submit_plain_payment(main, &derived[*i].account_id, *amount)
+                    .await
+                    .map_err(|e| eyre!("funding payment failed for key {i}: {e}"))?;
+                pb.inc(1);
+            }
+        }
+        (None, None) => {
+            return Err(eyre!(
+                "no XRPL faucet available and no main wallet provided to fund {} ephemeral XRPL keys",
+                to_fund.len()
+            ));
+        }
+    }
+    pb.finish_and_clear();
+
+    ui::success(&format!(
+        "funded {} XRPL keys ({:.2} XRP total)",
+        to_fund.len(),
+        total_needed as f64 / 1_000_000.0,
+    ));
+    Ok(())
+}

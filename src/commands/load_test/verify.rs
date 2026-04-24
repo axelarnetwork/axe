@@ -1205,11 +1205,14 @@ fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize, usize) {
 
 /// Source chain type — determines how message IDs are constructed.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum SourceChainType {
     /// Solana source: message ID = `{signature}-{group}.{index}`
     Svm,
     /// EVM source: message ID = `{tx_hash}-{event_index}` (already in tx.signature)
     Evm,
+    /// XRPL source: message ID = `0x{lowercase_tx_hash}` (already in tx.signature)
+    Xrpl,
 }
 
 /// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
@@ -1271,7 +1274,7 @@ pub async fn verify_onchain<P: Provider>(
             PendingTx {
                 idx,
                 message_id: match source_type {
-                    SourceChainType::Evm => tx.signature.clone(),
+                    SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
                     SourceChainType::Svm => {
                         format!("{}-{}.1", tx.signature, solana_call_contract_index())
                     }
@@ -1392,7 +1395,7 @@ pub(super) fn tx_to_pending_solana(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm => tx.signature.clone(),
+        SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1435,7 +1438,7 @@ pub(super) fn tx_to_pending_evm(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm => tx.signature.clone(),
+        SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1458,6 +1461,38 @@ pub(super) fn tx_to_pending_evm(
             Phase::Voted
         } else {
             Phase::Routed
+        },
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
+/// Convert a confirmed TxMetrics into a PendingTx for XRPL-sourced ITS
+/// verification. The `signature` field on the input is the already-formatted
+/// XRPL message id (`0x{lowercase_hex_tx_hash}`), which is what the
+/// `XrplVotingVerifier` / `XrplGateway` expect.
+pub(super) fn tx_to_pending_xrpl(tx: &TxMetrics, has_voting_verifier: bool) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    PendingTx {
+        idx: 0,
+        message_id: tx.signature.clone(),
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr: Address::ZERO,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: tx.gmp_destination_chain.clone(),
+        gmp_destination_address: tx.gmp_destination_address.clone(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::HubApproved
         },
         second_leg_message_id: None,
         second_leg_payload_hash: None,
@@ -1616,7 +1651,7 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm => tx.signature.clone(),
+                SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }

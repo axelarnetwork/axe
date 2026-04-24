@@ -1,12 +1,15 @@
 pub mod evm_sender;
 pub mod its_evm_to_sol;
 pub mod its_evm_to_sol_with_data;
+pub mod its_evm_to_xrpl;
 pub mod its_sol_to_evm;
+pub mod its_xrpl_to_evm;
 pub mod keypairs;
 pub mod metrics;
 pub mod sol_sender;
 mod sustained;
 mod verify;
+pub mod xrpl_sender;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -42,6 +45,10 @@ pub enum TestType {
     EvmToEvm,
     /// Solana -> Solana cross-chain load test
     SolToSol,
+    /// XRPL -> EVM cross-chain load test (ITS XRP)
+    XrplToEvm,
+    /// EVM -> XRPL cross-chain load test (ITS XRP, stub)
+    EvmToXrpl,
 }
 
 impl std::fmt::Display for TestType {
@@ -51,6 +58,8 @@ impl std::fmt::Display for TestType {
             TestType::EvmToSol => write!(f, "evm-to-sol"),
             TestType::EvmToEvm => write!(f, "evm-to-evm"),
             TestType::SolToSol => write!(f, "sol-to-sol"),
+            TestType::XrplToEvm => write!(f, "xrpl-to-evm"),
+            TestType::EvmToXrpl => write!(f, "evm-to-xrpl"),
         }
     }
 }
@@ -165,9 +174,11 @@ fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
         ("evm", "svm") => Ok(TestType::EvmToSol),
         ("evm", "evm") => Ok(TestType::EvmToEvm),
         ("svm", "svm") => Ok(TestType::SolToSol),
+        ("xrpl", "evm") => Ok(TestType::XrplToEvm),
+        ("evm", "xrpl") => Ok(TestType::EvmToXrpl),
         _ => Err(eyre::eyre!(
             "unsupported chain type combination: {source_type} -> {dest_type}. \
-             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm"
+             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm, xrpl -> evm, evm -> xrpl"
         )),
     }
 }
@@ -425,6 +436,78 @@ fn auto_detect_chains(
             };
             Ok((source, dest))
         }
+        TestType::XrplToEvm => {
+            let source = match source_override {
+                Some(s) => s,
+                None => {
+                    let xrpl = find_chains_by_type(chains, "xrpl", false);
+                    match xrpl.len() {
+                        0 => return Err(eyre::eyre!("no XRPL chain found in config")),
+                        1 => {
+                            ui::info(&format!("auto-detected source: {}", xrpl[0]));
+                            xrpl[0].clone()
+                        }
+                        _ => {
+                            return Err(eyre::eyre!(
+                                "multiple XRPL chains found: {}. Use --source-chain to pick one.",
+                                xrpl.join(", ")
+                            ));
+                        }
+                    }
+                }
+            };
+            let dest = match dest_override {
+                Some(d) => d,
+                None => {
+                    let evm = find_chains_by_type(chains, "evm", true);
+                    if evm.is_empty() {
+                        return Err(eyre::eyre!("no EVM chain found in config"));
+                    }
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        evm[0]
+                    ));
+                    evm[0].clone()
+                }
+            };
+            Ok((source, dest))
+        }
+        TestType::EvmToXrpl => {
+            let source = match source_override {
+                Some(s) => s,
+                None => {
+                    let evm = find_chains_by_type(chains, "evm", true);
+                    match evm.len() {
+                        0 => return Err(eyre::eyre!("no EVM chain found in config")),
+                        1 => {
+                            ui::info(&format!("auto-detected source: {}", evm[0]));
+                            evm[0].clone()
+                        }
+                        _ => {
+                            return Err(eyre::eyre!(
+                                "multiple EVM chains found: {}. Use --source-chain to pick one.",
+                                evm.join(", ")
+                            ));
+                        }
+                    }
+                }
+            };
+            let dest = match dest_override {
+                Some(d) => d,
+                None => {
+                    let xrpl = find_chains_by_type(chains, "xrpl", false);
+                    if xrpl.is_empty() {
+                        return Err(eyre::eyre!("no XRPL chain found in config"));
+                    }
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        xrpl[0]
+                    ));
+                    xrpl[0].clone()
+                }
+            };
+            Ok((source, dest))
+        }
     }
 }
 
@@ -587,17 +670,24 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         args.protocol, args.test_type, args.source_chain, args.destination_chain
     ));
 
-    // Block consensus chains that have no VotingVerifier — we can't verify them
+    // Block consensus chains that have no VotingVerifier — we can't verify them.
+    // XRPL uses `XrplVotingVerifier` (not `VotingVerifier`), so we also accept
+    // that as evidence of a verifiable source.
     let src = &args.source_chain;
-    let has_source_vv = read_axelar_contract_field(
+    let has_standard_vv = read_axelar_contract_field(
         &args.config,
         &format!("/axelar/contracts/VotingVerifier/{src}/address"),
     )
     .is_ok();
-    if !has_source_vv {
+    let has_xrpl_vv = read_axelar_contract_field(
+        &args.config,
+        &format!("/axelar/contracts/XrplVotingVerifier/{src}/address"),
+    )
+    .is_ok();
+    if !has_standard_vv && !has_xrpl_vv {
         eyre::bail!(
-            "source chain '{src}' has no VotingVerifier in the config (consensus chain). \
-             Load test verification requires an Amplifier chain with a VotingVerifier."
+            "source chain '{src}' has no VotingVerifier (or XrplVotingVerifier) in the config. \
+             Load test verification requires an Amplifier chain with a voting verifier."
         );
     }
 
@@ -606,8 +696,18 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         (Protocol::Gmp, TestType::EvmToSol) => run_evm_to_sol(args, run_start).await,
         (Protocol::Gmp, TestType::EvmToEvm) => run_evm_to_evm(args, run_start).await,
         (Protocol::Gmp, TestType::SolToSol) => run_sol_to_sol(args, run_start).await,
+        (Protocol::Gmp, TestType::XrplToEvm | TestType::EvmToXrpl) => {
+            eyre::bail!(
+                "GMP {}->{} is not yet supported for XRPL. XRPL has no executable layer, \
+                 so GMP in either direction is not applicable; use --protocol its instead.",
+                args.source_chain,
+                args.destination_chain
+            )
+        }
         (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::XrplToEvm) => its_xrpl_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::EvmToXrpl) => its_evm_to_xrpl::run(args, run_start).await,
         (Protocol::Its, TestType::EvmToEvm | TestType::SolToSol) => {
             eyre::bail!(
                 "ITS {}->{} is not yet supported",

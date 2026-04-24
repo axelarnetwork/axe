@@ -41,6 +41,15 @@ bs58 = "0.5"
 hex = "0.4"
 rand = "0.8"
 
+# XRPL dependencies (load test)
+libsecp256k1 = "0.7"
+sha2 = "0.10"
+ripemd = "0.1"
+xrpl_types = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_types" }
+xrpl_binary_codec = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_binary_codec" }
+xrpl_api = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_api" }
+xrpl_http_client = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_http_client" }
+
 [features]
 default = ["devnet-amplifier"]
 devnet-amplifier = ["solana-axelar-gateway/devnet-amplifier", "solana-axelar-gas-service/devnet-amplifier", "solana-axelar-memo/devnet-amplifier", "solana-axelar-its/devnet-amplifier"]
