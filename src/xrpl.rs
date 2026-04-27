@@ -298,6 +298,78 @@ impl XrplClient {
         Ok(tx_hash)
     }
 
+    /// Search the recipient account's recent transactions for an incoming
+    /// `Payment` carrying a `message_id` memo equal to `target_message_id`
+    /// (decoded from hex-encoded UTF-8). Returns the matching tx hash if
+    /// found. The XRPL relayer attaches `message_id` and `source_chain`
+    /// memos when broadcasting proof-driven payouts to recipients.
+    ///
+    /// `min_ledger` lets the caller bound the lookback window; pass `None`
+    /// to scan the latest 200 txs only.
+    pub async fn find_inbound_with_message_id(
+        &self,
+        recipient: &str,
+        target_message_id: &str,
+        min_ledger: Option<u32>,
+    ) -> Result<Option<String>> {
+        let target_lower = target_message_id.trim_start_matches("0x").to_lowercase();
+
+        let req = xrpl_api::AccountTxRequest {
+            account: recipient.to_string(),
+            forward: Some(false),
+            ledger_index_min: Some(
+                min_ledger
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-1".to_string()),
+            ),
+            ledger_index_max: Some("-1".to_string()),
+            pagination: xrpl_api::RequestPagination {
+                limit: Some(200),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resp = self
+            .inner
+            .call(req)
+            .await
+            .map_err(|e| eyre!("account_tx({recipient}): {e}"))?;
+
+        for at in resp.transactions {
+            if !at.validated {
+                continue;
+            }
+            // We only care about Payments (the relayer broadcasts Payments).
+            let common = at.tx.common();
+            let memos = match &common.memos {
+                Some(m) => m,
+                None => continue,
+            };
+            for m in memos {
+                let memo_type_decoded = m
+                    .memo_type
+                    .as_deref()
+                    .and_then(|h| hex::decode(h).ok())
+                    .and_then(|b| String::from_utf8(b).ok());
+                if memo_type_decoded.as_deref() != Some("message_id") {
+                    continue;
+                }
+                let memo_data_decoded = m
+                    .memo_data
+                    .as_deref()
+                    .and_then(|h| hex::decode(h).ok())
+                    .and_then(|b| String::from_utf8(b).ok());
+                if let Some(decoded) = memo_data_decoded
+                    && decoded.trim_start_matches("0x").to_lowercase() == target_lower
+                    && let Some(hash) = common.hash.clone()
+                {
+                    return Ok(Some(hash));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Poll `tx` until the ledger validates the transaction (or we time out).
     pub async fn wait_for_validated(&self, tx_hash: &str) -> Result<ValidatedTx> {
         let start = std::time::Instant::now();
@@ -385,14 +457,18 @@ pub const fn xrp_to_drops(xrp: u64) -> u64 {
     xrp.saturating_mul(1_000_000)
 }
 
-/// Default faucet URL for a given XRPL network type string (`"testnet"`,
-/// `"devnet"`, etc.). Returns `None` for networks without a public faucet
-/// (mainnet/stagenet).
-pub fn faucet_url_for_network(network_type: &str) -> Option<&'static str> {
-    match network_type {
-        "testnet" => Some("https://faucet.altnet.rippletest.net/accounts"),
-        "devnet" => Some("https://faucet.devnet.rippletest.net/accounts"),
-        _ => None,
+/// Default faucet URL for a given XRPL chain. We look at the configured
+/// RPC/WSS URL because the chain config's `networkType` is unreliable on
+/// devnet-amplifier (it labels the chain "testnet" even though the multisig
+/// lives on XRPL devnet — a separate ledger). Returns `None` for mainnet.
+pub fn faucet_url_for_network(network_type_or_rpc: &str) -> Option<&'static str> {
+    let lower = network_type_or_rpc.to_lowercase();
+    if lower.contains("devnet") {
+        Some("https://faucet.devnet.rippletest.net/accounts")
+    } else if lower.contains("altnet") || lower == "testnet" || lower == "stagenet" {
+        Some("https://faucet.altnet.rippletest.net/accounts")
+    } else {
+        None
     }
 }
 

@@ -236,6 +236,12 @@ enum DestinationChecker<'a, P: Provider> {
         rpc_client: Arc<solana_client::rpc_client::RpcClient>,
         _phantom: std::marker::PhantomData<&'a P>,
     },
+    Stellar {
+        client: crate::stellar::StellarClient,
+        gateway_contract: String,
+        signer_pk: [u8; 32],
+        _phantom: std::marker::PhantomData<&'a P>,
+    },
 }
 
 #[allow(dead_code)]
@@ -277,6 +283,34 @@ impl<P: Provider> DestinationChecker<'_, P> {
                     None => Ok(ApprovalResult::NotYet),
                 }
             }
+            Self::Stellar {
+                client,
+                gateway_contract,
+                signer_pk,
+                ..
+            } => {
+                let approved = client
+                    .gateway_is_message_approved(
+                        signer_pk,
+                        gateway_contract,
+                        source_chain,
+                        &tx.message_id,
+                        &tx.source_address,
+                        // For GMP, contract_address is the destination C-address;
+                        // we stash that in `payload_hash_hex` slot? No — use a
+                        // dedicated field. PendingTx.gmp_destination_address
+                        // holds the destination contract for non-ITS flows.
+                        &tx.gmp_destination_address,
+                        tx.payload_hash.0,
+                    )
+                    .await
+                    .unwrap_or(None);
+                match approved {
+                    Some(true) => Ok(ApprovalResult::Approved),
+                    Some(false) => Ok(ApprovalResult::AlreadyExecuted),
+                    None => Ok(ApprovalResult::NotYet),
+                }
+            }
         }
     }
 
@@ -312,6 +346,23 @@ impl<P: Provider> DestinationChecker<'_, P> {
                     _ => Ok(false),
                 }
             }
+            Self::Stellar {
+                client,
+                gateway_contract,
+                signer_pk,
+                ..
+            } => {
+                let executed = client
+                    .gateway_is_message_executed(
+                        signer_pk,
+                        gateway_contract,
+                        source_chain,
+                        &tx.message_id,
+                    )
+                    .await
+                    .unwrap_or(None);
+                Ok(matches!(executed, Some(true)))
+            }
         }
     }
 
@@ -319,6 +370,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
         match self {
             Self::Evm { .. } => "EVM approval",
             Self::Solana { .. } => "Solana approval",
+            Self::Stellar { .. } => "Stellar approval",
         }
     }
 
@@ -326,6 +378,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
         match self {
             Self::Evm { .. } => "EVM execution",
             Self::Solana { .. } => "Solana execution",
+            Self::Stellar { .. } => "Stellar execution",
         }
     }
 }
@@ -662,6 +715,59 @@ async fn poll_pipeline<P: Provider>(
                         }
                     }
                 }
+                DestinationChecker::Stellar {
+                    client,
+                    gateway_contract,
+                    signer_pk,
+                    ..
+                } => {
+                    for &i in &dest_indices {
+                        let phase = txs[i].phase;
+                        let approved = client
+                            .gateway_is_message_approved(
+                                signer_pk,
+                                gateway_contract,
+                                source_chain,
+                                &txs[i].message_id,
+                                &txs[i].source_address,
+                                &txs[i].gmp_destination_address,
+                                txs[i].payload_hash.0,
+                            )
+                            .await
+                            .ok()
+                            .flatten();
+                        let executed = if matches!(phase, Phase::Executed) {
+                            client
+                                .gateway_is_message_executed(
+                                    signer_pk,
+                                    gateway_contract,
+                                    source_chain,
+                                    &txs[i].message_id,
+                                )
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
+                        };
+                        match phase {
+                            Phase::Approved if matches!(approved, Some(true)) => {
+                                txs[i].timing.approved_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                txs[i].phase = Phase::Executed;
+                                last_progress = Instant::now();
+                            }
+                            Phase::Executed if matches!(executed, Some(true)) => {
+                                txs[i].timing.executed_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -830,6 +936,29 @@ async fn discover_second_leg(
     Ok(None)
 }
 
+/// Destination chain kind for `poll_pipeline_its_hub` to know how to query
+/// the final approval/execution stage.
+#[derive(Clone)]
+pub enum ItsHubDest {
+    /// Solana destination — uses `incoming_message` PDA + `command_id`.
+    Solana { rpc_url: String },
+    /// Stellar destination — uses Soroban `is_message_approved` /
+    /// `is_message_executed` view calls on the gateway contract.
+    Stellar {
+        rpc_url: String,
+        network_type: String,
+        gateway_contract: String,
+        signer_pk: [u8; 32],
+    },
+    /// XRPL destination — polls the recipient account's `account_tx` for an
+    /// incoming `Payment` whose `message_id` memo matches the second-leg id.
+    /// The XRPL relayer attaches that memo when broadcasting proofs.
+    Xrpl {
+        rpc_url: String,
+        recipient_address: String,
+    },
+}
+
 /// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
 #[allow(clippy::too_many_arguments)]
 async fn poll_pipeline_its_hub(
@@ -840,7 +969,7 @@ async fn poll_pipeline_its_hub(
     axelarnet_gateway: &str,
     rpc: &str,
     cosm_gateway_dest: &str,
-    solana_rpc: &str,
+    dest: ItsHubDest,
     mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
     send_done: Option<&AtomicBool>,
     external_spinner: Option<indicatif::ProgressBar>,
@@ -851,10 +980,28 @@ async fn poll_pipeline_its_hub(
     let mut rt_stats = RealTimeStats::new();
     let mut received_first_tx = false;
 
-    let sol_rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    ));
+    let sol_rpc_client = match &dest {
+        ItsHubDest::Solana { rpc_url } => Some(Arc::new(
+            solana_client::rpc_client::RpcClient::new_with_commitment(
+                rpc_url.clone(),
+                solana_commitment_config::CommitmentConfig::confirmed(),
+            ),
+        )),
+        _ => None,
+    };
+    let stellar_client = match &dest {
+        ItsHubDest::Stellar {
+            rpc_url,
+            network_type,
+            ..
+        } => Some(crate::stellar::StellarClient::new(rpc_url, network_type).ok()),
+        _ => None,
+    }
+    .flatten();
+    let xrpl_client = match &dest {
+        ItsHubDest::Xrpl { rpc_url, .. } => Some(crate::xrpl::XrplClient::new(rpc_url)),
+        _ => None,
+    };
 
     // Skip voting phase entirely if no VotingVerifier
     if voting_verifier.is_none() {
@@ -1073,42 +1220,172 @@ async fn poll_pipeline_its_hub(
             }
         }
 
-        // --- Solana destination checks (batch) ---
-        if !sol_dest_data.is_empty() {
-            let client = sol_rpc_client.clone();
-            let data = sol_dest_data;
-            let results = tokio::task::spawn_blocking(move || {
-                batch_check_solana_incoming_messages(&client, &data)
-            })
-            .await
-            .unwrap_or_default();
+        // --- Destination checks (per-chain) ---
+        if !sol_dest_data.is_empty() || !approved_indices.is_empty() || !executed_indices.is_empty()
+        {
+            match &dest {
+                ItsHubDest::Solana { .. } => {
+                    if let Some(client) = sol_rpc_client.as_ref()
+                        && !sol_dest_data.is_empty()
+                    {
+                        let client = client.clone();
+                        let data = sol_dest_data;
+                        let results = tokio::task::spawn_blocking(move || {
+                            batch_check_solana_incoming_messages(&client, &data)
+                        })
+                        .await
+                        .unwrap_or_default();
 
-            for (i, status) in results {
-                match (txs[i].phase, status) {
-                    (Phase::Approved, Some(0)) => {
-                        txs[i].timing.approved_secs =
-                            Some(txs[i].send_instant.elapsed().as_secs_f64());
-                        txs[i].phase = Phase::Executed;
-                        last_progress = Instant::now();
-                    }
-                    (Phase::Approved, Some(_)) => {
-                        let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
-                        if txs[i].timing.approved_secs.is_none() {
-                            txs[i].timing.approved_secs = Some(elapsed);
+                        for (i, status) in results {
+                            match (txs[i].phase, status) {
+                                (Phase::Approved, Some(0)) => {
+                                    txs[i].timing.approved_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].phase = Phase::Executed;
+                                    last_progress = Instant::now();
+                                }
+                                (Phase::Approved, Some(_)) => {
+                                    let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                    if txs[i].timing.approved_secs.is_none() {
+                                        txs[i].timing.approved_secs = Some(elapsed);
+                                    }
+                                    txs[i].timing.executed_secs = Some(elapsed);
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                (Phase::Executed, Some(s)) if s > 0 => {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                _ => {}
+                            }
                         }
-                        txs[i].timing.executed_secs = Some(elapsed);
-                        txs[i].timing.executed_ok = Some(true);
-                        txs[i].phase = Phase::Done;
-                        last_progress = Instant::now();
                     }
-                    (Phase::Executed, Some(s)) if s > 0 => {
-                        txs[i].timing.executed_secs =
-                            Some(txs[i].send_instant.elapsed().as_secs_f64());
-                        txs[i].timing.executed_ok = Some(true);
-                        txs[i].phase = Phase::Done;
-                        last_progress = Instant::now();
+                }
+                ItsHubDest::Stellar {
+                    gateway_contract,
+                    signer_pk,
+                    ..
+                } => {
+                    if let Some(client) = stellar_client.as_ref() {
+                        let pending: Vec<usize> = approved_indices
+                            .iter()
+                            .chain(executed_indices.iter())
+                            .copied()
+                            .collect();
+                        for i in pending {
+                            let second_leg = match txs[i].second_leg_message_id.as_deref() {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            // For ITS, the destination contract on Stellar is the
+                            // ITS proxy (not the example), and the second-leg
+                            // source is "axelar". Ignore parse failures.
+                            let dest_contract = txs[i]
+                                .second_leg_destination_address
+                                .clone()
+                                .unwrap_or_default();
+                            let src_addr =
+                                txs[i].second_leg_source_address.clone().unwrap_or_default();
+                            let payload_hash = txs[i]
+                                .second_leg_payload_hash
+                                .as_deref()
+                                .and_then(|s| parse_payload_hash(s).ok())
+                                .unwrap_or_default();
+                            let payload_hash_arr: [u8; 32] = payload_hash.0;
+
+                            let phase = txs[i].phase;
+                            // For approved phase, query is_message_approved.
+                            // For executed phase, query is_message_executed.
+                            let result = if phase == Phase::Approved {
+                                client
+                                    .gateway_is_message_approved(
+                                        signer_pk,
+                                        gateway_contract,
+                                        "axelar",
+                                        second_leg,
+                                        &src_addr,
+                                        &dest_contract,
+                                        payload_hash_arr,
+                                    )
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|approved| if approved { 0u8 } else { 1u8 })
+                            } else {
+                                client
+                                    .gateway_is_message_executed(
+                                        signer_pk,
+                                        gateway_contract,
+                                        "axelar",
+                                        second_leg,
+                                    )
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|executed| if executed { 1u8 } else { 0u8 })
+                            };
+
+                            match (phase, result) {
+                                (Phase::Approved, Some(0)) => {
+                                    // approved=true → advance
+                                    txs[i].timing.approved_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].phase = Phase::Executed;
+                                    last_progress = Instant::now();
+                                }
+                                (Phase::Executed, Some(1)) => {
+                                    // executed=true → done
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                _ => {}
+                            }
+                        }
                     }
-                    _ => {}
+                }
+                ItsHubDest::Xrpl {
+                    recipient_address, ..
+                } => {
+                    if let Some(client) = xrpl_client.as_ref() {
+                        // For XRPL we collapse approved + executed into a
+                        // single "delivered" check: a Payment from the
+                        // multisig with the matching `message_id` memo means
+                        // the relayer's proof was broadcast and validated.
+                        let pending: Vec<usize> = approved_indices
+                            .iter()
+                            .chain(executed_indices.iter())
+                            .copied()
+                            .collect();
+                        for i in pending {
+                            let second_leg = match txs[i].second_leg_message_id.as_deref() {
+                                Some(s) => s,
+                                None => continue,
+                            };
+                            let found = client
+                                .find_inbound_with_message_id(recipient_address, second_leg, None)
+                                .await
+                                .ok()
+                                .flatten();
+                            if found.is_some() {
+                                let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                if txs[i].timing.approved_secs.is_none() {
+                                    txs[i].timing.approved_secs = Some(elapsed);
+                                }
+                                txs[i].timing.executed_secs = Some(elapsed);
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1213,6 +1490,8 @@ pub enum SourceChainType {
     Evm,
     /// XRPL source: message ID = `0x{lowercase_tx_hash}` (already in tx.signature)
     Xrpl,
+    /// Stellar source: message ID = `0x{lowercase_tx_hash}-{event_index}`
+    Stellar,
 }
 
 /// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
@@ -1274,7 +1553,9 @@ pub async fn verify_onchain<P: Provider>(
             PendingTx {
                 idx,
                 message_id: match source_type {
-                    SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
+                    SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                        tx.signature.clone()
+                    }
                     SourceChainType::Svm => {
                         format!("{}-{}.1", tx.signature, solana_call_contract_index())
                     }
@@ -1385,6 +1666,223 @@ pub async fn verify_onchain_evm_streaming(
     Ok((report, timings))
 }
 
+/// GMP verification with a Stellar destination — uses Stellar's
+/// `is_message_approved` / `is_message_executed` Soroban view calls
+/// instead of an EVM gateway or Solana PDA.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_stellar_gmp(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_contract: &str,
+    stellar_rpc: &str,
+    stellar_network_type: &str,
+    stellar_gateway: &str,
+    signer_pk: [u8; 32],
+    metrics: &mut [TxMetrics],
+    source_type: SourceChainType,
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::Routed
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let message_id = match source_type {
+                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                    tx.signature.clone()
+                }
+                SourceChainType::Svm => {
+                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
+                }
+            };
+            PendingTx {
+                idx,
+                message_id,
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                command_id: None,
+                gmp_destination_chain: tx.gmp_destination_chain.clone(),
+                gmp_destination_address: destination_contract.to_string(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
+            }
+        })
+        .collect();
+
+    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
+    let checker: DestinationChecker<alloy::providers::RootProvider> = DestinationChecker::Stellar {
+        client: stellar_client,
+        gateway_contract: stellar_gateway.to_string(),
+        signer_pk,
+        _phantom: std::marker::PhantomData,
+    };
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        Some(&cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_contract,
+        &checker,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, metrics, peaks);
+    Ok(report)
+}
+
+/// Streaming variant of `verify_onchain_stellar_gmp`.
+/// Reserved for future sustained-mode flows (the burst-mode runners use
+/// `verify_onchain_stellar_gmp` above today).
+#[allow(clippy::too_many_arguments, dead_code)]
+pub async fn verify_onchain_stellar_gmp_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_contract: &str,
+    stellar_rpc: &str,
+    stellar_network_type: &str,
+    stellar_gateway: &str,
+    signer_pk: [u8; 32],
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
+    let checker: DestinationChecker<alloy::providers::RootProvider> = DestinationChecker::Stellar {
+        client: stellar_client,
+        gateway_contract: stellar_gateway.to_string(),
+        signer_pk,
+        _phantom: std::marker::PhantomData,
+    };
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        Some(&cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_contract,
+        &checker,
+        None,
+        None,
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
+}
+
+/// Build a PendingTx for streaming GMP verification when the destination is
+/// Stellar — populates `gmp_destination_address` so the Stellar checker
+/// has the contract C-address to query.
+#[allow(dead_code)]
+pub(super) fn tx_to_pending_stellar_gmp(
+    tx: &TxMetrics,
+    has_voting_verifier: bool,
+    destination_contract: &str,
+    source_type: SourceChainType,
+) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    let message_id = match source_type {
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+            tx.signature.clone()
+        }
+        SourceChainType::Svm => {
+            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+        }
+    };
+    PendingTx {
+        idx: 0,
+        message_id,
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr: Address::ZERO,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: tx.gmp_destination_chain.clone(),
+        gmp_destination_address: destination_contract.to_string(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::Routed
+        },
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
 /// Convert a confirmed TxMetrics into a PendingTx for Solana verification.
 pub(super) fn tx_to_pending_solana(
     tx: &TxMetrics,
@@ -1395,7 +1893,9 @@ pub(super) fn tx_to_pending_solana(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+            tx.signature.clone()
+        }
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1438,7 +1938,9 @@ pub(super) fn tx_to_pending_evm(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+            tx.signature.clone()
+        }
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1446,6 +1948,42 @@ pub(super) fn tx_to_pending_evm(
     PendingTx {
         idx: 0,
         message_id,
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: String::new(),
+        gmp_destination_address: String::new(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: if has_voting_verifier {
+            Phase::Voted
+        } else {
+            Phase::Routed
+        },
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
+/// Convert a confirmed TxMetrics into a PendingTx for Stellar-sourced GMP.
+/// The `signature` field on the input is the pre-formatted message id
+/// (`0x{lowercase_hex_tx_hash}-{event_index}`) per the `hex_tx_hash_and_event_index`
+/// format of the Stellar `VotingVerifier`.
+pub(super) fn tx_to_pending_stellar(
+    tx: &TxMetrics,
+    has_voting_verifier: bool,
+    contract_addr: Address,
+) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    PendingTx {
+        idx: 0,
+        message_id: tx.signature.clone(),
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
         source_address: tx.source_address.clone(),
         contract_addr,
@@ -1651,7 +2189,9 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Xrpl => tx.signature.clone(),
+                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                    tx.signature.clone()
+                }
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -1806,7 +2346,9 @@ pub async fn verify_onchain_solana_its(
         &axelarnet_gateway,
         &rpc,
         &cosm_gateway_dest,
-        solana_rpc,
+        ItsHubDest::Solana {
+            rpc_url: solana_rpc.to_string(),
+        },
         None,
         None,
         None,
@@ -1857,7 +2399,333 @@ pub async fn verify_onchain_solana_its_streaming(
         &axelarnet_gateway,
         &rpc,
         &cosm_gateway_dest,
-        solana_rpc,
+        ItsHubDest::Solana {
+            rpc_url: solana_rpc.to_string(),
+        },
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
+}
+
+/// Verify EVM/Solana → Stellar ITS transactions. Mirrors
+/// `verify_onchain_solana_its` but uses Stellar's `is_message_approved` /
+/// `is_message_executed` view calls to detect destination-side approval and
+/// execution. The `signer_pk` is just the source account for simulate
+/// envelopes — read-only, no real authorization needed.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_stellar_its(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    _destination_address: &str,
+    stellar_rpc: &str,
+    stellar_network_type: &str,
+    stellar_gateway_contract: &str,
+    signer_pk: [u8; 32],
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            PendingTx {
+                idx,
+                message_id: tx.signature.clone(),
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                command_id: None,
+                gmp_destination_chain: tx.gmp_destination_chain.clone(),
+                gmp_destination_address: tx.gmp_destination_address.clone(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
+            }
+        })
+        .collect();
+
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let peaks = poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        ItsHubDest::Stellar {
+            rpc_url: stellar_rpc.to_string(),
+            network_type: stellar_network_type.to_string(),
+            gateway_contract: stellar_gateway_contract.to_string(),
+            signer_pk,
+        },
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, metrics, peaks);
+    Ok(report)
+}
+
+/// Streaming variant of `verify_onchain_stellar_its`.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_stellar_its_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    stellar_rpc: &str,
+    stellar_network_type: &str,
+    stellar_gateway_contract: &str,
+    signer_pk: [u8; 32],
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        ItsHubDest::Stellar {
+            rpc_url: stellar_rpc.to_string(),
+            network_type: stellar_network_type.to_string(),
+            gateway_contract: stellar_gateway_contract.to_string(),
+            signer_pk,
+        },
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
+}
+
+/// Verify EVM/Solana → XRPL ITS transactions. Polls the recipient XRPL
+/// account's `account_tx` for an inbound `Payment` whose `message_id` memo
+/// matches the second-leg message id (the XRPL relayer attaches that memo).
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_xrpl_its(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    xrpl_rpc: &str,
+    xrpl_recipient: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            PendingTx {
+                idx,
+                message_id: tx.signature.clone(),
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                command_id: None,
+                gmp_destination_chain: tx.gmp_destination_chain.clone(),
+                gmp_destination_address: tx.gmp_destination_address.clone(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
+            }
+        })
+        .collect();
+
+    let rpc = read_axelar_rpc(config)?;
+    // XRPL's destination cosmos gateway is `XrplGateway/{chain}`, not the
+    // standard `Gateway/{chain}`. Try both so the same verifier works
+    // regardless of which contract name the deployment uses.
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )
+    .or_else(|_| {
+        read_axelar_contract_field(
+            config,
+            &format!("/axelar/contracts/XrplGateway/{destination_chain}/address"),
+        )
+    })?;
+
+    let peaks = poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        ItsHubDest::Xrpl {
+            rpc_url: xrpl_rpc.to_string(),
+            recipient_address: xrpl_recipient.to_string(),
+        },
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, metrics, peaks);
+    Ok(report)
+}
+
+/// Streaming variant of `verify_onchain_xrpl_its`.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_xrpl_its_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    xrpl_rpc: &str,
+    xrpl_recipient: &str,
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )
+    .or_else(|_| {
+        read_axelar_contract_field(
+            config,
+            &format!("/axelar/contracts/XrplGateway/{destination_chain}/address"),
+        )
+    })?;
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline_its_hub(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        source_chain,
+        &axelarnet_gateway,
+        &rpc,
+        &cosm_gateway_dest,
+        ItsHubDest::Xrpl {
+            rpc_url: xrpl_rpc.to_string(),
+            recipient_address: xrpl_recipient.to_string(),
+        },
         Some(&mut rx),
         Some(&send_done),
         Some(spinner),

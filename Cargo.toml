@@ -50,6 +50,12 @@ xrpl_binary_codec = { git = "https://github.com/commonprefix/xrpl-sdk-rust", bra
 xrpl_api = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_api" }
 xrpl_http_client = { git = "https://github.com/commonprefix/xrpl-sdk-rust", branch = "main", package = "xrpl_http_client" }
 
+# Stellar / Soroban dependencies (load test)
+stellar-rpc-client = "23.0.0-rc.5"
+stellar-xdr = { version = "23.0", features = ["curr", "std", "serde", "base64"] }
+stellar-strkey = "0.0.13"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+
 [features]
 default = ["devnet-amplifier"]
 devnet-amplifier = ["solana-axelar-gateway/devnet-amplifier", "solana-axelar-gas-service/devnet-amplifier", "solana-axelar-memo/devnet-amplifier", "solana-axelar-its/devnet-amplifier"]

@@ -1,12 +1,15 @@
 pub mod evm_sender;
 pub mod its_evm_to_sol;
 pub mod its_evm_to_sol_with_data;
+pub mod its_evm_to_stellar;
 pub mod its_evm_to_xrpl;
 pub mod its_sol_to_evm;
+pub mod its_stellar_to_evm;
 pub mod its_xrpl_to_evm;
 pub mod keypairs;
 pub mod metrics;
 pub mod sol_sender;
+pub mod stellar_sender;
 mod sustained;
 mod verify;
 pub mod xrpl_sender;
@@ -49,6 +52,14 @@ pub enum TestType {
     XrplToEvm,
     /// EVM -> XRPL cross-chain load test (ITS XRP, stub)
     EvmToXrpl,
+    /// Stellar -> EVM cross-chain load test (GMP today, ITS stub)
+    StellarToEvm,
+    /// EVM -> Stellar cross-chain load test (stub)
+    EvmToStellar,
+    /// Stellar -> Solana cross-chain load test (stub)
+    StellarToSol,
+    /// Solana -> Stellar cross-chain load test (stub)
+    SolToStellar,
 }
 
 impl std::fmt::Display for TestType {
@@ -60,6 +71,10 @@ impl std::fmt::Display for TestType {
             TestType::SolToSol => write!(f, "sol-to-sol"),
             TestType::XrplToEvm => write!(f, "xrpl-to-evm"),
             TestType::EvmToXrpl => write!(f, "evm-to-xrpl"),
+            TestType::StellarToEvm => write!(f, "stellar-to-evm"),
+            TestType::EvmToStellar => write!(f, "evm-to-stellar"),
+            TestType::StellarToSol => write!(f, "stellar-to-sol"),
+            TestType::SolToStellar => write!(f, "sol-to-stellar"),
         }
     }
 }
@@ -176,9 +191,15 @@ fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
         ("svm", "svm") => Ok(TestType::SolToSol),
         ("xrpl", "evm") => Ok(TestType::XrplToEvm),
         ("evm", "xrpl") => Ok(TestType::EvmToXrpl),
+        ("stellar", "evm") => Ok(TestType::StellarToEvm),
+        ("evm", "stellar") => Ok(TestType::EvmToStellar),
+        ("stellar", "svm") => Ok(TestType::StellarToSol),
+        ("svm", "stellar") => Ok(TestType::SolToStellar),
         _ => Err(eyre::eyre!(
             "unsupported chain type combination: {source_type} -> {dest_type}. \
-             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm, xrpl -> evm, evm -> xrpl"
+             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm, \
+             xrpl -> evm, evm -> xrpl, stellar -> evm, evm -> stellar, \
+             stellar -> svm, svm -> stellar"
         )),
     }
 }
@@ -508,7 +529,52 @@ fn auto_detect_chains(
             };
             Ok((source, dest))
         }
+        TestType::StellarToEvm
+        | TestType::EvmToStellar
+        | TestType::StellarToSol
+        | TestType::SolToStellar => {
+            auto_detect_stellar_pair(chains, test_type, source_override, dest_override)
+        }
     }
+}
+
+fn auto_detect_stellar_pair(
+    chains: &serde_json::Map<String, serde_json::Value>,
+    tt: TestType,
+    src_override: Option<String>,
+    dst_override: Option<String>,
+) -> Result<(String, String)> {
+    let (src_type, dst_type): (&str, &str) = match tt {
+        TestType::StellarToEvm => ("stellar", "evm"),
+        TestType::EvmToStellar => ("evm", "stellar"),
+        TestType::StellarToSol => ("stellar", "svm"),
+        TestType::SolToStellar => ("svm", "stellar"),
+        _ => unreachable!(),
+    };
+    let skip_core_on_evm = |t: &str| t == "evm";
+    let pick = |t: &str, override_: Option<String>, role: &str| -> Result<String> {
+        if let Some(x) = override_ {
+            return Ok(x);
+        }
+        let found = find_chains_by_type(chains, t, skip_core_on_evm(t));
+        match found.len() {
+            0 => Err(eyre::eyre!("no {} chain found in config", t)),
+            1 => {
+                ui::info(&format!("auto-detected {role}: {}", found[0]));
+                Ok(found[0].clone())
+            }
+            _ => {
+                ui::info(&format!(
+                    "auto-detected {role}: {} (multiple available, pass --{role}-chain to override)",
+                    found[0]
+                ));
+                Ok(found[0].clone())
+            }
+        }
+    };
+    let source = pick(src_type, src_override, "source")?;
+    let dest = pick(dst_type, dst_override, "destination")?;
+    Ok((source, dest))
 }
 
 /// Auto-detect test type and chains when nothing is specified.
@@ -684,6 +750,8 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         &format!("/axelar/contracts/XrplVotingVerifier/{src}/address"),
     )
     .is_ok();
+    // Stellar shares the `VotingVerifier` contract name in the config, so the
+    // standard check above already covers it; this branch is just documentation.
     if !has_standard_vv && !has_xrpl_vv {
         eyre::bail!(
             "source chain '{src}' has no VotingVerifier (or XrplVotingVerifier) in the config. \
@@ -704,10 +772,24 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
                 args.destination_chain
             )
         }
+        (Protocol::Gmp, TestType::StellarToEvm) => run_stellar_to_evm(args, run_start).await,
+        (Protocol::Gmp, TestType::EvmToStellar) => run_evm_to_stellar(args, run_start).await,
+        (Protocol::Gmp, TestType::StellarToSol) => run_stellar_to_sol(args, run_start).await,
+        (Protocol::Gmp, TestType::SolToStellar) => run_sol_to_stellar(args, run_start).await,
+        (Protocol::Its, TestType::StellarToEvm) => its_stellar_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::EvmToStellar) => its_evm_to_stellar::run(args, run_start).await,
+        (Protocol::Its, TestType::StellarToSol | TestType::SolToStellar) => {
+            eyre::bail!(
+                "ITS {}->{} is not yet implemented. Stellar↔EVM ITS works today.",
+                args.source_chain,
+                args.destination_chain
+            )
+        }
         (Protocol::Its, TestType::EvmToSol) => its_evm_to_sol::run(args, run_start).await,
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::XrplToEvm) => its_xrpl_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::EvmToXrpl) => its_evm_to_xrpl::run(args, run_start).await,
+        // (kept for clarity — the dispatch line above already wires it up)
         (Protocol::Its, TestType::EvmToEvm | TestType::SolToSol) => {
             eyre::bail!(
                 "ITS {}->{} is not yet supported",
@@ -1821,4 +1903,601 @@ fn print_final_report(report: &LoadTestReport) {
         }
     }
     println!();
+}
+
+// ---------------------------------------------------------------------------
+// Stellar -> EVM (GMP)
+// ---------------------------------------------------------------------------
+
+async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    let evm_rpc_url = args.destination_rpc.clone();
+    validate_evm_rpc(&evm_rpc_url).await?;
+
+    if read_axelar_contract_field(
+        &args.config,
+        &format!("/axelar/contracts/Gateway/{dest}/address"),
+    )
+    .is_err()
+    {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+        );
+    }
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "GMP (call_contract)");
+
+    // --- Stellar source-side setup ---
+    let stellar_rpc = &args.source_rpc;
+    let network_type = read_stellar_network_type(&args.config, src)?;
+    let use_friendbot = matches!(network_type.as_str(), "testnet" | "futurenet");
+    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, &network_type)?;
+    ui::kv("Stellar RPC", stellar_rpc);
+    ui::kv("network", &network_type);
+
+    // GMP flow uses `AxelarExample.send(...)` — the high-level wrapper that
+    // internally pays gas via `AxelarGasService` and emits from `AxelarGateway`.
+    // Calling `AxelarGateway.call_contract` directly emits the message but
+    // leaves gas unpaid, which the Axelar relayer rejects as "Insufficient Fee".
+    let stellar_example = read_stellar_contract_address(&args.config, src, "AxelarExample")?;
+    let stellar_gateway = read_stellar_contract_address(&args.config, src, "AxelarGateway")?;
+    let stellar_gas_token = read_stellar_token_address(&args.config, src)?;
+    ui::address("Stellar AxelarExample", &stellar_example);
+    ui::address("Stellar AxelarGateway", &stellar_gateway);
+    ui::address("Stellar XLM token", &stellar_gas_token);
+
+    let gas_stroops: u64 = match &args.gas_value {
+        Some(v) => v
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
+        None => stellar_sender::DEFAULT_GAS_STROOPS,
+    };
+    ui::kv(
+        "gas",
+        &format!(
+            "{gas_stroops} stroops ({:.4} XLM)",
+            gas_stroops as f64 / 10_000_000.0
+        ),
+    );
+
+    // --- Stellar main wallet (for deriving ephemeral signers) ---
+    let main_wallet = load_stellar_main_wallet(args.private_key.as_deref())?;
+    let main_seed = main_wallet.signing_key.to_bytes();
+
+    // --- EVM SenderReceiver deploy/reuse (same pattern as run_sol_to_evm) ---
+    let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
+    ui::address("EVM gateway", &format!("{gateway_addr}"));
+
+    let evm_private_key = args
+        .private_key
+        .clone()
+        .or_else(|| std::env::var("EVM_PRIVATE_KEY").ok());
+    let cache = read_cache(dest);
+    let cached_sr = cache.get("senderReceiverAddress").and_then(|v| v.as_str());
+    if cached_sr.is_none() && evm_private_key.is_none() {
+        eyre::bail!(
+            "no SenderReceiver cached for '{dest}' and no EVM private key available. \
+             Set EVM_PRIVATE_KEY (in .env or via --private-key) so axe can deploy the destination \
+             SenderReceiver on first run."
+        );
+    }
+    let (sender_receiver_addr, provider) = ensure_sender_receiver(
+        &args,
+        &evm_rpc_url,
+        gateway_addr,
+        gas_service_addr,
+        cache,
+        evm_private_key.as_deref(),
+    )
+    .await?;
+    ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
+    let destination_address = format!("{sender_receiver_addr}");
+
+    // --- Burst vs sustained ---
+    let sustained_mode = args.tps.is_some() && args.duration_secs.is_some();
+    let num_keys = if sustained_mode {
+        args.tps.unwrap() as usize * args.key_cycle as usize
+    } else {
+        args.num_txs.max(1) as usize
+    };
+    ui::info(&format!("deriving {num_keys} Stellar keys..."));
+    let wallets = crate::commands::load_test::stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    crate::commands::load_test::stellar_sender::ensure_funded(
+        &stellar_client,
+        &wallets,
+        use_friendbot,
+    )
+    .await?;
+
+    let payload_override: Option<Vec<u8>> = match &args.payload {
+        Some(hex_str) => Some(hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?),
+        None => None,
+    };
+
+    let test_start = Instant::now();
+    let mut report = if sustained_mode {
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_addr = destination_address.clone();
+        let vdest_rpc = evm_rpc_url.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let vgw = gateway_addr;
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            verify::verify_onchain_evm_streaming(
+                &vconfig,
+                &vsource,
+                &vdest,
+                &vdest_addr,
+                vgw,
+                &vdest_rpc,
+                verify_rx,
+                vdone,
+                spinner,
+            )
+            .await
+        });
+
+        let spinner = ui::wait_spinner(&format!(
+            "[0/{}s] starting sustained Stellar GMP send...",
+            args.duration_secs.unwrap()
+        ));
+        let _ = spinner_tx.send(spinner.clone());
+
+        let has_voting_verifier = read_axelar_contract_field(
+            &args.config,
+            &format!(
+                "/axelar/contracts/VotingVerifier/{}/address",
+                args.source_chain
+            ),
+        )
+        .is_ok();
+
+        let result = crate::commands::load_test::stellar_sender::run_sustained(
+            &stellar_client,
+            wallets,
+            stellar_example,
+            stellar_gateway,
+            args.destination_axelar_id.clone(),
+            destination_address.clone(),
+            payload_override,
+            args.tps.unwrap() as usize,
+            args.duration_secs.unwrap(),
+            args.key_cycle as usize,
+            Some(verify_tx),
+            Some(send_done),
+            spinner,
+            has_voting_verifier,
+            sender_receiver_addr,
+            stellar_gas_token,
+            gas_stroops,
+        )
+        .await;
+
+        let mut report = sustained::build_sustained_report(
+            result,
+            src,
+            dest,
+            &destination_address,
+            args.tps.unwrap() * args.duration_secs.unwrap(),
+            num_keys,
+        );
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
+        report.verification = Some(verification);
+        report
+    } else {
+        let mut report = crate::commands::load_test::stellar_sender::run_burst(
+            &stellar_client,
+            &wallets,
+            stellar_example,
+            stellar_gateway,
+            &args.destination_axelar_id,
+            &destination_address,
+            payload_override,
+            src,
+            stellar_gas_token,
+            gas_stroops,
+        )
+        .await?;
+        let verification = verify::verify_onchain(
+            &args.config,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
+            &destination_address,
+            gateway_addr,
+            &provider,
+            &mut report.transactions,
+            verify::SourceChainType::Stellar,
+        )
+        .await?;
+        report.verification = Some(verification);
+        report
+    };
+
+    finish_report(&args, &mut report, test_start)
+}
+
+/// Return the chain's `axelarId` (the consensus-side name) or fall back to
+/// the JSON key when not set.
+pub(super) fn axelar_id_for_chain(config: &std::path::Path, chain_id: &str) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(root
+        .pointer(&format!("/chains/{chain_id}/axelarId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(chain_id)
+        .to_string())
+}
+
+pub(super) fn read_stellar_network_type(
+    config: &std::path::Path,
+    chain_id: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(root
+        .pointer(&format!("/chains/{chain_id}/networkType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("testnet")
+        .to_string())
+}
+
+pub(super) fn read_stellar_token_address(
+    config: &std::path::Path,
+    chain_id: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    root.pointer(&format!("/chains/{chain_id}/tokenAddress"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| {
+            eyre::eyre!("no tokenAddress (XLM Soroban contract) for Stellar chain {chain_id}")
+        })
+}
+
+pub(super) fn read_stellar_contract_address(
+    config: &std::path::Path,
+    chain_id: &str,
+    contract: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    root.pointer(&format!("/chains/{chain_id}/contracts/{contract}/address"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| eyre::eyre!("no Stellar contract {contract} for chain {chain_id}"))
+}
+
+pub(super) fn load_stellar_main_wallet(
+    private_key: Option<&str>,
+) -> Result<crate::stellar::StellarWallet> {
+    let key = private_key
+        .map(String::from)
+        .or_else(|| std::env::var("STELLAR_PRIVATE_KEY").ok())
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "Stellar main wallet required. Set STELLAR_PRIVATE_KEY to either an S... secret key \
+                 or a 32-byte hex seed."
+            )
+        })?;
+    if key.starts_with('S') && key.len() > 50 {
+        crate::stellar::StellarWallet::from_secret_str(&key)
+    } else {
+        crate::stellar::StellarWallet::from_hex_seed(&key)
+    }
+}
+
+/// Deploy-or-reuse SenderReceiver on an EVM destination. Extracted so
+/// `run_stellar_to_evm` can share the logic with the existing GMP runners.
+async fn ensure_sender_receiver(
+    args: &LoadTestArgs,
+    rpc_url: &str,
+    gateway_addr: Address,
+    gas_service_addr: Address,
+    cache: serde_json::Value,
+    evm_private_key: Option<&str>,
+) -> Result<(Address, impl Provider)> {
+    if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
+        let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let addr: Address = addr_str.parse()?;
+        let code = read_provider.get_code_at(addr).await?;
+        let needs_redeploy = if code.is_empty() {
+            true
+        } else {
+            let sr = crate::evm::SenderReceiver::new(addr, &read_provider);
+            !matches!(sr.gateway().call().await, Ok(onchain_gw) if onchain_gw == gateway_addr)
+        };
+        if !needs_redeploy {
+            let pk =
+                args.private_key.as_deref().or(evm_private_key).unwrap_or(
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                );
+            let signer: PrivateKeySigner = pk.parse()?;
+            let provider = ProviderBuilder::new()
+                .wallet(signer)
+                .connect_http(rpc_url.parse()?);
+            return Ok((addr, provider));
+        }
+    }
+
+    let pk = args.private_key.as_deref().or(evm_private_key).ok_or_else(|| {
+        eyre::eyre!(
+            "EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
+        )
+    })?;
+    let signer: PrivateKeySigner = pk.parse()?;
+    let write_provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(rpc_url.parse()?);
+    let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
+    let mut cache = cache;
+    cache["senderReceiverAddress"] = json!(format!("{addr}"));
+    save_cache(&args.destination_chain, &cache)?;
+    Ok((addr, write_provider))
+}
+
+// ===========================================================================
+// EVM <-> Stellar GMP and Solana <-> Stellar GMP
+// ===========================================================================
+//
+// All four functions are burst-only for simplicity in the initial cut. They
+// share the same skeleton: derive ephemeral source signers, fund them, send
+// in parallel with a semaphore, then run the appropriate destination
+// verifier.
+
+async fn run_evm_to_stellar(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let evm_rpc_url = args.source_rpc.clone();
+    validate_evm_rpc(&evm_rpc_url).await?;
+
+    // EVM source ITS proxy is reused for GMP — we send via the destination
+    // contract address (Stellar AxelarExample). EVM emits ContractCall.
+    let signer = args
+        .private_key
+        .as_ref()
+        .ok_or_else(|| {
+            eyre::eyre!("EVM private key required. Set EVM_PRIVATE_KEY or use --private-key")
+        })?
+        .parse::<PrivateKeySigner>()?;
+    let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    check_evm_balance(&read_provider, signer.address()).await?;
+
+    let stellar_rpc = &args.destination_rpc;
+    let stellar_network_type = read_stellar_network_type(&args.config, dest)?;
+    let stellar_gateway_addr = read_stellar_contract_address(&args.config, dest, "AxelarGateway")?;
+    let stellar_example_addr = read_stellar_contract_address(&args.config, dest, "AxelarExample")?;
+    ui::address("Stellar gateway", &stellar_gateway_addr);
+    ui::address("Stellar AxelarExample", &stellar_example_addr);
+
+    // Reuse the EVM-source GMP runner (sol_sender for sol-to-X has its
+    // EVM analogue in evm_sender). For sustained, we'd add streaming;
+    // burst-only here.
+    let evm_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
+    let evm_gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
+    ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
+
+    // Deploy/reuse SenderReceiver as the EVM-side caller (existing pattern).
+    let cache = read_cache(src);
+    let evm_pk = args.private_key.clone();
+    let (sender_receiver_addr, _provider) = ensure_sender_receiver(
+        &args,
+        &evm_rpc_url,
+        evm_gateway_addr,
+        evm_gas_service_addr,
+        cache,
+        evm_pk.as_deref(),
+    )
+    .await?;
+    ui::address("EVM SenderReceiver", &format!("{sender_receiver_addr}"));
+
+    // The destination address for the EVM-side callContract is the Stellar
+    // `AxelarExample` C-address as a UTF-8 string.
+    let main_key: [u8; 32] = signer.to_bytes().into();
+    let test_start = Instant::now();
+    let mut report = evm_sender::run_load_test_with_metrics(
+        &args,
+        sender_receiver_addr,
+        &main_key,
+        &evm_rpc_url,
+        &stellar_example_addr,
+        true, // EVM-style ABI-encoded payload (Stellar AxelarExample.execute accepts raw bytes)
+    )
+    .await?;
+
+    let signer_pk: [u8; 32] = alloy::primitives::keccak256(signer.address().as_slice()).into();
+    let verification = verify::verify_onchain_stellar_gmp(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        &stellar_example_addr,
+        stellar_rpc,
+        &stellar_network_type,
+        &stellar_gateway_addr,
+        signer_pk,
+        &mut report.transactions,
+        verify::SourceChainType::Evm,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &mut report, test_start)
+}
+
+async fn run_stellar_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    let solana_rpc = args.destination_rpc.clone();
+    validate_solana_rpc(&solana_rpc).await?;
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "GMP (Stellar AxelarExample.send → Solana memo)");
+
+    // Stellar source setup
+    let stellar_rpc = &args.source_rpc;
+    let network_type = read_stellar_network_type(&args.config, src)?;
+    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, &network_type)?;
+    let stellar_example = read_stellar_contract_address(&args.config, src, "AxelarExample")?;
+    let stellar_gateway = read_stellar_contract_address(&args.config, src, "AxelarGateway")?;
+    let stellar_xlm = read_stellar_token_address(&args.config, src)?;
+
+    let main_wallet = load_stellar_main_wallet(args.private_key.as_deref())?;
+    let use_friendbot = matches!(network_type.as_str(), "testnet" | "futurenet");
+    if stellar_client
+        .account_sequence(&main_wallet.address())
+        .await?
+        .is_none()
+        && use_friendbot
+    {
+        ui::info("activating Stellar main wallet via Friendbot...");
+        stellar_client
+            .friendbot_fund(&main_wallet.address())
+            .await?;
+    }
+
+    // Solana destination = the Solana memo program. The memo program decodes
+    // an `ExecutablePayload`: a Borsh-shaped struct carrying the memo bytes
+    // plus the `counter` PDA as a writable account. axe's existing
+    // `evm_sender::make_executable_payload` produces exactly this shape, so
+    // we reuse it and pass it through as the payload override (otherwise
+    // stellar_sender's default EVM-ABI payload causes a Borsh deserialize
+    // error on the destination side).
+    let memo_program = evm_sender::memo_program_id();
+    let destination_address = memo_program.to_string();
+    ui::address("Solana memo program", &destination_address);
+
+    let (counter_pda, _) =
+        solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program);
+    let user_payload: Option<Vec<u8>> = match &args.payload {
+        Some(hex_str) => Some(hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?),
+        None => None,
+    };
+    let payload_override: Option<Vec<u8>> = Some(evm_sender::make_executable_payload(
+        &user_payload,
+        &counter_pda,
+    ));
+
+    let num_keys = args.num_txs.max(1) as usize;
+    ui::info(&format!("deriving {num_keys} Stellar keys..."));
+    let main_seed = main_wallet.signing_key.to_bytes();
+    let wallets = stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    stellar_sender::ensure_funded(&stellar_client, &wallets, use_friendbot).await?;
+
+    let gas_stroops: u64 = match &args.gas_value {
+        Some(v) => v
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
+        None => stellar_sender::DEFAULT_GAS_STROOPS,
+    };
+
+    let test_start = Instant::now();
+    let mut report = stellar_sender::run_burst(
+        &stellar_client,
+        &wallets,
+        stellar_example.clone(),
+        stellar_gateway,
+        &args.destination_axelar_id,
+        &destination_address,
+        payload_override,
+        src,
+        stellar_xlm,
+        gas_stroops,
+    )
+    .await?;
+    report.destination_address = destination_address.clone();
+
+    let verification = verify::verify_onchain_solana(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        &destination_address,
+        &solana_rpc,
+        &mut report.transactions,
+        verify::SourceChainType::Stellar,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &mut report, test_start)
+}
+
+async fn run_sol_to_stellar(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
+    validate_solana_rpc(&args.source_rpc).await?;
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "GMP (Solana → Stellar AxelarExample)");
+
+    let stellar_rpc = &args.destination_rpc;
+    let stellar_network_type = read_stellar_network_type(&args.config, dest)?;
+    let stellar_gateway_addr = read_stellar_contract_address(&args.config, dest, "AxelarGateway")?;
+    let stellar_example_addr = read_stellar_contract_address(&args.config, dest, "AxelarExample")?;
+    ui::address("Stellar AxelarGateway", &stellar_gateway_addr);
+    ui::address("Stellar AxelarExample", &stellar_example_addr);
+
+    let test_start = Instant::now();
+    let mut report = sol_sender::run_load_test_with_metrics(
+        &args,
+        &stellar_example_addr,
+        true, // evm_destination=true means use EVM-style payload encoding;
+              // Stellar AxelarExample.execute also takes raw bytes so this
+              // works for our purposes.
+    )
+    .await?;
+
+    // Build a deterministic dummy ed25519 pk from the Solana keypair as the
+    // Stellar simulate-only source account.
+    let signer_pk: [u8; 32] = {
+        let kp = crate::solana::load_keypair(args.keypair.as_deref())?;
+        let pk = solana_sdk::signer::Signer::pubkey(&kp);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(pk.as_ref());
+        out
+    };
+
+    let verification = verify::verify_onchain_stellar_gmp(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        &stellar_example_addr,
+        stellar_rpc,
+        &stellar_network_type,
+        &stellar_gateway_addr,
+        signer_pk,
+        &mut report.transactions,
+        verify::SourceChainType::Svm,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &mut report, test_start)
 }

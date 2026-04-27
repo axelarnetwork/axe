@@ -115,7 +115,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let per_wallet_drops: u64 = 10_000_000u64
         + txs_per_key.saturating_mul(xrpl_sender::TRANSFER_AMOUNT_DROPS + gas_fee_drops + 100);
 
-    let faucet_url = faucet_url_for_network(&xrpl_network_type);
+    // Pass RPC URL so devnet vs testnet vs mainnet is inferred from the
+    // actual endpoint (devnet-amplifier mislabels its xrpl networkType).
+    let faucet_url =
+        faucet_url_for_network(&xrpl_rpc).or_else(|| faucet_url_for_network(&xrpl_network_type));
     let main_seed = main_wallet.secret_key.serialize();
     let wallets = xrpl_sender::prepare_wallets(
         &xrpl_client,
@@ -244,7 +247,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 }
 
 /// Read `(rpc, multisig_address, network_type)` for an XRPL chain from config.
-fn read_xrpl_chain_config(
+pub(super) fn read_xrpl_chain_config(
     config: &std::path::Path,
     chain_id: &str,
 ) -> Result<(String, String, String)> {

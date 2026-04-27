@@ -216,10 +216,43 @@ pub async fn lcd_cosmwasm_smart_query(
     contract: &str,
     query_msg: &Value,
 ) -> Result<Value> {
+    // Honor `AXELAR_LCD_URL` as an override for users whose chain config
+    // points at a dead LCD endpoint (e.g. imperator.co on mainnet today).
+    let lcd_url = std::env::var("AXELAR_LCD_URL").unwrap_or_else(|_| lcd.to_string());
+    let lcd_url = lcd_url.trim_end_matches('/');
+
     let query_json = serde_json::to_string(query_msg)?;
     let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_json.as_bytes());
-    let url = format!("{lcd}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
-    let resp: Value = reqwest::get(&url).await?.json().await?;
+    let url = format!("{lcd_url}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
+
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| eyre::eyre!("LCD request to {lcd_url} failed: {e}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| eyre::eyre!("LCD body read failed: {e}"))?;
+
+    if !status.is_success() {
+        return Err(eyre::eyre!(
+            "LCD {lcd_url} returned HTTP {status}. \
+             First 200 chars of body: {}\n\
+             Tip: set AXELAR_LCD_URL to a working endpoint (e.g. \
+             `https://rest.lavenderfive.com/axelar` for mainnet).",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+
+    let resp: Value = serde_json::from_str(&body).map_err(|e| {
+        eyre::eyre!(
+            "LCD {lcd_url} returned non-JSON body. \
+             First 200 chars: {}\n\
+             Parse error: {e}\n\
+             Tip: set AXELAR_LCD_URL to a working endpoint.",
+            body.chars().take(200).collect::<String>()
+        )
+    })?;
     Ok(resp["data"].clone())
 }
 

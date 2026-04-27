@@ -5,6 +5,7 @@ mod evm;
 mod preflight;
 mod solana;
 mod state;
+mod stellar;
 mod steps;
 pub mod ui;
 mod utils;
