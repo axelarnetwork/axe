@@ -152,6 +152,20 @@ fn verifiers_for_network(network: &str) -> Result<&'static [(&'static str, &'sta
     }
 }
 
+/// Look up a verifier's friendly name by address on a given network. Returns
+/// `None` for unknown addresses or networks without a hardcoded mapping.
+pub fn lookup_name(network: &str, addr: &str) -> Option<&'static str> {
+    let table = match network {
+        "testnet" => TESTNET_VERIFIERS,
+        "mainnet" => MAINNET_VERIFIERS,
+        _ => return None,
+    };
+    table
+        .iter()
+        .find(|(a, _)| *a == addr)
+        .map(|(_, name)| *name)
+}
+
 fn resolve_config(network: &str) -> Result<PathBuf> {
     let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
     let path = config_dir.join(format!("{network}.json"));
@@ -208,6 +222,27 @@ struct ActiveVerifier {
     weight: String,
 }
 
+/// Per-verifier registration query (fallback when the active set isn't formed yet).
+async fn query_verifier_supports_chain(
+    lcd: &str,
+    service_registry: &str,
+    verifier: &str,
+    chain: &str,
+) -> Result<bool> {
+    let q = json!({
+        "verifier": { "service_name": "amplifier", "verifier": verifier }
+    });
+    let data = lcd_cosmwasm_smart_query(lcd, service_registry, &q).await?;
+    let chains = data
+        .get("supported_chains")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(chains
+        .iter()
+        .any(|c| c.as_str().is_some_and(|s| s == chain)))
+}
+
 fn truncate_address(addr: &str) -> String {
     if addr.len() > 20 {
         format!("{}...{}", &addr[..12], &addr[addr.len() - 6..])
@@ -239,27 +274,57 @@ pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> 
     let data = lcd_cosmwasm_smart_query(&lcd, &service_registry_addr, &verifier_query).await?;
     spinner.finish_and_clear();
 
-    let active_list = data.as_array().ok_or_else(|| {
-        eyre::eyre!(
-            "no verifiers found for chain '{chain_axelar_id}' on {network}. \
-             Is it an Amplifier chain?"
-        )
-    })?;
-
+    // Fall back to per-verifier registration query when the active set isn't
+    // formed yet (e.g., chain newly being onboarded — fewer than min_num_verifiers
+    // have bonded + registered, so ActiveVerifiers errors with "not enough verifiers").
     let mut active_verifiers: Vec<ActiveVerifier> = Vec::new();
-    for entry in active_list {
-        let address = entry
-            .pointer("/verifier_info/address")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let weight = entry
-            .get("weight")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0")
-            .to_string();
-        active_verifiers.push(ActiveVerifier { address, weight });
-    }
+    let mut pre_registered: Vec<String> = Vec::new();
+    let pre_registration_only = match data.as_array() {
+        Some(active_list) => {
+            for entry in active_list {
+                let address = entry
+                    .pointer("/verifier_info/address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let weight = entry
+                    .get("weight")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0")
+                    .to_string();
+                active_verifiers.push(ActiveVerifier { address, weight });
+            }
+            false
+        }
+        None => {
+            let spinner =
+                ui::wait_spinner("active set not formed; checking per-verifier registrations...");
+            for (addr, _) in known_verifiers.iter() {
+                if *addr == "TODO" {
+                    continue;
+                }
+                if query_verifier_supports_chain(
+                    &lcd,
+                    &service_registry_addr,
+                    addr,
+                    &chain_axelar_id,
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    pre_registered.push((*addr).to_string());
+                }
+            }
+            spinner.finish_and_clear();
+            if pre_registered.is_empty() {
+                return Err(eyre::eyre!(
+                    "no verifiers found for chain '{chain_axelar_id}' on {network}. \
+                     Is it an Amplifier chain?"
+                ));
+            }
+            true
+        }
+    };
 
     if json_mode {
         let mut entries: Vec<Value> = Vec::new();
@@ -268,11 +333,14 @@ pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> 
 
         for (addr, name) in &known_sorted {
             let active_info = active_verifiers.iter().find(|v| v.address == *addr);
+            let registered = pre_registered.iter().any(|a| a == *addr);
             entries.push(json!({
                 "name": name,
                 "address": addr,
                 "active": active_info.is_some(),
+                "registered": active_info.is_some() || registered,
                 "weight": active_info.map(|v| v.weight.as_str()).unwrap_or("-"),
+                "pre_registration_only": pre_registration_only,
             }));
         }
         println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -298,12 +366,15 @@ pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> 
     for (addr, name) in &known_sorted {
         row_num += 1;
         let active_info = active_verifiers.iter().find(|v| v.address == *addr);
+        let is_pre_registered = pre_registered.iter().any(|a| a == *addr);
 
         let is_todo = *addr == "TODO";
         let status_str = if is_todo {
             "? (no address)"
         } else if active_info.is_some() {
             "Active"
+        } else if is_pre_registered {
+            "Registered"
         } else {
             "---"
         };
@@ -338,14 +409,28 @@ pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> 
     let total_active = active_verifiers.len();
 
     println!();
-    ui::kv(
-        "active",
-        &format!("{total_active} verifiers for {chain_axelar_id}"),
-    );
-    ui::kv(
-        "known",
-        &format!("{known_active}/{total_known} known verifiers are active"),
-    );
+    if pre_registration_only {
+        ui::kv(
+            "active",
+            &format!("0 verifiers for {chain_axelar_id} (active set not yet formed)"),
+        );
+        ui::kv(
+            "registered",
+            &format!(
+                "{}/{total_known} known verifiers have pre-registered for {chain_axelar_id}",
+                pre_registered.len()
+            ),
+        );
+    } else {
+        ui::kv(
+            "active",
+            &format!("{total_active} verifiers for {chain_axelar_id}"),
+        );
+        ui::kv(
+            "known",
+            &format!("{known_active}/{total_known} known verifiers are active"),
+        );
+    }
 
     Ok(())
 }
