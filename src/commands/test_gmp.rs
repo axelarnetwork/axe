@@ -17,8 +17,8 @@ use crate::commands::test_helpers::{
     extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
 };
 use crate::cosmos::{
-    build_execute_msg_any, derive_axelar_wallet, read_axelar_config, read_axelar_contract_field,
-    sign_and_broadcast_cosmos_tx,
+    build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
+    read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
 use crate::preflight;
@@ -471,6 +471,27 @@ pub async fn run_config(
     ui::kv("source", &format!("{src} ({src_type})"));
     ui::kv("destination", &format!("{dst} ({dst_type})"));
 
+    // --- Preflight: derive Axelar wallet and check it can pay for the relay ---
+    let mnemonic = mnemonic_override
+        .clone()
+        .or_else(|| std::env::var("MNEMONIC").ok())
+        .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
+    let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
+    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&config)?;
+
+    ui::section("Preflight");
+    ui::address("axelar address", &axelar_address);
+    // Min: 4 relay txs at ~5k uaxl each + headroom = 0.1 AXL.
+    const MIN_RELAY_BALANCE_UAXL: u128 = 100_000;
+    check_axelar_balance(
+        &lcd,
+        &chain_id,
+        &axelar_address,
+        &fee_denom,
+        MIN_RELAY_BALANCE_UAXL,
+    )
+    .await?;
+
     // --- Step 1: Send callContract ---
     ui::step_header(1, 8, "Send callContract");
 
@@ -527,12 +548,6 @@ pub async fn run_config(
         };
 
     // --- Cosmos relay (steps 2-6, chain-agnostic) ---
-    let mnemonic = mnemonic_override
-        .or_else(|| std::env::var("MNEMONIC").ok())
-        .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
-    let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&config)?;
-
     let cosm_gateway =
         read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{src}/address"))?;
     let voting_verifier = read_axelar_contract_field(

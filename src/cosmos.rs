@@ -61,6 +61,57 @@ pub async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
     Ok((account_number, sequence))
 }
 
+/// Query the bank balance of `address` for a single denom. Returns the amount in base units (e.g. uaxl).
+pub async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
+    let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{address}/by_denom?denom={denom}");
+    let resp: Value = reqwest::get(&url).await?.json().await?;
+    let amount: u128 = resp
+        .pointer("/balance/amount")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    Ok(amount)
+}
+
+/// Preflight: ensure the Axelar relayer wallet exists on-chain and holds enough fee-denom to relay.
+/// Errors with a clear "fund this address" message if the account is missing or balance is below `min_amount`.
+pub async fn check_axelar_balance(
+    lcd: &str,
+    chain_id: &str,
+    address: &str,
+    fee_denom: &str,
+    min_amount: u128,
+) -> Result<()> {
+    let account_exists = lcd_query_account(lcd, address).await.is_ok();
+    let balance = lcd_query_balance(lcd, address, fee_denom)
+        .await
+        .unwrap_or(0);
+
+    let display = balance as f64 / 1_000_000.0;
+    let min_display = min_amount as f64 / 1_000_000.0;
+
+    if !account_exists || balance < min_amount {
+        ui::error(&format!("axelar relayer wallet underfunded on {chain_id}:"));
+        ui::error(&format!("  address: {address}"));
+        ui::error(&format!(
+            "  balance: {display:.6} {fee_denom} (need >= {min_display:.6})"
+        ));
+        if !account_exists {
+            ui::error("  account does not exist on-chain — send any amount to create it");
+        }
+        return Err(eyre::eyre!(
+            "fund {address} with at least {min_display:.6} {fee_denom} on {chain_id} and retry"
+        ));
+    }
+
+    ui::kv(
+        "relayer balance",
+        &format!("{display:.6} {fee_denom} (>= {min_display:.6})"),
+    );
+    Ok(())
+}
+
 pub async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
     let tx_b64 = base64::engine::general_purpose::STANDARD.encode(tx_bytes);
     let body = serde_json::json!({
