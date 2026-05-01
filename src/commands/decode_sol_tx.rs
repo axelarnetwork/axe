@@ -321,40 +321,57 @@ fn format_account(
 }
 
 // ---------------------------------------------------------------------------
-// Anchor event discriminators (sha256("event:<Name>")[0:8])
+// Anchor event discriminators
+//
 // Anchor CPI events are prefixed with EVENT_IX_TAG_LE (8 bytes) then the
-// event discriminator (8 bytes), then borsh-encoded event data.
+// event discriminator (8 bytes), then borsh-encoded event data. Both the
+// tag and each event's discriminator come from anchor / the imported
+// solana-axelar-* crates so we don't hand-maintain bytes that can drift
+// from what the on-chain programs actually emit.
 // ---------------------------------------------------------------------------
 
-pub const EVENT_IX_TAG_LE: &[u8] = &[0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
+pub use anchor_lang::event::EVENT_IX_TAG_LE;
 
 pub fn event_name(discriminator: &[u8]) -> Option<&'static str> {
+    use anchor_lang::Discriminator;
     if discriminator.len() < 8 {
         return None;
     }
-    match discriminator[..8] {
-        // Gateway events
-        [0xd3, 0xd3, 0x50, 0x7e, 0x96, 0x62, 0xb5, 0xc6] => Some("CallContractEvent"),
-        [0xfa, 0xfe, 0x1d, 0xe3, 0x9f, 0xcd, 0x72, 0x59] => Some("MessageApprovedEvent"),
-        [0x09, 0x9d, 0xbc, 0xe1, 0xa8, 0x1a, 0x5e, 0x52] => Some("MessageExecutedEvent"),
-        [0x36, 0x4f, 0x98, 0x9b, 0x8a, 0x44, 0xe5, 0x60] => Some("VerifierSetRotatedEvent"),
-        // GasService events
-        [0xbf, 0xa1, 0x16, 0xab, 0x29, 0x20, 0xd4, 0xf8] => Some("GasPaidEvent"),
-        [0x43, 0x61, 0xf5, 0x20, 0xc3, 0xb4, 0x4a, 0x6d] => Some("GasAddedEvent"),
-        [0xea, 0xd0, 0x71, 0x56, 0x5d, 0x7b, 0xc8, 0x0c] => Some("GasRefundedEvent"),
-        [0x29, 0x99, 0xc7, 0x9f, 0x73, 0x4b, 0x4c, 0xb8] => Some("GasCollectedEvent"),
-        // ITS events
-        [0x60, 0x42, 0x01, 0x44, 0xf0, 0x34, 0x90, 0x8a] => Some("InterchainTransferSentEvent"),
-        [0xaf, 0xc9, 0xb2, 0x8b, 0x99, 0x45, 0x01, 0xd0] => Some("InterchainTransferReceivedEvent"),
-        [0xf9, 0x5a, 0x7c, 0x8e, 0x42, 0x2a, 0x5c, 0xbc] => Some("InterchainTokenDeployedEvent"),
-        [0x91, 0x4a, 0xc7, 0xba, 0xd2, 0xe8, 0x93, 0x01] => {
-            Some("InterchainTokenDeploymentStartedEvent")
-        }
-        [0x03, 0x8a, 0x01, 0x9b, 0x81, 0x57, 0x00, 0x29] => Some("TokenManagerDeployedEvent"),
-        [0x1b, 0x1f, 0xbd, 0xfb, 0xb7, 0x29, 0x08, 0x7c] => Some("TokenMetadataRegisteredEvent"),
-        [0xef, 0x48, 0x83, 0xb5, 0xfb, 0x01, 0xde, 0x82] => Some("LinkTokenStartedEvent"),
-        _ => None,
+    let disc = &discriminator[..8];
+
+    macro_rules! match_event {
+        ($($ty:ty),* $(,)?) => {
+            $(
+                if disc == <$ty as Discriminator>::DISCRIMINATOR {
+                    return Some(stringify!($ty).rsplit("::").next().unwrap_or(stringify!($ty)));
+                }
+            )*
+        };
     }
+
+    match_event!(
+        // Gateway
+        solana_axelar_gateway::events::CallContractEvent,
+        solana_axelar_gateway::events::MessageApprovedEvent,
+        solana_axelar_gateway::events::MessageExecutedEvent,
+        solana_axelar_gateway::events::VerifierSetRotatedEvent,
+        // GasService
+        solana_axelar_gas_service::events::GasPaidEvent,
+        solana_axelar_gas_service::events::GasAddedEvent,
+        solana_axelar_gas_service::events::GasRefundedEvent,
+        solana_axelar_gas_service::events::GasCollectedEvent,
+        // ITS — note: crate types omit the `Event` suffix the gateway/gas
+        // crates use, so labels here will read e.g. `InterchainTokenDeployed`
+        // (truthful to the emitting struct).
+        solana_axelar_its::events::InterchainTransferSent,
+        solana_axelar_its::events::InterchainTransferReceived,
+        solana_axelar_its::events::InterchainTokenDeployed,
+        solana_axelar_its::events::InterchainTokenDeploymentStarted,
+        solana_axelar_its::events::TokenManagerDeployed,
+        solana_axelar_its::events::TokenMetadataRegistered,
+        solana_axelar_its::events::LinkTokenStarted,
+    );
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1705,6 +1722,93 @@ pub fn decode_instruction_args_json(ix_name: &str, data: &[u8]) -> serde_json::V
             let mut m = serde_json::Map::new();
             m.insert("raw_size".into(), json!(args.len()));
             json!(m)
+        }
+    }
+}
+
+#[cfg(test)]
+mod event_name_tests {
+    use super::event_name;
+
+    /// Bytes captured from real on-chain events in prior `axe decode tx` runs.
+    /// If the imported solana-axelar-* crates ever rename or replace these
+    /// event types, the discriminator returned by their `Discriminator` impl
+    /// won't match the bytes the deployed programs emit, and this test will
+    /// fail with the offending event — preventing the inspector from silently
+    /// labelling on-chain events as `UnknownEvent`.
+    #[test]
+    fn known_on_chain_bytes_resolve() {
+        let cases: &[(&[u8], &str)] = &[
+            // Gateway
+            (
+                &[0xd3, 0xd3, 0x50, 0x7e, 0x96, 0x62, 0xb5, 0xc6],
+                "CallContractEvent",
+            ),
+            (
+                &[0xfa, 0xfe, 0x1d, 0xe3, 0x9f, 0xcd, 0x72, 0x59],
+                "MessageApprovedEvent",
+            ),
+            (
+                &[0x09, 0x9d, 0xbc, 0xe1, 0xa8, 0x1a, 0x5e, 0x52],
+                "MessageExecutedEvent",
+            ),
+            (
+                &[0x36, 0x4f, 0x98, 0x9b, 0x8a, 0x44, 0xe5, 0x60],
+                "VerifierSetRotatedEvent",
+            ),
+            // GasService
+            (
+                &[0xbf, 0xa1, 0x16, 0xab, 0x29, 0x20, 0xd4, 0xf8],
+                "GasPaidEvent",
+            ),
+            (
+                &[0x43, 0x61, 0xf5, 0x20, 0xc3, 0xb4, 0x4a, 0x6d],
+                "GasAddedEvent",
+            ),
+            (
+                &[0xea, 0xd0, 0x71, 0x56, 0x5d, 0x7b, 0xc8, 0x0c],
+                "GasRefundedEvent",
+            ),
+            (
+                &[0x29, 0x99, 0xc7, 0x9f, 0x73, 0x4b, 0x4c, 0xb8],
+                "GasCollectedEvent",
+            ),
+            // ITS — labels match crate struct names (no `Event` suffix).
+            (
+                &[0x60, 0x42, 0x01, 0x44, 0xf0, 0x34, 0x90, 0x8a],
+                "InterchainTransferSent",
+            ),
+            (
+                &[0xaf, 0xc9, 0xb2, 0x8b, 0x99, 0x45, 0x01, 0xd0],
+                "InterchainTransferReceived",
+            ),
+            (
+                &[0xf9, 0x5a, 0x7c, 0x8e, 0x42, 0x2a, 0x5c, 0xbc],
+                "InterchainTokenDeployed",
+            ),
+            (
+                &[0x91, 0x4a, 0xc7, 0xba, 0xd2, 0xe8, 0x93, 0x01],
+                "InterchainTokenDeploymentStarted",
+            ),
+            (
+                &[0x03, 0x8a, 0x01, 0x9b, 0x81, 0x57, 0x00, 0x29],
+                "TokenManagerDeployed",
+            ),
+            (
+                &[0x1b, 0x1f, 0xbd, 0xfb, 0xb7, 0x29, 0x08, 0x7c],
+                "TokenMetadataRegistered",
+            ),
+            (
+                &[0xef, 0x48, 0x83, 0xb5, 0xfb, 0x01, 0xde, 0x82],
+                "LinkTokenStarted",
+            ),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(
+                event_name(bytes),
+                Some(*expected),
+                "discriminator drift for {expected}: bytes {bytes:02x?} no longer resolve"
+            );
         }
     }
 }

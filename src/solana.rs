@@ -643,9 +643,6 @@ pub fn extract_gateway_call_contract_payload(
         UiInnerInstructions, UiInstruction, option_serializer::OptionSerializer,
     };
 
-    // Anchor's event-CPI discriminator prefix.
-    const EVENT_IX_TAG_LE: [u8; 8] = 0x1d9a_cb51_2ea5_45e4u64.to_le_bytes();
-
     let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
     let sig: Signature = signature_str
         .parse()
@@ -673,7 +670,10 @@ pub fn extract_gateway_call_contract_payload(
             let data = bs58::decode(&ix.data)
                 .into_vec()
                 .map_err(|e| eyre::eyre!("inner instruction data not valid base58: {e}"))?;
-            if data.len() < 16 || data[..8] != EVENT_IX_TAG_LE || &data[8..16] != want_disc {
+            if data.len() < 16
+                || data[..8] != *anchor_lang::event::EVENT_IX_TAG_LE
+                || &data[8..16] != want_disc
+            {
                 continue;
             }
             let event: solana_axelar_gateway::events::CallContractEvent =
