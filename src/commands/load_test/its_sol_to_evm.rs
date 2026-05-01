@@ -87,10 +87,29 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     };
     ui::kv("gas value", &format!("{gas_value} lamports"));
 
-    // --- EVM destination address (ITS proxy on destination chain) ---
+    // --- EVM destination ITS proxy (used by the relayer to dispatch execute) ---
     let its_proxy_addr = read_contract_address(&args.config, dest, "InterchainTokenService")?;
     ui::address("destination ITS", &format!("{its_proxy_addr}"));
-    let dest_address_bytes = its_proxy_addr.as_slice().to_vec();
+
+    // --- Receiver wallet for the InterchainTransfer ---
+    // Must be an EOA on the destination chain — passing the ITS proxy here
+    // reverts EVM estimation because ITS won't transfer to its own address.
+    // Prefer the EVM_PRIVATE_KEY's derived address so test runs accumulate
+    // tokens at a wallet the user owns (no dust burn). Fall back to the
+    // canonical dEaD burn address when no key is configured — verify only
+    // checks gateway approval/execution, not the receiver's balance.
+    let receiver: Address = match args.private_key.as_deref() {
+        Some(pk) => {
+            use alloy::signers::local::PrivateKeySigner;
+            let signer: PrivateKeySigner = pk
+                .parse()
+                .map_err(|e| eyre!("invalid EVM private key for receiver derivation: {e}"))?;
+            signer.address()
+        }
+        None => alloy::primitives::address!("0x000000000000000000000000000000000000dEaD"),
+    };
+    ui::address("receiver", &format!("{receiver}"));
+    let dest_address_bytes = receiver.as_slice().to_vec();
 
     // --- EVM gateway for verification ---
     let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
