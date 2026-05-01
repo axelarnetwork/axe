@@ -26,7 +26,7 @@ const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
 /// Distribute 100x per key so cached tokens last across many runs.
 const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
 
-/// Default gas value for ITS transfer on Solana (in lamports).
+/// Default gas value for an ITS *transfer* on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
 fn default_gas_value() -> u64 {
     #[cfg(feature = "devnet-amplifier")]
@@ -38,6 +38,14 @@ fn default_gas_value() -> u64 {
         100_000
     }
 }
+
+/// Multiplier applied to the per-tx gas value for the one-time `deployRemote`
+/// call. Destination-side deploys are dramatically more expensive than
+/// transfers (they CREATE2 a fresh ITS token contract on the EVM side), and
+/// the public testnet relayer was reverting with `availableGasBalance.amount
+/// must be positive: -2449` when we paid the same 100k lamports for both.
+/// 10× ≈ 0.001 SOL covers the deploy with margin.
+const DEPLOY_GAS_MULTIPLIER: u64 = 10;
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
@@ -605,10 +613,19 @@ async fn setup_its_token(
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("mint", &mint.to_string());
 
-    // Deploy remote to EVM destination
-    ui::info(&format!("deploying remote token to {dest}..."));
+    // Deploy remote to EVM destination. Deploys consume ~10× the
+    // destination-side gas of a transfer because they CREATE2 a fresh ITS
+    // token contract on the EVM chain, so multiply the per-tx gas budget.
+    let deploy_gas_value = gas_value.saturating_mul(DEPLOY_GAS_MULTIPLIER);
+    ui::info(&format!(
+        "deploying remote token to {dest} (gas: {deploy_gas_value} lamports)..."
+    ));
     let remote_sig = solana::send_its_deploy_remote_interchain_token(
-        solana_rpc, keypair, &salt, dest, gas_value,
+        solana_rpc,
+        keypair,
+        &salt,
+        dest,
+        deploy_gas_value,
     )?;
     ui::tx_hash("remote deploy tx", &remote_sig);
     ui::success("remote deploy tx confirmed on Solana");
