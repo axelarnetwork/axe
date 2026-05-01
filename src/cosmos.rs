@@ -40,6 +40,12 @@ pub fn derive_axelar_wallet(mnemonic_str: &str) -> Result<(SigningKey, String)> 
     Ok((signing_key, account_id.to_string()))
 }
 
+/// Multiplier applied to the simulated gas to derive the broadcast gas limit.
+/// Cosmwasm route/end_poll simulation can underestimate actual usage by a few
+/// percent (we've seen ~4% over the 2.0× limit in the wild), so we keep a
+/// generous buffer.
+const GAS_MULTIPLIER: f64 = 3.0;
+
 // --- LCD REST queries ---
 
 pub async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
@@ -393,7 +399,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
     )?;
 
     let gas_used = lcd_simulate_tx(lcd, &sim_tx).await?;
-    let gas_limit = (gas_used as f64 * 2.0) as u64;
+    let gas_limit = (gas_used as f64 * GAS_MULTIPLIER) as u64;
     let fee_amount = ((gas_limit as f64) * gas_price).ceil() as u128;
     ui::kv(
         "gas",

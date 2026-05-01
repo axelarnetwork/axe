@@ -74,20 +74,16 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     // --- Solana keypair ---
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
+    solana::check_solana_balance(
+        &args.source_rpc,
+        "wallet",
+        &main_keypair.pubkey(),
+        solana::MIN_SOL_SEND_LAMPORTS,
+    )?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         &args.source_rpc,
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
-    let pubkey = main_keypair.pubkey();
-    let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
-    let sol = balance as f64 / 1e9;
-    ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
-    if balance == 0 {
-        return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
-        ));
-    }
 
     // --- Gas value ---
     let gas_value: u64 = match &args.gas_value {

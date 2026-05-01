@@ -492,6 +492,35 @@ pub async fn run_config(
     )
     .await?;
 
+    // Solana keypair balance checks: catch underfunded keys here with a clear
+    // error rather than the cryptic "Attempt to debit an account but found no
+    // record of a prior credit" we get from the RPC at send-time.
+    if src_type == "svm" || dst_type == "svm" {
+        use solana_sdk::signer::Signer;
+        let keypair = crate::solana::load_keypair(None)?;
+        if src_type == "svm" {
+            crate::solana::check_solana_balance(
+                src_rpc,
+                "source",
+                &keypair.pubkey(),
+                crate::solana::MIN_SOL_SEND_LAMPORTS,
+            )?;
+        }
+        if dst_type == "svm" {
+            let dst_rpc = chains
+                .get(&dst)
+                .and_then(|v| v.get("rpc"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
+            crate::solana::check_solana_balance(
+                dst_rpc,
+                "destination",
+                &keypair.pubkey(),
+                crate::solana::MIN_SOL_RELAY_LAMPORTS,
+            )?;
+        }
+    }
+
     // --- Step 1: Send callContract ---
     ui::step_header(1, 8, "Send callContract");
 
