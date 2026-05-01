@@ -5,6 +5,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
+use crate::types::Network;
 use crate::ui;
 
 // source: axelar-skills/verifiers.md
@@ -143,10 +144,7 @@ const SUPPORTED_NETWORKS: &[crate::types::Network] = &[
     crate::types::Network::Mainnet,
 ];
 
-fn verifiers_for_network(
-    network: crate::types::Network,
-) -> Result<&'static [(&'static str, &'static str)]> {
-    use crate::types::Network;
+fn verifiers_for_network(network: Network) -> Result<&'static [(&'static str, &'static str)]> {
     match network {
         Network::Testnet => Ok(TESTNET_VERIFIERS),
         Network::Mainnet => Ok(MAINNET_VERIFIERS),
@@ -164,8 +162,7 @@ fn verifiers_for_network(
 
 /// Look up a verifier's friendly name by address on a given network. Returns
 /// `None` for unknown addresses or networks without a hardcoded mapping.
-pub fn lookup_name(network: crate::types::Network, addr: &str) -> Option<&'static str> {
-    use crate::types::Network;
+pub fn lookup_name(network: Network, addr: &str) -> Option<&'static str> {
     let table = match network {
         Network::Testnet => TESTNET_VERIFIERS,
         Network::Mainnet => MAINNET_VERIFIERS,

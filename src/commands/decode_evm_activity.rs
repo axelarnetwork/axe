@@ -1,3 +1,4 @@
+use alloy::dyn_abi::DynSolValue;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::Filter;
@@ -346,8 +347,7 @@ fn build_params_summary(
     }
 }
 
-fn format_sol_value(value: &alloy::dyn_abi::DynSolValue) -> String {
-    use alloy::dyn_abi::DynSolValue;
+fn format_sol_value(value: &DynSolValue) -> String {
     match value {
         DynSolValue::String(s) => s.clone(),
         DynSolValue::Address(a) => format!("0x{a:x}"),
@@ -366,7 +366,7 @@ fn format_sol_value(value: &alloy::dyn_abi::DynSolValue) -> String {
     }
 }
 
-fn params_to_json(params: &[(String, alloy::dyn_abi::DynSolValue)]) -> serde_json::Value {
+fn params_to_json(params: &[(String, DynSolValue)]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (name, value) in params {
         map.insert(name.clone(), sol_value_to_json(value));
@@ -374,8 +374,7 @@ fn params_to_json(params: &[(String, alloy::dyn_abi::DynSolValue)]) -> serde_jso
     serde_json::Value::Object(map)
 }
 
-fn sol_value_to_json(value: &alloy::dyn_abi::DynSolValue) -> serde_json::Value {
-    use alloy::dyn_abi::DynSolValue;
+fn sol_value_to_json(value: &DynSolValue) -> serde_json::Value {
     use serde_json::json;
 
     match value {

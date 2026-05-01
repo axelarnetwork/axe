@@ -479,7 +479,6 @@ fn try_decode_its_hub_message(data: &[u8]) -> Option<String> {
 }
 
 fn format_its_message(message: &solana_axelar_its::encoding::Message, lines: &mut Vec<String>) {
-    use owo_colors::OwoColorize;
     use solana_axelar_its::encoding::Message;
 
     let p = "      ┃ ";
@@ -582,7 +581,6 @@ fn try_decode_interchain_transfer_sent_event(data: &[u8]) -> Option<String> {
     }
     let amount = u64::from_le_bytes(rest[..8].try_into().ok()?);
 
-    use owo_colors::OwoColorize;
     Some(format!(
         "{} {token_id}\n{} {source}\n{} {source_token}\n{} \"{dest_chain}\"\n{} {dest_addr}\n{} {amount}",
         "token_id:".dimmed(),
@@ -614,7 +612,6 @@ fn try_decode_interchain_transfer_received_event(data: &[u8]) -> Option<String> 
     let dest_token = Pubkey::try_from(&rest[32..64]).ok()?;
     let amount = u64::from_le_bytes(rest[64..72].try_into().ok()?);
 
-    use owo_colors::OwoColorize;
     Some(format!(
         "{} {command_id}\n{} {token_id}\n{} \"{source_chain}\"\n{} 0x{source_addr}\n{} {dest}\n{} {dest_token}\n{} {amount}",
         "command_id:".dimmed(),
@@ -630,7 +627,6 @@ fn try_decode_interchain_transfer_received_event(data: &[u8]) -> Option<String> 
 fn try_decode_interchain_token_deployed_event(data: &[u8]) -> Option<String> {
     // token_id: [u8;32], token_address: Pubkey, name: String, symbol: String,
     // decimals: u8, minter: Option<Pubkey>
-    use owo_colors::OwoColorize;
     if data.len() < 64 {
         return None;
     }
@@ -656,7 +652,6 @@ fn try_decode_interchain_token_deployed_event(data: &[u8]) -> Option<String> {
 
 fn try_decode_token_manager_deployed_event(data: &[u8]) -> Option<String> {
     // token_id: [u8;32], token_manager: Pubkey, token_manager_type: u8, params: Option<Vec<u8>>
-    use owo_colors::OwoColorize;
     if data.len() < 65 {
         return None;
     }
@@ -684,7 +679,6 @@ fn try_decode_token_manager_deployed_event(data: &[u8]) -> Option<String> {
 fn try_decode_message_approved_event(data: &[u8]) -> Option<String> {
     // command_id: [u8;32], destination_address: String, payload_hash: [u8;32],
     // source_chain: String, cc_id: String, source_address: String, destination_chain: String
-    use owo_colors::OwoColorize;
     if data.len() < 32 {
         return None;
     }
@@ -713,7 +707,6 @@ fn try_decode_message_approved_event(data: &[u8]) -> Option<String> {
 fn try_decode_message_executed_event(data: &[u8]) -> Option<String> {
     // command_id: [u8;32], destination_address: Pubkey, payload_hash: [u8;32],
     // source_chain: String, cc_id: String, source_address: String, destination_chain: String
-    use owo_colors::OwoColorize;
     if data.len() < 96 {
         return None;
     }
@@ -737,7 +730,6 @@ fn try_decode_message_executed_event(data: &[u8]) -> Option<String> {
 
 fn try_decode_verifier_set_rotated_event(data: &[u8]) -> Option<String> {
     // epoch: U256 (32 bytes LE), verifier_set_hash: [u8;32]
-    use owo_colors::OwoColorize;
     if data.len() < 64 {
         return None;
     }
@@ -754,7 +746,6 @@ fn try_decode_verifier_set_rotated_event(data: &[u8]) -> Option<String> {
 fn try_decode_gas_paid_event(data: &[u8]) -> Option<String> {
     // sender: Pubkey, destination_chain: String, destination_address: String,
     // payload_hash: [u8;32], amount: u64, refund_address: Pubkey
-    use owo_colors::OwoColorize;
     if data.len() < 32 {
         return None;
     }
@@ -781,7 +772,6 @@ fn try_decode_gas_paid_event(data: &[u8]) -> Option<String> {
 
 fn try_decode_gas_added_event(data: &[u8]) -> Option<String> {
     // sender: Pubkey, message_id: String, amount: u64, refund_address: Pubkey
-    use owo_colors::OwoColorize;
     if data.len() < 32 {
         return None;
     }
@@ -804,7 +794,6 @@ fn try_decode_gas_added_event(data: &[u8]) -> Option<String> {
 
 fn try_decode_gas_refunded_event(data: &[u8]) -> Option<String> {
     // receiver: Pubkey, message_id: String, amount: u64
-    use owo_colors::OwoColorize;
     if data.len() < 32 {
         return None;
     }
@@ -826,7 +815,6 @@ fn try_decode_gas_refunded_event(data: &[u8]) -> Option<String> {
 fn try_decode_interchain_token_deployment_started_event(data: &[u8]) -> Option<String> {
     // token_id: [u8;32], destination_chain: String, name: String, symbol: String,
     // decimals: u8, minter: Option<Pubkey>
-    use owo_colors::OwoColorize;
     if data.len() < 32 {
         return None;
     }
@@ -850,7 +838,6 @@ fn try_decode_interchain_token_deployment_started_event(data: &[u8]) -> Option<S
 }
 
 fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
-    use owo_colors::OwoColorize;
     let event = borsh::from_slice::<solana_axelar_gateway::events::CallContractEvent>(data).ok()?;
     let (size, content) = decode_payload(&event.payload);
     let payload_line = match content {
