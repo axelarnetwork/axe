@@ -33,20 +33,13 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let mut state = read_state(&axelar_id)?;
     let gmp_start = Instant::now();
 
-    let rpc_url: String = state["rpcUrl"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no rpcUrl in state"))?
-        .to_string();
-    let target_json = PathBuf::from(
-        state["targetJson"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
-    );
+    let rpc_url = state.rpc_url.clone();
+    let target_json = state.target_json.clone();
 
-    let private_key = state["deployerPrivateKey"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?
-        .to_string();
+    let private_key = state
+        .deployer_private_key
+        .clone()
+        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
     let deployer_address = signer.address();
@@ -75,26 +68,24 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::address("gas service", &format!("{gas_service_addr}"));
 
     // --- Deploy SenderReceiver if needed ---
-    let sender_receiver_addr =
-        if let Some(addr_str) = state.get("senderReceiverAddress").and_then(|v| v.as_str()) {
-            let addr: alloy::primitives::Address = addr_str.parse()?;
-            let code = provider.get_code_at(addr).await?;
-            if code.is_empty() {
-                ui::warn(&format!(
-                    "SenderReceiver at {addr} has no code, redeploying..."
-                ));
-                deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
-            } else {
-                ui::info(&format!("SenderReceiver: reusing {addr}"));
-                addr
-            }
-        } else {
-            ui::info("deploying SenderReceiver...");
+    let sender_receiver_addr = if let Some(addr) = state.sender_receiver_address {
+        let code = provider.get_code_at(addr).await?;
+        if code.is_empty() {
+            ui::warn(&format!(
+                "SenderReceiver at {addr} has no code, redeploying..."
+            ));
             deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
-        };
+        } else {
+            ui::info(&format!("SenderReceiver: reusing {addr}"));
+            addr
+        }
+    } else {
+        ui::info("deploying SenderReceiver...");
+        deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?
+    };
 
-    state["senderReceiverAddress"] = json!(format!("{sender_receiver_addr}"));
-    save_state(&axelar_id, &state)?;
+    state.sender_receiver_address = Some(sender_receiver_addr);
+    save_state(&state)?;
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
     // --- Send GMP message ---
@@ -155,10 +146,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // --- Amplifier routing ---
     ui::section("Amplifier Routing");
 
-    let mnemonic = state["mnemonic"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no mnemonic in state"))?;
-    let (signing_key, axelar_address) = derive_axelar_wallet(mnemonic)?;
+    let (signing_key, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&target_json)?;
 
     let cosm_gateway = read_axelar_contract_field(

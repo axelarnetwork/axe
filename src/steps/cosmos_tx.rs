@@ -12,21 +12,17 @@ use crate::cosmos::{
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::get_salt_from_key;
+use crate::state::Step;
+use crate::types::Network;
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
-pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Result<()> {
-    let mnemonic = ctx.state["mnemonic"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no mnemonic in state. Run init first"))?
-        .to_string();
-    let env = ctx.state["env"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no env in state"))?
-        .to_string();
+pub async fn run(ctx: &mut DeployContext, step: &Step, step_name: &str) -> Result<()> {
+    let mnemonic = ctx.state.mnemonic.clone();
+    let env = ctx.state.env;
     let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json)?;
-    let use_governance = env != "devnet-amplifier";
+    let use_governance = env != Network::DevnetAmplifier;
 
     let chain_axelar_id = {
         let content = fs::read_to_string(&ctx.target_json)?;
@@ -37,7 +33,7 @@ pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Resu
             .to_string()
     };
 
-    let proposal_key = step["proposalKey"].as_str().unwrap_or("").to_string();
+    let proposal_key = step.proposal_key().unwrap_or("").to_string();
 
     match step_name {
         "InstantiateChainContracts" => {
@@ -51,7 +47,7 @@ pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Resu
                 gas_price,
                 use_governance,
                 &chain_axelar_id,
-                &env,
+                env.as_str(),
                 &proposal_key,
             )
             .await?;
@@ -67,7 +63,7 @@ pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Resu
                 gas_price,
                 use_governance,
                 &chain_axelar_id,
-                &env,
+                env.as_str(),
                 &proposal_key,
             )
             .await?;
@@ -83,7 +79,7 @@ pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Resu
                 gas_price,
                 use_governance,
                 &chain_axelar_id,
-                &env,
+                env.as_str(),
                 &proposal_key,
             )
             .await?;
@@ -112,7 +108,7 @@ pub async fn run(ctx: &mut DeployContext, step: &Value, step_name: &str) -> Resu
                 gas_price,
                 use_governance,
                 &chain_axelar_id,
-                &env,
+                env.as_str(),
                 &proposal_key,
             )
             .await?;
@@ -191,10 +187,8 @@ async fn run_instantiate(
         ))
         .ok_or_else(|| eyre::eyre!("no MultisigProver.{chain_axelar_id} config"))?;
 
-    let salt_key = ctx.state["cosmSalt"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no cosmSalt in state. Run init with SALT first"))?;
-    let salt_bytes = get_salt_from_key(salt_key);
+    let salt_key = ctx.state.cosm_salt.clone();
+    let salt_bytes = get_salt_from_key(&salt_key);
     let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes.as_slice());
 
     let domain_separator = compute_domain_separator(&ctx.target_json, &ctx.axelar_id)?;
@@ -374,10 +368,9 @@ async fn run_instantiate(
             "Vote on the proposal:",
             &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
         ]);
-        if ctx.state.get("proposals").is_none() {
-            ctx.state["proposals"] = json!({});
-        }
-        ctx.state["proposals"][&proposal_key] = json!(proposal_id);
+        ctx.state
+            .proposals
+            .insert(proposal_key.to_string(), proposal_id);
     } else {
         ui::success("direct execution completed");
     }
@@ -462,10 +455,9 @@ async fn run_register_deployment(
             "Vote on the proposal:",
             &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
         ]);
-        if ctx.state.get("proposals").is_none() {
-            ctx.state["proposals"] = json!({});
-        }
-        ctx.state["proposals"][proposal_key] = json!(proposal_id);
+        ctx.state
+            .proposals
+            .insert(proposal_key.to_string(), proposal_id);
     } else {
         ui::success("direct execution completed");
     }
@@ -581,10 +573,9 @@ async fn run_create_reward_pools(
             "Vote on the proposal:",
             &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
         ]);
-        if ctx.state.get("proposals").is_none() {
-            ctx.state["proposals"] = json!({});
-        }
-        ctx.state["proposals"][proposal_key] = json!(proposal_id);
+        ctx.state
+            .proposals
+            .insert(proposal_key.to_string(), proposal_id);
     } else {
         ui::success("direct execution completed");
     }
@@ -788,10 +779,9 @@ async fn run_register_its_on_hub(
             "Vote on the proposal:",
             &format!("./vote_{env}_proposal.sh {env}-nodes {proposal_id}"),
         ]);
-        if ctx.state.get("proposals").is_none() {
-            ctx.state["proposals"] = json!({});
-        }
-        ctx.state["proposals"][proposal_key] = json!(proposal_id);
+        ctx.state
+            .proposals
+            .insert(proposal_key.to_string(), proposal_id);
     } else {
         ui::success("direct execution completed");
     }

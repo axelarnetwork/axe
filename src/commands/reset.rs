@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 
 use eyre::Result;
 use serde_json::Value;
@@ -11,10 +10,7 @@ use crate::ui;
 pub fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
     let state = read_state(&axelar_id)?;
-    let target_json: PathBuf = state["targetJson"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no targetJson in state"))?
-        .into();
+    let target_json = state.target_json.clone();
 
     // --- Delete state file ---
     let sf = state_path(&axelar_id)?;

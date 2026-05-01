@@ -1,24 +1,19 @@
 use eyre::Result;
-use serde_json::Value;
 
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{lcd_query_proposal, read_axelar_config};
+use crate::state::Step;
 use crate::ui;
 
-pub async fn run(ctx: &DeployContext, step: &Value) -> Result<()> {
-    let proposal_key = step["proposalKey"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no proposalKey in step"))?
-        .to_string();
-    let proposal_id = ctx
-        .state
-        .pointer(&format!("/proposals/{proposal_key}"))
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            eyre::eyre!(
-                "no proposal ID for key '{proposal_key}' in state. Was the previous cosmos-tx step completed?"
-            )
-        })?;
+pub async fn run(ctx: &DeployContext, step: &Step) -> Result<()> {
+    let proposal_key = step
+        .proposal_key()
+        .ok_or_else(|| eyre::eyre!("cosmos-poll step has no proposal_key"))?;
+    let proposal_id = ctx.state.proposals.get(proposal_key).copied().ok_or_else(|| {
+        eyre::eyre!(
+            "no proposal ID for key '{proposal_key}' in state. Was the previous cosmos-tx step completed?"
+        )
+    })?;
 
     let (lcd, _, _, _) = read_axelar_config(&ctx.target_json)?;
 

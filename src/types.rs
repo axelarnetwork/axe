@@ -75,8 +75,9 @@ impl TryFrom<&str> for ChainType {
 /// One of the four Axelar networks the deployments repo defines a config for.
 /// Round-trips through `FromStr`/`Display` as the lowercase string the cargo
 /// feature flags and config filenames already use (note: `devnet-amplifier`
-/// has the dash, not an underscore).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// has the dash, not an underscore). Serde uses the same string form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Network {
     Mainnet,
     Testnet,

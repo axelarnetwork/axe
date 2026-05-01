@@ -1,16 +1,17 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, FixedBytes};
 use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands;
 use crate::preflight;
 use crate::state::{
-    mark_step_completed, migrate_steps, next_pending_step, read_state, save_state, state_path,
+    State, Step, StepKind, mark_step_completed, migrate_steps, next_pending_step, read_state,
+    save_state, state_path,
 };
 use crate::steps;
 use crate::ui;
@@ -18,7 +19,7 @@ use crate::utils::{artifact_paths_for_step, deployments_root};
 
 pub struct DeployContext {
     pub axelar_id: String,
-    pub state: Value,
+    pub state: State,
     pub rpc_url: String,
     pub target_json: PathBuf,
 }
@@ -43,46 +44,41 @@ pub async fn run(
     migrate_steps(&mut state);
 
     // Load ITS config from env vars if not already in state
-    if state
-        .get("itsDeployerPrivateKey")
-        .and_then(|v| v.as_str())
-        .is_none()
+    if state.its_deployer_private_key.is_none()
         && let Ok(pk) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY")
     {
-        state["itsDeployerPrivateKey"] = json!(pk);
+        state.its_deployer_private_key = Some(pk);
         ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
     }
-    if state.get("itsSalt").and_then(|v| v.as_str()).is_none()
+    if state.its_salt.is_none()
         && let Ok(s) = std::env::var("ITS_SALT")
     {
-        state["itsSalt"] = json!(s);
+        let bytes: FixedBytes<32> = s
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid ITS_SALT (expected 0x-prefixed 32-byte hex): {e}"))?;
+        state.its_salt = Some(bytes);
         ui::info(&format!("loaded ITS_SALT from env: {s}"));
     }
-    if state.get("itsProxySalt").and_then(|v| v.as_str()).is_none()
+    if state.its_proxy_salt.is_none()
         && let Ok(s) = std::env::var("ITS_PROXY_SALT")
     {
-        state["itsProxySalt"] = json!(s);
+        let bytes: FixedBytes<32> = s.parse().map_err(|e| {
+            eyre::eyre!("invalid ITS_PROXY_SALT (expected 0x-prefixed 32-byte hex): {e}")
+        })?;
+        state.its_proxy_salt = Some(bytes);
         ui::info(&format!("loaded ITS_PROXY_SALT from env: {s}"));
     }
 
-    save_state(&axelar_id, &state)?;
+    save_state(&state)?;
 
-    let rpc_url = state["rpcUrl"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no rpcUrl in state"))?
-        .to_string();
-    let target_json = PathBuf::from(
-        state["targetJson"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
-    );
-
-    let env = state["env"].as_str().unwrap_or("?");
-    let total_steps = state["steps"].as_array().map(|a| a.len()).unwrap_or(0);
+    let rpc_url = state.rpc_url.clone();
+    let target_json = state.target_json.clone();
+    let env = state.env;
+    let total_steps = state.steps.len();
     let deploy_start = Instant::now();
 
     ui::section(&format!("Deploy {axelar_id}"));
-    ui::kv("environment", env);
+    ui::kv("environment", env.as_str());
     ui::kv("rpc", &rpc_url);
     ui::kv("steps", &total_steps.to_string());
 
@@ -95,17 +91,25 @@ pub async fn run(
 
     // --- Pre-flight: check EVM deployer balances ---
     {
-        let key_fields: &[(&str, &str)] = &[
-            ("deployer", "deployerPrivateKey"),
-            ("gateway deployer", "gatewayDeployerPrivateKey"),
-            ("gas service deployer", "gasServiceDeployerPrivateKey"),
-            ("ITS deployer", "itsDeployerPrivateKey"),
-        ];
         let mut wallets: Vec<(&str, Address)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for &(label, state_key) in key_fields {
-            if let Some(pk_str) = ctx.state[state_key].as_str()
-                && let Ok(signer) = pk_str.parse::<PrivateKeySigner>()
+        for (label, pk_str) in [
+            ("deployer", ctx.state.deployer_private_key.as_deref()),
+            (
+                "gateway deployer",
+                ctx.state.gateway_deployer_private_key.as_deref(),
+            ),
+            (
+                "gas service deployer",
+                ctx.state.gas_service_deployer_private_key.as_deref(),
+            ),
+            (
+                "ITS deployer",
+                ctx.state.its_deployer_private_key.as_deref(),
+            ),
+        ] {
+            if let Some(pk) = pk_str
+                && let Ok(signer) = pk.parse::<PrivateKeySigner>()
             {
                 let addr = signer.address();
                 if seen.insert(addr) {
@@ -127,7 +131,7 @@ pub async fn run(
     }
 
     loop {
-        let (step_idx, step) = match next_pending_step(&ctx.state) {
+        let (step_idx, step_ref) = match next_pending_step(&ctx.state) {
             Some(s) => s,
             None => {
                 print_completion_message(&ctx.axelar_id, deploy_start);
@@ -135,8 +139,10 @@ pub async fn run(
             }
         };
 
-        let step_name = step["name"].as_str().unwrap_or("?").to_string();
-        let step_kind = step["kind"].as_str().unwrap_or("?").to_string();
+        // Clone the step so step handlers can mutate `ctx.state` (which
+        // contains the same step) without holding an immutable borrow.
+        let step: Step = step_ref.clone();
+        let step_name = step.name.clone();
         let step_start = Instant::now();
 
         ui::step_header(step_idx + 1, total_steps, &step_name);
@@ -159,54 +165,66 @@ pub async fn run(
             if let Some(ref pk) = private_key {
                 return Ok(pk.clone());
             }
-            let state_key = match step_name {
-                "EvmCompatibilityCheck" => "deployerPrivateKey",
-                "ConstAddressDeployer" | "Create3Deployer" => "deployerPrivateKey",
-                "DeployInterchainTokenService" => "itsDeployerPrivateKey",
-                "AxelarGateway" => "gatewayDeployerPrivateKey",
-                "Operators"
+            let (label, pk_opt) = match step_name {
+                "EvmCompatibilityCheck" | "ConstAddressDeployer" | "Create3Deployer" => (
+                    "deployerPrivateKey",
+                    ctx.state.deployer_private_key.as_deref(),
+                ),
+                "DeployInterchainTokenService" => (
+                    "itsDeployerPrivateKey",
+                    ctx.state.its_deployer_private_key.as_deref(),
+                ),
+                "AxelarGateway"
+                | "Operators"
                 | "RegisterOperators"
                 | "TransferOperatorsOwnership"
-                | "TransferGatewayOwnership" => "gatewayDeployerPrivateKey",
-                "TransferGasServiceOwnership" => "gasServiceDeployerPrivateKey",
-                "AxelarGasService" => "gasServiceDeployerPrivateKey",
+                | "TransferGatewayOwnership" => (
+                    "gatewayDeployerPrivateKey",
+                    ctx.state.gateway_deployer_private_key.as_deref(),
+                ),
+                "TransferGasServiceOwnership" | "AxelarGasService" => (
+                    "gasServiceDeployerPrivateKey",
+                    ctx.state.gas_service_deployer_private_key.as_deref(),
+                ),
                 _ => return Err(eyre::eyre!("--private-key required for step {step_name}")),
             };
-            ctx.state[state_key]
-                .as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "no {state_key} in state and --private-key not provided. Run init with the key or pass --private-key"
-                    )
-                })
+            pk_opt.map(std::string::ToString::to_string).ok_or_else(|| {
+                eyre::eyre!(
+                    "no {label} in state and --private-key not provided. Run init with the key or pass --private-key"
+                )
+            })
         };
 
-        match step_kind.as_str() {
-            "evm-compat" => {
+        match &step.kind {
+            StepKind::EvmCompat => {
                 let pk = resolve_evm_key(&step_name)?;
                 steps::evm_compat::run(&ctx, &pk).await?;
             }
-
-            "deploy-create" | "deploy-create2" => {
+            StepKind::DeployCreate => {
                 let pk = resolve_evm_key(&step_name)?;
                 let ap = resolved_artifact
                     .as_ref()
                     .ok_or_else(|| eyre::eyre!("--artifact-path required for deploy steps"))?;
-                steps::evm_deploy::run(&mut ctx, &step_name, &step_kind, &pk, ap, &salt).await?;
+                steps::evm_deploy::run(&mut ctx, &step_name, "deploy-create", &pk, ap, &salt)
+                    .await?;
             }
-
-            "register-operators" => {
+            StepKind::DeployCreate2 => {
+                let pk = resolve_evm_key(&step_name)?;
+                let ap = resolved_artifact
+                    .as_ref()
+                    .ok_or_else(|| eyre::eyre!("--artifact-path required for deploy steps"))?;
+                steps::evm_deploy::run(&mut ctx, &step_name, "deploy-create2", &pk, ap, &salt)
+                    .await?;
+            }
+            StepKind::RegisterOperators => {
                 let pk = resolve_evm_key(&step_name)?;
                 steps::register_operators::run(&ctx, &pk).await?;
             }
-
-            "transfer-ownership" => {
+            StepKind::TransferOwnership { .. } => {
                 let pk = resolve_evm_key(&step_name)?;
                 steps::transfer_ownership::run(&ctx, &step, &pk).await?;
             }
-
-            "deploy-gateway" => {
+            StepKind::DeployGateway { .. } => {
                 let pk = resolve_evm_key(&step_name)?;
                 let impl_art = resolved_artifact.as_ref().ok_or_else(|| {
                     eyre::eyre!("--artifact-path required (implementation artifact)")
@@ -217,32 +235,25 @@ pub async fn run(
                 steps::deploy_gateway::run(&mut ctx, step_idx, &step, &pk, impl_art, proxy_art)
                     .await?;
             }
-
-            "predict-address" => {
+            StepKind::PredictAddress => {
                 steps::predict_address::run(&mut ctx).await?;
             }
-
-            "config-edit" => {
+            StepKind::ConfigEdit => {
                 steps::config_edit::run(&ctx)?;
             }
-
-            "cosmos-tx" => {
+            StepKind::CosmosTx { .. } => {
                 steps::cosmos_tx::run(&mut ctx, &step, &step_name).await?;
             }
-
-            "cosmos-poll" => {
+            StepKind::CosmosPoll { .. } => {
                 steps::cosmos_poll::run(&ctx, &step).await?;
             }
-
-            "cosmos-query" => {
+            StepKind::CosmosQuery => {
                 steps::cosmos_query::run(&ctx).await?;
             }
-
-            "wait-verifier-set" => {
+            StepKind::WaitVerifierSet => {
                 steps::wait_verifier_set::run(&ctx).await?;
             }
-
-            "deploy-upgradable" => {
+            StepKind::DeployUpgradable { .. } => {
                 let pk = resolve_evm_key(&step_name)?;
                 let impl_art = resolved_artifact.as_ref().ok_or_else(|| {
                     eyre::eyre!("--artifact-path required (implementation artifact)")
@@ -255,19 +266,14 @@ pub async fn run(
                 )
                 .await?;
             }
-
-            "deploy-its" => {
+            StepKind::DeployIts { .. } => {
                 let pk = resolve_evm_key(&step_name)?;
                 steps::deploy_its::run(&mut ctx, step_idx, &step, &pk).await?;
-            }
-
-            other => {
-                return Err(eyre::eyre!("unknown step kind: {other}"));
             }
         }
 
         mark_step_completed(&mut ctx.state, step_idx);
-        save_state(&ctx.axelar_id, &ctx.state)?;
+        save_state(&ctx.state)?;
         ui::success(&format!(
             "{step_name} completed ({})",
             ui::format_elapsed(step_start)

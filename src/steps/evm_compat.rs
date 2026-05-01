@@ -143,8 +143,13 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
 
     let mut checks: Vec<Check> = Vec::new();
 
-    // 1. eth_chainId
-    let expected_chain_id = ctx.state["chainId"].as_u64();
+    // 1. eth_chainId — `chainId` was never actually persisted into the
+    // state file (init.rs reads CHAIN_ID env var only for the target_json
+    // chain entry), so this expectation is always None today. Preserving
+    // that behaviour: if/when we want to enforce the chainId, add an
+    // `expected_chain_id: Option<u64>` field to `State` and populate it
+    // in init.rs.
+    let expected_chain_id: Option<u64> = None;
     match provider.get_chain_id().await {
         Ok(id) => {
             if let Some(expected) = expected_chain_id {

@@ -43,20 +43,13 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let state = read_state(&axelar_id)?;
     let start = Instant::now();
 
-    let rpc_url: String = state["rpcUrl"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no rpcUrl in state"))?
-        .to_string();
-    let target_json = PathBuf::from(
-        state["targetJson"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("no targetJson in state"))?,
-    );
+    let rpc_url = state.rpc_url.clone();
+    let target_json = state.target_json.clone();
 
-    let private_key = state["deployerPrivateKey"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?
-        .to_string();
+    let private_key = state
+        .deployer_private_key
+        .clone()
+        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
     let deployer_address = signer.address();
@@ -262,10 +255,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // ── Amplifier routing: source → hub ─────────────────────────────────
     ui::section("Amplifier Routing (source → hub)");
 
-    let mnemonic = state["mnemonic"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no mnemonic in state"))?;
-    let (signing_key, axelar_address) = derive_axelar_wallet(mnemonic)?;
+    let (signing_key, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&target_json)?;
 
     let cosm_gateway = read_axelar_contract_field(

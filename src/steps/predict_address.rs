@@ -1,19 +1,15 @@
-use alloy::{
-    primitives::Address,
-    providers::{Provider, ProviderBuilder},
-};
+use alloy::providers::{Provider, ProviderBuilder};
 use eyre::Result;
-use serde_json::json;
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::compute_create_address;
 use crate::ui;
 
 pub async fn run(ctx: &mut DeployContext) -> Result<()> {
-    let gateway_deployer_str = ctx.state["gatewayDeployer"]
-        .as_str()
+    let gateway_deployer = ctx
+        .state
+        .gateway_deployer
         .ok_or_else(|| eyre::eyre!("no gatewayDeployer in state. Run init first"))?;
-    let gateway_deployer: Address = gateway_deployer_str.parse()?;
 
     let provider = ProviderBuilder::new().connect_http(ctx.rpc_url.parse()?);
     let nonce = provider.get_transaction_count(gateway_deployer).await?;
@@ -24,7 +20,7 @@ pub async fn run(ctx: &mut DeployContext) -> Result<()> {
     ui::kv("proxy nonce (impl+1)", &proxy_nonce.to_string());
     ui::address("predicted gateway proxy", &format!("{predicted}"));
 
-    ctx.state["predictedGatewayAddress"] = json!(format!("{predicted}"));
+    ctx.state.predicted_gateway_address = Some(predicted);
 
     Ok(())
 }
