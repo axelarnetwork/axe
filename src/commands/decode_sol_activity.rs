@@ -172,7 +172,7 @@ pub async fn run(
             Err(_) => continue,
         };
 
-        let rpc = RpcClient::new_with_commitment(&entry.rpc_url, CommitmentConfig::confirmed());
+        let rpc = crate::solana::rpc_client(&entry.rpc_url);
 
         let sigs = match rpc.get_signatures_for_address_with_config(
             &pubkey,

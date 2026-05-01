@@ -825,10 +825,7 @@ async fn poll_pipeline_its_hub(
         return;
     }
 
-    let sol_rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    ));
+    let sol_rpc_client = Arc::new(crate::solana::rpc_client(solana_rpc));
 
     let spinner = ui::wait_spinner("verifying ITS pipeline (starting)...");
     let mut last_progress = Instant::now();
@@ -1322,10 +1319,7 @@ pub async fn verify_onchain_solana_streaming(
         &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
     )?;
 
-    let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    ));
+    let rpc_client = Arc::new(crate::solana::rpc_client(solana_rpc));
 
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
         DestinationChecker::Solana {
@@ -1444,10 +1438,7 @@ pub async fn verify_onchain_solana(
         })
         .collect();
 
-    let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    ));
+    let rpc_client = Arc::new(crate::solana::rpc_client(solana_rpc));
 
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
         DestinationChecker::Solana {
@@ -2222,10 +2213,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
         &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
     )?;
 
-    let sol_rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    );
+    let sol_rpc_client = crate::solana::rpc_client(solana_rpc);
 
     ui::kv("deploy message ID", deploy_message_id);
     let spinner =

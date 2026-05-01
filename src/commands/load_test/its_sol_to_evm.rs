@@ -78,10 +78,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &main_keypair.pubkey(),
         solana::MIN_SOL_SEND_LAMPORTS,
     )?;
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
-        &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
-    );
+    let rpc_client = solana::rpc_client(&args.source_rpc);
 
     // --- Gas value ---
     let gas_value: u64 = match &args.gas_value {

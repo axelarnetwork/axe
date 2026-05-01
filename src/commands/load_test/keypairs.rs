@@ -6,7 +6,6 @@ use anchor_lang::prelude::system_instruction;
 use eyre::{Result, eyre};
 use indicatif::{ProgressBar, ProgressStyle};
 use solana_client::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
     message::Message,
     signature::{Keypair, SeedDerivable},
@@ -51,7 +50,7 @@ pub fn derive_keypairs(main: &Keypair, count: usize) -> Result<Vec<Keypair>> {
 /// Shows a progress bar during funding. Returns the per-key balance after funding.
 #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Result<Vec<u64>> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = crate::solana::rpc_client(rpc_url);
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
 
     // Check which keys need funding
@@ -146,7 +145,7 @@ pub fn ensure_funded_for_sustained(
         .max(TARGET_LAMPORTS_PER_KEY);
     let min_needed = target / 2; // top up when below half
 
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = crate::solana::rpc_client(rpc_url);
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
 
     let mut balances: Vec<u64> = Vec::with_capacity(derived.len());

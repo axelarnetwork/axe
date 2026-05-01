@@ -37,6 +37,13 @@ pub const MIN_SOL_ITS_LAMPORTS: u64 = 100_000_000; // 0.1 SOL
 /// so callers don't sprinkle the base58 literal across the codebase.
 pub const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
 
+/// Construct an `RpcClient` with the canonical "confirmed" commitment level.
+/// Replaces the `RpcClient::new_with_commitment(rpc, CommitmentConfig::confirmed())`
+/// boilerplate scattered across 15+ sites.
+pub fn rpc_client(rpc_url: &str) -> RpcClient {
+    RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed())
+}
+
 /// Compute-unit limit applied via ComputeBudget instructions before our own
 /// gateway/ITS calls. 400k matches the published per-tx cap and gives our
 /// `verify_signature` + `approve_message` step plenty of headroom.
@@ -58,7 +65,7 @@ pub fn check_solana_balance(
     pubkey: &Pubkey,
     min_lamports: u64,
 ) -> Result<()> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let balance = rpc_client.get_balance(pubkey).map_err(|e| {
         eyre::eyre!("failed to query Solana balance for {pubkey} on {rpc_url}: {e}")
     })?;
@@ -174,7 +181,7 @@ pub fn send_call_contract(
     payload: &[u8],
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
     let (event_authority_pda, _) =
@@ -306,7 +313,7 @@ pub fn send_its_deploy_interchain_token(
     initial_supply: u64,
     minter: Option<&Pubkey>,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -393,7 +400,7 @@ pub fn send_its_deploy_remote_interchain_token(
     destination_chain: &str,
     gas_value: u64,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -479,7 +486,7 @@ pub fn send_its_interchain_transfer(
     gas_value: u64,
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
 
     let (its_root_pda, _) = find_its_root_pda();
@@ -643,7 +650,7 @@ pub fn extract_gateway_call_contract_payload(
         UiInnerInstructions, UiInstruction, option_serializer::OptionSerializer,
     };
 
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let sig: Signature = signature_str
         .parse()
         .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
@@ -712,7 +719,7 @@ pub fn extract_gateway_call_contract_payload(
 /// inner_instructions array. We find the last gateway invoke, which is the
 /// `call_contract` that emits the `CallContractEvent`.
 pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = rpc_client(rpc_url);
     let sig: Signature = signature_str
         .parse()
         .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
@@ -803,7 +810,7 @@ pub fn initialize_verification_session(
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = rpc_client(rpc_url);
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -868,7 +875,7 @@ pub fn verify_signature(
     signing_verifier_set_merkle_root: [u8; 32],
     verifier_info: SigningVerifierSetInfo,
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = rpc_client(rpc_url);
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -939,7 +946,7 @@ pub fn approve_message(
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = rpc_client(rpc_url);
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -1111,7 +1118,7 @@ pub fn execute_on_memo(
     message: solana_axelar_std::Message,
     payload: &[u8],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = rpc_client(rpc_url);
     let gateway_id = solana_axelar_gateway::id();
     let memo_id = solana_axelar_memo::id();
 

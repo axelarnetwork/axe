@@ -1,6 +1,5 @@
 use eyre::{Result, bail};
 use owo_colors::OwoColorize;
-use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
@@ -923,7 +922,7 @@ fn try_fetch_transaction_from_any_network(
     sig: &Signature,
 ) -> Result<(String, EncodedConfirmedTransactionWithStatusMeta)> {
     for (network, rpc_url) in SOLANA_RPCS {
-        let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+        let rpc = crate::solana::rpc_client(rpc_url);
         if let Ok(data) = rpc.get_transaction_with_config(
             sig,
             solana_client::rpc_config::RpcTransactionConfig {
