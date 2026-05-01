@@ -28,6 +28,13 @@ const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
 
 /// Default gas value for an ITS *transfer* on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
+///
+/// 500k lamports (~0.0005 SOL) covers the destination-side
+/// `execute → _giveToken → ERC20.transfer` on a typical EVM relayer quote.
+/// Earlier 100k was a hair too low and the public testnet relayer reverted
+/// with `availableGasBalance.amount must be positive: -2449`. For very-high-
+/// throughput burst tests where the per-tx cost matters, override with
+/// `--gas-value`.
 fn default_gas_value() -> u64 {
     #[cfg(feature = "devnet-amplifier")]
     {
@@ -35,7 +42,7 @@ fn default_gas_value() -> u64 {
     }
     #[cfg(not(feature = "devnet-amplifier"))]
     {
-        100_000
+        500_000
     }
 }
 
