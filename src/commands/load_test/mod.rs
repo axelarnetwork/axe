@@ -24,8 +24,7 @@ use serde_json::json;
 use owo_colors::OwoColorize;
 
 use crate::cosmos::read_axelar_contract_field;
-use crate::evm::read_artifact_bytecode;
-use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
+use crate::evm::{broadcast_and_log, read_artifact_bytecode};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -1360,28 +1359,10 @@ async fn deploy_sender_receiver<P: alloy::providers::Provider>(
 
     let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
     let pending = provider.send_transaction(tx).await?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash("deploy tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "deploy tx timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    let addr = receipt
+    let receipt = broadcast_and_log(pending, "deploy tx").await?;
+    receipt
         .contract_address
-        .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
-
-    ui::success(&format!(
-        "deployed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
-    Ok(addr)
+        .ok_or_else(|| eyre::eyre!("no contract address in receipt"))
 }
 
 #[allow(clippy::float_arithmetic)]

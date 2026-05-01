@@ -31,7 +31,7 @@ use crate::preflight;
 use crate::state::read_state;
 use crate::timing::{
     AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_ATTEMPTS_10MIN, AMPLIFIER_POLL_INTERVAL,
-    DEST_CHAIN_POLL_ATTEMPTS, DEST_CHAIN_POLL_INTERVAL, EVM_TX_RECEIPT_TIMEOUT,
+    DEST_CHAIN_POLL_ATTEMPTS, DEST_CHAIN_POLL_INTERVAL,
 };
 use crate::ui;
 use crate::utils::read_contract_address;
@@ -137,23 +137,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         .value(U256::ZERO);
 
     let pending = deploy_call.send().await?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash("tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "tx {tx_hash} timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    let receipt = crate::evm::broadcast_and_log(pending, "tx").await?;
 
     // Extract tokenId from InterchainTokenDeployed event logs
     let (token_id, local_token_addr) = extract_token_deployed_event(&receipt)?;
@@ -196,22 +180,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         }
     };
     let tx_hash = *pending.tx_hash();
-    ui::tx_hash("tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "tx {tx_hash} timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    let receipt = crate::evm::broadcast_and_log(pending, "tx").await?;
 
     // Extract ContractCall event to get message details
     let (event_index, payload, payload_hash, destination_chain, destination_address) =
@@ -359,22 +328,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     let pending = transfer_call.send().await?;
     let tx_hash = *pending.tx_hash();
-    ui::tx_hash("tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "tx {tx_hash} timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    let receipt = crate::evm::broadcast_and_log(pending, "tx").await?;
 
     // Extract ContractCall event for the transfer
     let (xfer_event_index, xfer_payload, xfer_payload_hash, xfer_dest_chain, xfer_dest_addr) =
@@ -1792,21 +1746,7 @@ async fn relay_to_destination<P: Provider>(
         .to(dst_evm_gateway)
         .input(Bytes::from(execute_data).into());
     let pending_approve = dst_provider.send_transaction(approve_tx).await?;
-    let approve_hash = *pending_approve.tx_hash();
-    ui::tx_hash("evm approve tx", &format!("{approve_hash}"));
-    let approve_receipt =
-        tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_approve.get_receipt())
-            .await
-            .map_err(|_| {
-                eyre::eyre!(
-                    "approve tx timed out after {}s",
-                    EVM_TX_RECEIPT_TIMEOUT.as_secs()
-                )
-            })??;
-    ui::success(&format!(
-        "approve confirmed in block {}",
-        approve_receipt.block_number.unwrap_or(0)
-    ));
+    let _approve_receipt = crate::evm::broadcast_and_log(pending_approve, "evm approve tx").await?;
 
     // Derive commandId locally from (sourceChain, messageId). The amplifier
     // gateway computes it as `keccak256(sourceChain || "_" || messageId)` and
@@ -1847,20 +1787,7 @@ async fn relay_to_destination<P: Provider>(
         Bytes::copy_from_slice(dest_payload),
     );
     let pending_exec = exec_call.send().await?;
-    let exec_hash = *pending_exec.tx_hash();
-    ui::tx_hash("its execute tx", &format!("{exec_hash}"));
-    let exec_receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_exec.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "ITS execute tx timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-    ui::success(&format!(
-        "ITS execute confirmed in block {}",
-        exec_receipt.block_number.unwrap_or(0)
-    ));
+    let _exec_receipt = crate::evm::broadcast_and_log(pending_exec, "its execute tx").await?;
 
     Ok(command_id)
 }

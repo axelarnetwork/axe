@@ -2,12 +2,17 @@ use std::fs;
 
 use alloy::{
     hex,
+    network::{Network, ReceiptResponse},
     primitives::{Address, Bytes, FixedBytes, keccak256},
+    providers::PendingTransactionBuilder,
     sol,
     sol_types::{SolCall, SolValue},
 };
 use eyre::Result;
 use serde_json::Value;
+
+use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
+use crate::ui;
 
 sol! {
     #[sol(rpc)]
@@ -357,4 +362,35 @@ pub fn compute_create_address(sender: Address, nonce: u64) -> Address {
 
     let hash = keccak256(&stream);
     Address::from_slice(&hash[12..])
+}
+
+/// Print the tx hash, wait for the receipt with the standard timeout, and
+/// log the confirmation block. Replaces the 8-line broadcast-and-await block
+/// repeated across the deploy/test/load-test commands.
+///
+/// `label` controls the prefix in both the kv print (e.g. "tx" → `tx: 0x…`)
+/// and the timeout error (e.g. "{label} {tx_hash} timed out after Ns").
+pub async fn broadcast_and_log<N>(
+    pending: PendingTransactionBuilder<N>,
+    label: &str,
+) -> Result<N::ReceiptResponse>
+where
+    N: Network,
+{
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash(label, &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "{label} {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
+    ui::success(&format!(
+        "confirmed in block {}",
+        receipt.block_number().unwrap_or(0)
+    ));
+    Ok(receipt)
 }

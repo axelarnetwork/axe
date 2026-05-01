@@ -26,8 +26,7 @@ use crate::commands::test_its::{
     extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
 use crate::cosmos::read_axelar_contract_field;
-use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
-use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
+use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService, broadcast_and_log};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -669,17 +668,7 @@ async fn deploy_its_token<P: Provider>(
         .value(U256::ZERO);
 
     let pending = deploy_call.send().await?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash("deploy tx", &format!("{tx_hash}"));
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre!(
-                "deploy tx timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
+    let receipt = broadcast_and_log(pending, "deploy tx").await?;
 
     let (token_id, token_addr) = extract_token_deployed_event(&receipt)?;
     ui::kv("token ID", &format!("{token_id}"));
@@ -694,21 +683,7 @@ async fn deploy_its_token<P: Provider>(
 
     let pending = remote_call.send().await?;
     let tx_hash = *pending.tx_hash();
-    ui::tx_hash("remote deploy tx", &format!("{tx_hash}"));
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre!(
-                "remote deploy tx timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "remote deploy confirmed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    let receipt = broadcast_and_log(pending, "remote deploy tx").await?;
 
     // Extract the remote deploy message ID from the receipt
     let deploy_message_id = match extract_contract_call_event(&receipt) {

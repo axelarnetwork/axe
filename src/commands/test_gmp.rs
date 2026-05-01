@@ -24,9 +24,7 @@ use crate::cosmos::{
 use crate::evm::{AxelarAmplifierGateway, ContractCall, SenderReceiver, read_artifact_bytecode};
 use crate::preflight;
 use crate::state::{read_state, save_state};
-use crate::timing::{
-    AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL, EVM_TX_RECEIPT_TIMEOUT,
-};
+use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -113,22 +111,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     let pending = call.send().await?;
     let tx_hash = *pending.tx_hash();
-    ui::tx_hash("tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "tx {tx_hash} timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    let receipt = crate::evm::broadcast_and_log(pending, "tx").await?;
 
     // --- Extract ContractCall event index from receipt ---
     let event_index = receipt
@@ -280,24 +263,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         .to(gateway_addr)
         .input(Bytes::from(execute_data).into());
     let pending_approve = provider.send_transaction(approve_tx).await?;
-    let approve_hash = *pending_approve.tx_hash();
-    ui::tx_hash("tx", &format!("{approve_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let approve_receipt =
-        tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_approve.get_receipt())
-            .await
-            .map_err(|_| {
-                eyre::eyre!(
-                    "approve tx timed out after {}s",
-                    EVM_TX_RECEIPT_TIMEOUT.as_secs()
-                )
-            })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        approve_receipt.block_number.unwrap_or(0)
-    ));
+    let approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
 
     // Extract commandId from the ContractCallApproved event (topic[1])
     let command_id = approve_receipt
@@ -341,23 +307,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         Bytes::from(payload_bytes.clone()),
     );
     let pending_exec = exec_call.send().await?;
-    let exec_hash = *pending_exec.tx_hash();
-    ui::tx_hash("tx", &format!("{exec_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let exec_receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending_exec.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "execute tx timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
-    ui::success(&format!(
-        "confirmed in block {}",
-        exec_receipt.block_number.unwrap_or(0)
-    ));
+    let _exec_receipt = crate::evm::broadcast_and_log(pending_exec, "tx").await?;
 
     // Verify the message was stored
     let stored_message = sr_contract.message().call().await?;
@@ -769,26 +719,9 @@ async fn deploy_sender_receiver<P: Provider>(
     let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
 
     let pending = provider.send_transaction(tx).await?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash("deploy tx", &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-
-    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!(
-                "deploy tx {tx_hash} timed out after {}s",
-                EVM_TX_RECEIPT_TIMEOUT.as_secs()
-            )
-        })??;
-
+    let receipt = crate::evm::broadcast_and_log(pending, "deploy tx").await?;
     let addr = receipt
         .contract_address
         .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
-
-    ui::success(&format!(
-        "deployed in block {}",
-        receipt.block_number.unwrap_or(0)
-    ));
     Ok(addr)
 }
