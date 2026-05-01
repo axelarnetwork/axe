@@ -33,6 +33,21 @@ pub const MIN_SOL_RELAY_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
 /// + ATAs + 2x cross-chain GMP gas, plus fees.
 pub const MIN_SOL_ITS_LAMPORTS: u64 = 100_000_000; // 0.1 SOL
 
+/// Solana System Program ID — `11111111111111111111111111111111`. Named here
+/// so callers don't sprinkle the base58 literal across the codebase.
+pub const SYSTEM_PROGRAM_ID: Pubkey = Pubkey::from_str_const("11111111111111111111111111111111");
+
+/// Compute-unit limit applied via ComputeBudget instructions before our own
+/// gateway/ITS calls. 400k matches the published per-tx cap and gives our
+/// `verify_signature` + `approve_message` step plenty of headroom.
+pub const DEFAULT_CU_LIMIT: u32 = 400_000;
+
+/// Max attempts when polling for a confirmed Solana transaction (see
+/// `fetch_confirmed_tx`). 15 attempts × exponential backoff capped at 5s
+/// per attempt totals ~60s of wait, enough to cover testnet RPC lag past
+/// `send_and_confirm`.
+const SOL_TX_FETCH_MAX_ATTEMPTS: u32 = 15;
+
 /// Preflight: ensure a Solana wallet on the given RPC has at least `min_lamports`.
 /// Errors with a clear "fund this address" message if the account is missing or
 /// underfunded — replaces the cryptic
@@ -211,10 +226,7 @@ pub fn send_call_contract(
             accounts: vec![
                 AccountMeta::new(fee_payer, true),
                 AccountMeta::new(treasury_pda, false),
-                AccountMeta::new_readonly(
-                    Pubkey::from_str_const("11111111111111111111111111111111"),
-                    false,
-                ),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
                 AccountMeta::new_readonly(gas_event_authority, false),
                 AccountMeta::new_readonly(solana_axelar_gas_service::id(), false),
             ],
@@ -331,10 +343,7 @@ pub fn send_its_deploy_interchain_token(
     let accounts = vec![
         AccountMeta::new(fee_payer, true),
         AccountMeta::new_readonly(deployer, true),
-        AccountMeta::new_readonly(
-            Pubkey::from_str_const("11111111111111111111111111111111"),
-            false,
-        ),
+        AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         AccountMeta::new_readonly(its_root_pda, false),
         AccountMeta::new(token_manager_pda, false),
         AccountMeta::new(mint, false),
@@ -422,10 +431,7 @@ pub fn send_its_deploy_remote_interchain_token(
         AccountMeta::new_readonly(token_manager_pda, false),
         AccountMeta::new_readonly(gateway_root_pda, false),
         AccountMeta::new_readonly(gateway_program, false),
-        AccountMeta::new_readonly(
-            Pubkey::from_str_const("11111111111111111111111111111111"),
-            false,
-        ),
+        AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         AccountMeta::new_readonly(its_root_pda, false),
         AccountMeta::new_readonly(call_contract_signing_pda, false),
         AccountMeta::new_readonly(gateway_event_authority, false),
@@ -513,10 +519,7 @@ pub fn send_its_interchain_transfer(
         AccountMeta::new(*mint, false),
         AccountMeta::new(*source_account, false),
         AccountMeta::new(token_manager_ata, false),
-        AccountMeta::new_readonly(
-            Pubkey::from_str_const("11111111111111111111111111111111"),
-            false,
-        ),
+        AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
         AccountMeta::new_readonly(event_authority, false),
         AccountMeta::new_readonly(solana_axelar_its::id(), false),
     ];
@@ -604,7 +607,7 @@ fn fetch_confirmed_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
 ) -> Result<Option<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta>> {
-    for i in 0..15 {
+    for i in 0..SOL_TX_FETCH_MAX_ATTEMPTS {
         match rpc_client.get_transaction(signature, UiTransactionEncoding::Json) {
             Ok(tx) => return Ok(Some(tx)),
             Err(_) => {
@@ -905,7 +908,7 @@ pub fn verify_signature(
     };
 
     // SetComputeUnitLimit: program_id = ComputeBudget111..., data = [0x02, limit_u32_le]
-    let cu_limit: u32 = 400_000;
+    let cu_limit: u32 = DEFAULT_CU_LIMIT;
     let cu_ix = Instruction {
         program_id: "ComputeBudget111111111111111111111111111111"
             .parse()
@@ -1166,7 +1169,7 @@ pub fn execute_on_memo(
         data: ix_data,
     };
 
-    let cu_limit: u32 = 400_000;
+    let cu_limit: u32 = DEFAULT_CU_LIMIT;
     let cu_ix = Instruction {
         program_id: "ComputeBudget111111111111111111111111111111"
             .parse()

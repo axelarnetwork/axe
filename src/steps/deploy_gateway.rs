@@ -35,8 +35,16 @@ pub async fn run(
 
     let domain_separator = compute_domain_separator(&ctx.target_json, &ctx.axelar_id)?;
 
-    let previous_signers_retention = U256::from(15);
-    let minimum_rotation_delay = U256::from(3600);
+    // How many past verifier sets the gateway accepts proofs from after a
+    // rotation. 15 means a rotation is reversible for 15 cycles before the
+    // old set goes cold.
+    const PREVIOUS_SIGNERS_RETENTION: u64 = 15;
+    // Minimum seconds between rotations. 1h matches Axelar's published
+    // gateway deployment defaults.
+    const MIN_ROTATION_DELAY_SECS: u64 = 3600;
+
+    let previous_signers_retention = U256::from(PREVIOUS_SIGNERS_RETENTION);
+    let minimum_rotation_delay = U256::from(MIN_ROTATION_DELAY_SECS);
 
     // --- Tx 1: Deploy implementation (skip if already deployed) ---
     let (impl_addr, impl_codehash) = if let Some(addr) = step.implementation_address() {

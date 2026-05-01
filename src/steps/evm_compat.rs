@@ -24,6 +24,10 @@ sol! {
     }
 }
 
+/// Probe value the test contract is updated to and read back. Any non-zero
+/// number works — 42 is conventional and easy to spot in logs.
+const COMPAT_TEST_VALUE: u64 = 42;
+
 /// Creation bytecode for TestRpcCompatibility.sol (compiled with solc 0.8.9, london).
 /// Source: axelar-cgp-solidity/contracts/test/TestRpcCompatibility.sol
 /// The test contract is not included in the published npm package, so we embed it here.
@@ -492,7 +496,7 @@ async fn check_estimate_gas<P: Provider>(
     addr: Address,
     checks: &mut Vec<Check>,
 ) {
-    let update_calldata = contract.updateValue(U256::from(42));
+    let update_calldata = contract.updateValue(U256::from(COMPAT_TEST_VALUE));
     let estimate_tx = TransactionRequest::default()
         .to(addr)
         .input(update_calldata.calldata().clone().into());
@@ -513,7 +517,11 @@ async fn send_update_value<P: Provider>(
     contract: &TestRpcCompat::TestRpcCompatInstance<&P>,
     checks: &mut Vec<Check>,
 ) -> Option<(alloy::primitives::TxHash, u64, Vec<Log>)> {
-    match contract.updateValue(U256::from(42)).send().await {
+    match contract
+        .updateValue(U256::from(COMPAT_TEST_VALUE))
+        .send()
+        .await
+    {
         Ok(pending) => {
             let hash = *pending.tx_hash();
             match pending.get_receipt().await {
@@ -563,7 +571,7 @@ async fn check_get_value_42<P: Provider>(
     checks: &mut Vec<Check>,
 ) {
     match contract.getValue().call().await {
-        Ok(val) if val == U256::from(42) => {
+        Ok(val) if val == U256::from(COMPAT_TEST_VALUE) => {
             checks.push(Check::pass(
                 "eth_call(getValue=42)",
                 true,
@@ -643,7 +651,7 @@ async fn run_phase_3_events<P: Provider>(
             let found = logs.iter().any(|log| {
                 log.topics().len() >= 2
                     && log.topics()[0] == event_sig
-                    && log.topics()[1] == FixedBytes::<32>::from(U256::from(42))
+                    && log.topics()[1] == FixedBytes::<32>::from(U256::from(COMPAT_TEST_VALUE))
             });
             if found {
                 get_logs_log_index = logs.first().and_then(|l| l.log_index);
