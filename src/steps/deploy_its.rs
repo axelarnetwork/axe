@@ -76,20 +76,18 @@ pub async fn run(
         .to_string();
 
     // --- Compute salts ---
-    let its_salt = ctx
-        .state
-        .its_salt
-        .ok_or_else(|| eyre::eyre!("no itsSalt in state. Set ITS_SALT in .env and re-run init"))?;
-    let its_proxy_salt = ctx.state.its_proxy_salt.ok_or_else(|| {
+    let its_salt =
+        ctx.state.its_salt.clone().ok_or_else(|| {
+            eyre::eyre!("no itsSalt in state. Set ITS_SALT in .env and re-run init")
+        })?;
+    let its_proxy_salt = ctx.state.its_proxy_salt.clone().ok_or_else(|| {
         eyre::eyre!("no itsProxySalt in state. Set ITS_PROXY_SALT in .env and re-run init")
     })?;
-    let its_salt_hex = format!("{its_salt}");
-    let its_proxy_salt_hex = format!("{its_proxy_salt}");
 
-    let helper_salt = get_salt_from_key(&format!("ITS {its_salt_hex}"));
-    let impl_salt = get_salt_from_key(&format!("ITS {its_salt_hex} Implementation"));
-    let proxy_salt = get_salt_from_key(&format!("ITS {its_proxy_salt_hex}"));
-    let factory_salt = get_salt_from_key(&format!("ITS Factory {its_proxy_salt_hex}"));
+    let helper_salt = get_salt_from_key(&format!("ITS {its_salt}"));
+    let impl_salt = get_salt_from_key(&format!("ITS {its_salt} Implementation"));
+    let proxy_salt = get_salt_from_key(&format!("ITS {its_proxy_salt}"));
+    let factory_salt = get_salt_from_key(&format!("ITS Factory {its_proxy_salt}"));
 
     ui::kv(
         "ITS salt",

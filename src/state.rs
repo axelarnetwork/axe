@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use alloy::primitives::{Address, FixedBytes};
+use alloy::primitives::Address;
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 
@@ -47,10 +47,13 @@ pub struct State {
     pub gas_service_deployer_private_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub its_deployer_private_key: Option<String>,
+    /// Versioning identifier for the ITS deployment, hashed via
+    /// `get_salt_from_key` into a 32-byte CREATE2 salt at deploy time.
+    /// Free-form string (e.g. "v2.2.0"), not on-the-wire bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub its_salt: Option<FixedBytes<32>>,
+    pub its_salt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub its_proxy_salt: Option<FixedBytes<32>>,
+    pub its_proxy_salt: Option<String>,
 
     /// The CREATE2-predicted gateway address, written by the
     /// `predict-address` step before the gateway is actually deployed.

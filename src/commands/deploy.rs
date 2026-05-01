@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy::primitives::{Address, FixedBytes};
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
 use serde_json::Value;
@@ -53,20 +53,14 @@ pub async fn run(
     if state.its_salt.is_none()
         && let Ok(s) = std::env::var("ITS_SALT")
     {
-        let bytes: FixedBytes<32> = s
-            .parse()
-            .map_err(|e| eyre::eyre!("invalid ITS_SALT (expected 0x-prefixed 32-byte hex): {e}"))?;
-        state.its_salt = Some(bytes);
         ui::info(&format!("loaded ITS_SALT from env: {s}"));
+        state.its_salt = Some(s);
     }
     if state.its_proxy_salt.is_none()
         && let Ok(s) = std::env::var("ITS_PROXY_SALT")
     {
-        let bytes: FixedBytes<32> = s.parse().map_err(|e| {
-            eyre::eyre!("invalid ITS_PROXY_SALT (expected 0x-prefixed 32-byte hex): {e}")
-        })?;
-        state.its_proxy_salt = Some(bytes);
         ui::info(&format!("loaded ITS_PROXY_SALT from env: {s}"));
+        state.its_proxy_salt = Some(s);
     }
 
     save_state(&state)?;

@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-use alloy::primitives::FixedBytes;
 use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
 use serde_json::{Value, json};
@@ -154,14 +153,12 @@ pub async fn run() -> Result<()> {
         state.its_deployer_private_key = Some(pk);
     }
     if let Some(s) = its_salt {
-        let bytes = parse_salt(&s, "ITS_SALT")?;
         ui::kv("ITS salt", &s);
-        state.its_salt = Some(bytes);
+        state.its_salt = Some(s);
     }
     if let Some(s) = its_proxy_salt {
-        let bytes = parse_salt(&s, "ITS_PROXY_SALT")?;
         ui::kv("ITS proxy salt", &s);
-        state.its_proxy_salt = Some(bytes);
+        state.its_proxy_salt = Some(s);
     }
 
     ui::section("State");
@@ -193,11 +190,4 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Parse a 0x-prefixed hex string into a 32-byte salt. Used for `ITS_SALT`
-/// and `ITS_PROXY_SALT` env vars.
-fn parse_salt(s: &str, name: &str) -> Result<FixedBytes<32>> {
-    s.parse::<FixedBytes<32>>()
-        .map_err(|e| eyre::eyre!("invalid {name} (expected 0x-prefixed 32-byte hex): {e}"))
 }
