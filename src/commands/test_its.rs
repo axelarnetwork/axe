@@ -923,6 +923,7 @@ pub fn extract_contract_call_event(
 // ---------------------------------------------------------------------------
 
 const PHASE_A_STEPS: usize = 11;
+const PHASE_B_STEPS: usize = 9;
 
 const TOKEN_NAME_CFG: &str = "Axe ITS Test";
 const TOKEN_SYMBOL_CFG: &str = "AXE";
@@ -1324,6 +1325,7 @@ pub async fn run_config(
         &axelarnet_gateway,
         &axelar_rpc,
         5, // step base for ui
+        PHASE_A_STEPS,
     )
     .await?;
 
@@ -1348,8 +1350,160 @@ pub async fn run_config(
         ui::format_elapsed(start)
     ));
 
-    // Phase B is added in a follow-up commit.
-    ui::info("Phase B (interchain transfer) not yet wired up — coming next.");
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase B: interchain transfer (manual relay)
+    // ─────────────────────────────────────────────────────────────────────
+    let phase_b_start = Instant::now();
+    let amount = amount.unwrap_or(1_000_000); // 0.001 token at 9 decimals
+    let receiver_bytes = evm_signer_address.as_slice().to_vec();
+    let token_program_2022 =
+        solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let ata_program =
+        solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+    let (its_root_pda, _) = crate::solana::find_its_root_pda();
+    let (mint, _) = crate::solana::find_interchain_token_pda(&its_root_pda, &token_id);
+    let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
+        &[
+            sol_pubkey.as_ref(),
+            token_program_2022.as_ref(),
+            mint.as_ref(),
+        ],
+        &ata_program,
+    )
+    .0;
+
+    ui::section("Phase B: interchain transfer (manual relay)");
+    ui::address("mint", &mint.to_string());
+    ui::address("source ATA", &source_ata.to_string());
+    ui::kv("amount (base units)", &format!("{amount}"));
+    ui::address("receiver (EVM)", &format!("{evm_signer_address}"));
+
+    // Capture the destination ERC20 balance BEFORE the transfer so we can
+    // verify a strict delta later.
+    let erc20 = ERC20::new(dest_token_addr, &dst_provider);
+    let pre_balance = erc20
+        .balanceOf(evm_signer_address)
+        .call()
+        .await
+        .unwrap_or(U256::ZERO);
+    ui::kv("pre-transfer balance", &format!("{pre_balance}"));
+
+    // Step B1: Solana — fire the InterchainTransfer
+    ui::step_header(1, PHASE_B_STEPS, "Send InterchainTransfer (Solana → hub)");
+    let (xfer_sig, _metrics) = crate::solana::send_its_interchain_transfer(
+        &src_rpc,
+        &sol_keypair,
+        &token_id,
+        &source_ata,
+        &mint,
+        &dst_axelar_id,
+        &receiver_bytes,
+        amount,
+        gas_value,
+    )?;
+    ui::tx_hash("solana tx", &xfer_sig);
+
+    let xfer_first_leg_id = crate::solana::extract_its_message_id(&src_rpc, &xfer_sig)?;
+    ui::kv("first-leg message_id", &xfer_first_leg_id);
+
+    let xfer_gw = crate::solana::extract_gateway_call_contract_payload(&src_rpc, &xfer_sig)?;
+    ui::kv("gateway sender", &xfer_gw.sender);
+    ui::kv("gateway destination_chain", &xfer_gw.destination_chain);
+    ui::kv("gateway destination_address", &xfer_gw.destination_address);
+    ui::kv(
+        "gateway payload_hash",
+        &format!("0x{}", alloy::hex::encode(xfer_gw.payload_hash)),
+    );
+
+    // Step B2: drive source → hub
+    ui::step_header(
+        2,
+        PHASE_B_STEPS,
+        "Source → hub (verify, route, hub-execute)",
+    );
+    let xfer_payload_hash = FixedBytes::<32>::from(xfer_gw.payload_hash);
+    relay_to_hub(
+        &src_axelar_id,
+        &xfer_first_leg_id,
+        &xfer_gw.sender,
+        "axelar",
+        &its_hub_address,
+        &xfer_payload_hash,
+        &xfer_gw.payload,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &src_cosm_gateway,
+        &voting_verifier,
+        &axelarnet_gateway,
+    )
+    .await?;
+
+    // Step B3+: hub → destination (reconstruct RECEIVE_FROM_HUB envelope and drive proof + execute)
+    let xfer_inner = encode_inner_transfer(
+        &token_id,
+        sol_pubkey.to_bytes().as_slice(),
+        &receiver_bytes,
+        amount,
+        &[],
+    );
+    let xfer_dest_payload = encode_receive_from_hub(&src_axelar_id, &xfer_inner);
+
+    let _xfer_command_id = relay_to_destination(
+        &xfer_first_leg_id,
+        &src_axelar_id,
+        &xfer_dest_payload,
+        &dst_axelar_id,
+        &dst,
+        dst_its_proxy,
+        dst_evm_gateway,
+        &dst_provider,
+        &signing_key,
+        &axelar_address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        &dst_cosm_gateway,
+        &dst_multisig_prover,
+        &axelarnet_gateway,
+        &axelar_rpc,
+        3, // step base for Phase B's ui (B3..B8)
+        PHASE_B_STEPS,
+    )
+    .await?;
+
+    // Step B-final: verify ERC20 balance went up by exactly `amount`.
+    ui::step_header(
+        PHASE_B_STEPS,
+        PHASE_B_STEPS,
+        "Verify ERC20 balance on destination",
+    );
+    let post_balance = erc20.balanceOf(evm_signer_address).call().await?;
+    let delta = post_balance.saturating_sub(pre_balance);
+    ui::kv("post-transfer balance", &format!("{post_balance}"));
+    ui::kv("delta", &format!("{delta}"));
+    if delta == U256::from(amount) {
+        ui::success(&format!(
+            "receiver balance increased by exactly {amount} base units"
+        ));
+    } else {
+        return Err(eyre::eyre!(
+            "balance delta {delta} does not match expected {amount} (post={post_balance}, pre={pre_balance})"
+        ));
+    }
+
+    ui::section("Phase B complete");
+    ui::success(&format!(
+        "transfer + manual relay finished ({})",
+        ui::format_elapsed(phase_b_start)
+    ));
+
+    ui::section("All phases complete");
+    ui::success(&format!("total elapsed: {}", ui::format_elapsed(start)));
 
     Ok(())
 }
@@ -1384,31 +1538,6 @@ fn encode_send_to_hub_deploy(
     borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))
 }
 
-/// Borsh-encode a HubMessage::SendToHub{ InterchainTransfer }.
-#[allow(dead_code)]
-fn encode_send_to_hub_transfer(
-    destination_chain: &str,
-    token_id: &[u8; 32],
-    source_address: &[u8],
-    destination_address: &[u8],
-    amount: u64,
-    data: Option<Vec<u8>>,
-) -> Result<Vec<u8>> {
-    use solana_axelar_its::encoding::{HubMessage, InterchainTransfer, Message};
-    let inner = Message::InterchainTransfer(InterchainTransfer {
-        token_id: *token_id,
-        source_address: source_address.to_vec(),
-        destination_address: destination_address.to_vec(),
-        amount,
-        data,
-    });
-    let hub = HubMessage::SendToHub {
-        destination_chain: destination_chain.to_string(),
-        message: inner,
-    };
-    borsh::to_vec(&hub).map_err(|e| eyre::eyre!("borsh encode failed: {e}"))
-}
-
 /// ABI-encode the inner ITS deploy payload destined for the EVM ITS proxy.
 /// Format: `abi.encode(uint256 messageType=1, bytes32 tokenId, string name, string symbol, uint8 decimals, bytes minter)`.
 /// Note: `uint8` and `uint256` produce identical 32-byte encodings in tuple position
@@ -1433,7 +1562,6 @@ fn encode_inner_deploy(
 
 /// ABI-encode the inner ITS interchain-transfer payload.
 /// Format: `abi.encode(uint256 messageType=0, bytes32 tokenId, bytes sourceAddress, bytes destinationAddress, uint256 amount, bytes data)`.
-#[allow(dead_code)]
 fn encode_inner_transfer(
     token_id: &[u8; 32],
     source_address: &[u8],
@@ -1488,10 +1616,11 @@ async fn relay_to_destination<P: Provider>(
     axelarnet_gateway: &str,
     axelar_rpc: &str,
     step_base: usize,
+    step_total: usize,
 ) -> Result<FixedBytes<32>> {
     // Wait until the AxelarnetGateway hub has approved the first-leg message.
     // executable_messages is keyed by the *source* chain of the message.
-    ui::step_header(step_base, PHASE_A_STEPS, "Wait for hub approval");
+    ui::step_header(step_base, step_total, "Wait for hub approval");
     let spinner = ui::wait_spinner("Polling hub for approval...");
     let mut hub_approved = false;
     for i in 0..60 {
@@ -1520,7 +1649,7 @@ async fn relay_to_destination<P: Provider>(
     }
 
     // Discover the second-leg message_id
-    ui::step_header(step_base + 1, PHASE_A_STEPS, "Discover second-leg cc_id");
+    ui::step_header(step_base + 1, step_total, "Discover second-leg cc_id");
     let spinner = ui::wait_spinner("Searching tendermint for hub-execute tx...");
     let second_leg = loop_discover_second_leg(axelar_rpc, first_leg_message_id, &spinner).await?;
     spinner.finish_and_clear();
@@ -1558,7 +1687,7 @@ async fn relay_to_destination<P: Provider>(
     // Wait until the destination cosmos Gateway has the outgoing message
     ui::step_header(
         step_base + 2,
-        PHASE_A_STEPS,
+        step_total,
         "Wait for destination cosmos gateway to publish",
     );
     let spinner = ui::wait_spinner("Polling destination cosm gateway...");
@@ -1588,7 +1717,7 @@ async fn relay_to_destination<P: Provider>(
     // construct_proof on destination MultisigProver
     ui::step_header(
         step_base + 3,
-        PHASE_A_STEPS,
+        step_total,
         "construct_proof on dest MultisigProver",
     );
     let construct_proof_msg = json!({
@@ -1613,7 +1742,7 @@ async fn relay_to_destination<P: Provider>(
     ui::kv("multisig_session_id", &session_id);
 
     // Wait for proof
-    ui::step_header(step_base + 4, PHASE_A_STEPS, "Wait for proof signing");
+    ui::step_header(step_base + 4, step_total, "Wait for proof signing");
     let proof = wait_for_proof(lcd, dst_multisig_prover, &session_id).await?;
     ui::success("proof ready");
 
@@ -1625,7 +1754,7 @@ async fn relay_to_destination<P: Provider>(
     // Submit to EVM gateway
     ui::step_header(
         step_base + 5,
-        PHASE_A_STEPS,
+        step_total,
         "Submit proof to dest EVM gateway",
     );
     let approve_tx = TransactionRequest::default()
@@ -1645,19 +1774,13 @@ async fn relay_to_destination<P: Provider>(
         approve_receipt.block_number.unwrap_or(0)
     ));
 
-    // Extract commandId from ContractCallApproved event (topic[1] of log emitted by gateway)
-    let command_id = approve_receipt
-        .inner
-        .logs()
-        .iter()
-        .find_map(|log| {
-            if log.topics().len() >= 2 && log.address() == dst_evm_gateway {
-                Some(log.topics()[1])
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| eyre::eyre!("commandId not found in approve tx logs"))?;
+    // Derive commandId locally from (sourceChain, messageId). The amplifier
+    // gateway computes it as `keccak256(sourceChain || "_" || messageId)` and
+    // this avoids racing the public relayer: when it submits the same proof
+    // first, our approve tx is a no-op and emits no `ContractCallApproved`
+    // event, so parsing the receipt logs would fail.
+    let cmd_preimage = format!("axelar_{}", second_leg.message_id);
+    let command_id = keccak256(cmd_preimage.as_bytes());
     ui::kv("commandId", &format!("{command_id}"));
 
     // Sanity: isContractCallApproved on the gateway with the values we'll pass to ITS.execute
@@ -1681,7 +1804,7 @@ async fn relay_to_destination<P: Provider>(
     }
 
     // Execute on destination ITS proxy
-    ui::step_header(step_base + 6, PHASE_A_STEPS, "Execute on destination ITS");
+    ui::step_header(step_base + 6, step_total, "Execute on destination ITS");
     let its = InterchainTokenService::new(dst_its_proxy, dst_provider);
     let exec_call = its.execute(
         command_id,
@@ -1727,11 +1850,4 @@ async fn loop_discover_second_leg(
     Err(eyre::eyre!(
         "could not discover second-leg cc_id after 5 minutes"
     ))
-}
-
-// quiet warnings for items wired up in Phase B
-#[allow(dead_code)]
-fn _phase_b_placeholder() {
-    let _ = encode_send_to_hub_transfer;
-    let _ = encode_inner_transfer;
 }
