@@ -562,6 +562,28 @@ fn format_address_bytes(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+/// Build a multi-line `<label>: <value>` block with dimmed labels. Used by
+/// the borsh event decoders so each one names its fields once instead of
+/// interleaving labels and values into a positional `format!`.
+fn kv_lines<I, K, V>(rows: I) -> String
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: std::fmt::Display,
+    V: std::fmt::Display,
+{
+    rows.into_iter()
+        .map(|(k, v)| format!("{} {v}", format!("{k}:").dimmed()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Print one indented `<label>: <value>` line with the label dimmed. Used by
+/// the per-instruction arg printers so each call site reads as data, not as
+/// formatting.
+fn println_kv(indent: &str, label: &str, value: impl std::fmt::Display) {
+    println!("{indent}{} {value}", format!("{label}:").dimmed());
+}
+
 fn try_decode_interchain_transfer_sent_event(data: &[u8]) -> Option<String> {
     // token_id: [u8;32], source_address: Pubkey, source_token_account: Pubkey,
     // destination_chain: String, destination_address: Vec<u8>, amount: u64,
@@ -581,15 +603,14 @@ fn try_decode_interchain_transfer_sent_event(data: &[u8]) -> Option<String> {
     }
     let amount = u64::from_le_bytes(rest[..8].try_into().ok()?);
 
-    Some(format!(
-        "{} {token_id}\n{} {source}\n{} {source_token}\n{} \"{dest_chain}\"\n{} {dest_addr}\n{} {amount}",
-        "token_id:".dimmed(),
-        "source:".dimmed(),
-        "source_token_account:".dimmed(),
-        "destination_chain:".dimmed(),
-        "destination_address:".dimmed(),
-        "amount:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("token_id", token_id),
+        ("source", source.to_string()),
+        ("source_token_account", source_token.to_string()),
+        ("destination_chain", format!("\"{dest_chain}\"")),
+        ("destination_address", dest_addr),
+        ("amount", amount.to_string()),
+    ]))
 }
 
 fn try_decode_interchain_transfer_received_event(data: &[u8]) -> Option<String> {
@@ -612,16 +633,15 @@ fn try_decode_interchain_transfer_received_event(data: &[u8]) -> Option<String> 
     let dest_token = Pubkey::try_from(&rest[32..64]).ok()?;
     let amount = u64::from_le_bytes(rest[64..72].try_into().ok()?);
 
-    Some(format!(
-        "{} {command_id}\n{} {token_id}\n{} \"{source_chain}\"\n{} 0x{source_addr}\n{} {dest}\n{} {dest_token}\n{} {amount}",
-        "command_id:".dimmed(),
-        "token_id:".dimmed(),
-        "source_chain:".dimmed(),
-        "source_address:".dimmed(),
-        "destination:".dimmed(),
-        "destination_token_account:".dimmed(),
-        "amount:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("command_id", command_id),
+        ("token_id", token_id),
+        ("source_chain", format!("\"{source_chain}\"")),
+        ("source_address", format!("0x{source_addr}")),
+        ("destination", dest.to_string()),
+        ("destination_token_account", dest_token.to_string()),
+        ("amount", amount.to_string()),
+    ]))
 }
 
 fn try_decode_interchain_token_deployed_event(data: &[u8]) -> Option<String> {
@@ -640,14 +660,13 @@ fn try_decode_interchain_token_deployed_event(data: &[u8]) -> Option<String> {
     }
     let decimals = rest[0];
 
-    Some(format!(
-        "{} {token_id}\n{} {token_address}\n{} \"{name}\"\n{} \"{symbol}\"\n{} {decimals}",
-        "token_id:".dimmed(),
-        "token_address:".dimmed(),
-        "name:".dimmed(),
-        "symbol:".dimmed(),
-        "decimals:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("token_id", token_id),
+        ("token_address", token_address.to_string()),
+        ("name", format!("\"{name}\"")),
+        ("symbol", format!("\"{symbol}\"")),
+        ("decimals", decimals.to_string()),
+    ]))
 }
 
 fn try_decode_token_manager_deployed_event(data: &[u8]) -> Option<String> {
@@ -668,12 +687,11 @@ fn try_decode_token_manager_deployed_event(data: &[u8]) -> Option<String> {
         _ => "Unknown",
     };
 
-    Some(format!(
-        "{} {token_id}\n{} {token_manager}\n{} {tm_type_str}",
-        "token_id:".dimmed(),
-        "token_manager:".dimmed(),
-        "type:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("token_id", token_id),
+        ("token_manager", token_manager.to_string()),
+        ("type", tm_type_str.to_string()),
+    ]))
 }
 
 fn try_decode_message_approved_event(data: &[u8]) -> Option<String> {
@@ -693,15 +711,14 @@ fn try_decode_message_approved_event(data: &[u8]) -> Option<String> {
     let (source_chain, rest) = decode_borsh_string(rest).ok()?;
     let (cc_id, rest) = decode_borsh_string(rest).ok()?;
     let (source_addr, _rest) = decode_borsh_string(rest).ok()?;
-    Some(format!(
-        "{} {command_id}\n{} \"{source_chain}\"\n{} \"{cc_id}\"\n{} \"{source_addr}\"\n{} \"{dest_addr}\"\n{} {payload_hash}",
-        "command_id:".dimmed(),
-        "source_chain:".dimmed(),
-        "cc_id:".dimmed(),
-        "source_address:".dimmed(),
-        "destination_address:".dimmed(),
-        "payload_hash:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("command_id", command_id),
+        ("source_chain", format!("\"{source_chain}\"")),
+        ("cc_id", format!("\"{cc_id}\"")),
+        ("source_address", format!("\"{source_addr}\"")),
+        ("destination_address", format!("\"{dest_addr}\"")),
+        ("payload_hash", payload_hash),
+    ]))
 }
 
 fn try_decode_message_executed_event(data: &[u8]) -> Option<String> {
@@ -717,15 +734,14 @@ fn try_decode_message_executed_event(data: &[u8]) -> Option<String> {
     let (source_chain, rest) = decode_borsh_string(rest).ok()?;
     let (cc_id, rest) = decode_borsh_string(rest).ok()?;
     let (source_addr, _rest) = decode_borsh_string(rest).ok()?;
-    Some(format!(
-        "{} {command_id}\n{} \"{source_chain}\"\n{} \"{cc_id}\"\n{} \"{source_addr}\"\n{} {dest}\n{} {payload_hash}",
-        "command_id:".dimmed(),
-        "source_chain:".dimmed(),
-        "cc_id:".dimmed(),
-        "source_address:".dimmed(),
-        "destination:".dimmed(),
-        "payload_hash:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("command_id", command_id),
+        ("source_chain", format!("\"{source_chain}\"")),
+        ("cc_id", format!("\"{cc_id}\"")),
+        ("source_address", format!("\"{source_addr}\"")),
+        ("destination", dest.to_string()),
+        ("payload_hash", payload_hash),
+    ]))
 }
 
 fn try_decode_verifier_set_rotated_event(data: &[u8]) -> Option<String> {
@@ -736,11 +752,10 @@ fn try_decode_verifier_set_rotated_event(data: &[u8]) -> Option<String> {
     // U256 as little-endian, read as u64 for display (epochs are small)
     let epoch = u64::from_le_bytes(data[..8].try_into().ok()?);
     let verifier_set_hash = hex::encode(&data[32..64]);
-    Some(format!(
-        "{} {epoch}\n{} {verifier_set_hash}",
-        "epoch:".dimmed(),
-        "verifier_set_hash:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("epoch", epoch.to_string()),
+        ("verifier_set_hash", verifier_set_hash),
+    ]))
 }
 
 fn try_decode_gas_paid_event(data: &[u8]) -> Option<String> {
@@ -759,15 +774,14 @@ fn try_decode_gas_paid_event(data: &[u8]) -> Option<String> {
     let payload_hash = hex::encode(&rest[..32]);
     let amount = u64::from_le_bytes(rest[32..40].try_into().ok()?);
     let refund = Pubkey::try_from(&rest[40..72]).ok()?;
-    Some(format!(
-        "{} {sender}\n{} \"{dest_chain}\"\n{} \"{dest_addr}\"\n{} {payload_hash}\n{} {amount} lamports\n{} {refund}",
-        "sender:".dimmed(),
-        "destination_chain:".dimmed(),
-        "destination_address:".dimmed(),
-        "payload_hash:".dimmed(),
-        "amount:".dimmed(),
-        "refund_address:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("sender", sender.to_string()),
+        ("destination_chain", format!("\"{dest_chain}\"")),
+        ("destination_address", format!("\"{dest_addr}\"")),
+        ("payload_hash", payload_hash),
+        ("amount", format!("{amount} lamports")),
+        ("refund_address", refund.to_string()),
+    ]))
 }
 
 fn try_decode_gas_added_event(data: &[u8]) -> Option<String> {
@@ -783,13 +797,12 @@ fn try_decode_gas_added_event(data: &[u8]) -> Option<String> {
     }
     let amount = u64::from_le_bytes(rest[..8].try_into().ok()?);
     let refund = Pubkey::try_from(&rest[8..40]).ok()?;
-    Some(format!(
-        "{} {sender}\n{} \"{message_id}\"\n{} {amount} lamports\n{} {refund}",
-        "sender:".dimmed(),
-        "message_id:".dimmed(),
-        "amount:".dimmed(),
-        "refund_address:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("sender", sender.to_string()),
+        ("message_id", format!("\"{message_id}\"")),
+        ("amount", format!("{amount} lamports")),
+        ("refund_address", refund.to_string()),
+    ]))
 }
 
 fn try_decode_gas_refunded_event(data: &[u8]) -> Option<String> {
@@ -804,12 +817,11 @@ fn try_decode_gas_refunded_event(data: &[u8]) -> Option<String> {
         return None;
     }
     let amount = u64::from_le_bytes(rest[..8].try_into().ok()?);
-    Some(format!(
-        "{} {receiver}\n{} \"{message_id}\"\n{} {amount} lamports",
-        "receiver:".dimmed(),
-        "message_id:".dimmed(),
-        "amount:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("receiver", receiver.to_string()),
+        ("message_id", format!("\"{message_id}\"")),
+        ("amount", format!("{amount} lamports")),
+    ]))
 }
 
 fn try_decode_interchain_token_deployment_started_event(data: &[u8]) -> Option<String> {
@@ -827,14 +839,13 @@ fn try_decode_interchain_token_deployment_started_event(data: &[u8]) -> Option<S
         return None;
     }
     let decimals = rest[0];
-    Some(format!(
-        "{} {token_id}\n{} \"{dest_chain}\"\n{} \"{name}\"\n{} \"{symbol}\"\n{} {decimals}",
-        "token_id:".dimmed(),
-        "destination_chain:".dimmed(),
-        "name:".dimmed(),
-        "symbol:".dimmed(),
-        "decimals:".dimmed(),
-    ))
+    Some(kv_lines([
+        ("token_id", token_id),
+        ("destination_chain", format!("\"{dest_chain}\"")),
+        ("name", format!("\"{name}\"")),
+        ("symbol", format!("\"{symbol}\"")),
+        ("decimals", decimals.to_string()),
+    ]))
 }
 
 fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
@@ -844,19 +855,19 @@ fn try_decode_call_contract_event(data: &[u8]) -> Option<String> {
         Some(decoded) => format!("{size} → {decoded}"),
         None => size,
     };
-    Some(format!(
-        "{} {}\n{} \"{}\"\n{} \"{}\"\n{} {}\n{} {}",
-        "sender:".dimmed(),
-        event.sender,
-        "destination_chain:".dimmed(),
-        event.destination_chain,
-        "destination_address:".dimmed(),
-        event.destination_contract_address,
-        "payload_hash:".dimmed(),
-        hex::encode(event.payload_hash),
-        "payload:".dimmed(),
-        payload_line,
-    ))
+    Some(kv_lines([
+        ("sender", event.sender.to_string()),
+        (
+            "destination_chain",
+            format!("\"{}\"", event.destination_chain),
+        ),
+        (
+            "destination_address",
+            format!("\"{}\"", event.destination_contract_address),
+        ),
+        ("payload_hash", hex::encode(event.payload_hash)),
+        ("payload", payload_line),
+    ]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,7 +1243,7 @@ fn print_call_contract_args(args: &[u8], indent: &str) {
     let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
         return;
     };
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
@@ -1243,8 +1254,8 @@ fn print_call_contract_args(args: &[u8], indent: &str) {
     if let Ok((payload_str, _)) = decode_borsh_bytes(rest) {
         let (size, content) = decode_payload(&payload_str);
         match content {
-            Some(decoded) => println!("{indent}{} {size} → {decoded}", "payload:".dimmed()),
-            None => println!("{indent}{} {size}", "payload:".dimmed()),
+            Some(decoded) => println_kv(indent, "payload", format!("{size} → {decoded}")),
+            None => println_kv(indent, "payload", size),
         }
     }
 }
@@ -1253,7 +1264,7 @@ fn print_pay_gas_args(args: &[u8], indent: &str) {
     let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
         return;
     };
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
@@ -1272,7 +1283,7 @@ fn print_pay_gas_args(args: &[u8], indent: &str) {
     let rest = &rest[32..];
     if rest.len() >= 8 {
         let gas = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
-        println!("{indent}{} {gas} lamports", "gas_amount:".dimmed());
+        println_kv(indent, "gas_amount", format!("{gas} lamports"));
     }
 }
 
@@ -1290,7 +1301,7 @@ fn print_init_payload_session_args(args: &[u8], indent: &str) {
         1 => "RotateSigners",
         _ => "Unknown",
     };
-    println!("{indent}{} {payload_type}", "payload_type:".dimmed());
+    println_kv(indent, "payload_type", payload_type);
 }
 
 // payload_merkle_root: [u8;32]
@@ -1312,7 +1323,7 @@ fn print_verify_signature_args(args: &[u8], indent: &str) {
         return;
     }
     let sig = &rest[..65];
-    println!("{indent}{} 0x{}", "signature:".dimmed(), hex::encode(sig));
+    println_kv(indent, "signature", format!("0x{}", hex::encode(sig)));
     let leaf = &rest[65..];
     let nonce = u64::from_le_bytes(leaf[..8].try_into().unwrap_or_default());
     let quorum = u128::from_le_bytes(leaf[8..24].try_into().unwrap_or_default());
@@ -1320,25 +1331,27 @@ fn print_verify_signature_args(args: &[u8], indent: &str) {
     let signer_weight = u128::from_le_bytes(leaf[57..73].try_into().unwrap_or_default());
     let position = u16::from_le_bytes(leaf[73..75].try_into().unwrap_or_default());
     let set_size = u16::from_le_bytes(leaf[75..77].try_into().unwrap_or_default());
-    println!("{indent}{} 0x{signer_pubkey}", "signer:".dimmed());
-    println!(
-        "{indent}{} {signer_weight} (quorum: {quorum})",
-        "weight:".dimmed()
+    println_kv(indent, "signer", format!("0x{signer_pubkey}"));
+    println_kv(
+        indent,
+        "weight",
+        format!("{signer_weight} (quorum: {quorum})"),
     );
-    println!(
-        "{indent}{} {position}/{set_size} (nonce: {nonce})",
-        "position:".dimmed()
+    println_kv(
+        indent,
+        "position",
+        format!("{position}/{set_size} (nonce: {nonce})"),
     );
     let rest = &leaf[77 + 32..]; // skip domain_separator
     if let Ok((proof, rest)) = decode_borsh_bytes(rest) {
-        println!("{indent}{} {} bytes", "merkle_proof:".dimmed(), proof.len());
+        println_kv(indent, "merkle_proof", format!("{} bytes", proof.len()));
         if !rest.is_empty() {
             let payload_type = match rest[0] {
                 0 => "ApproveMessages",
                 1 => "RotateSigners",
                 _ => "Unknown",
             };
-            println!("{indent}{} {payload_type}", "payload_type:".dimmed());
+            println_kv(indent, "payload_type", payload_type);
         }
     }
 }
@@ -1347,7 +1360,7 @@ fn print_send_memo_args(args: &[u8], indent: &str) {
     let Ok((dest_chain, rest)) = decode_borsh_string(args) else {
         return;
     };
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
@@ -1356,7 +1369,7 @@ fn print_send_memo_args(args: &[u8], indent: &str) {
         "destination_address:".dimmed()
     );
     if let Ok((memo, _)) = decode_borsh_string(rest) {
-        println!("{indent}{} \"{memo}\"", "memo:".dimmed());
+        println_kv(indent, "memo", format!("\"{memo}\""));
     }
 }
 
@@ -1373,17 +1386,17 @@ fn print_interchain_transfer_args(args: &[u8], indent: &str) {
     let Ok((dest_chain, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     let Ok((dest_addr_bytes, rest)) = decode_borsh_bytes(rest) else {
         return;
     };
     let dest_addr = format_address_bytes(&dest_addr_bytes);
-    println!("{indent}{} {dest_addr}", "destination_address:".dimmed());
+    println_kv(indent, "destination_address", dest_addr);
     if rest.len() >= 16 {
         let amount = u64::from_le_bytes(rest[..8].try_into().unwrap_or_default());
         let gas_value = u64::from_le_bytes(rest[8..16].try_into().unwrap_or_default());
-        println!("{indent}{} {amount}", "amount:".dimmed());
-        println!("{indent}{} {gas_value} lamports", "gas_value:".dimmed());
+        println_kv(indent, "amount", amount);
+        println_kv(indent, "gas_value", format!("{gas_value} lamports"));
     }
 }
 
@@ -1398,18 +1411,18 @@ fn print_execute_args(args: &[u8], indent: &str) {
     let Ok((id, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
+    println_kv(indent, "cc_id", format!("{chain}-{id}"));
     let Ok((source_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
+    println_kv(indent, "source_address", format!("\"{source_addr}\""));
     let Ok((dest_chain, rest)) = decode_borsh_string(rest) else {
         return;
     };
     let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     println!(
         "{indent}{} \"{dest_addr}\"",
         "destination_address:".dimmed()
@@ -1431,7 +1444,7 @@ fn print_execute_args(args: &[u8], indent: &str) {
         };
         for (j, line) in payload_line.lines().enumerate() {
             if j == 0 {
-                println!("{indent}{} {line}", "payload:".dimmed());
+                println_kv(indent, "payload", line);
             } else {
                 println!("{indent}{line}");
             }
@@ -1450,7 +1463,7 @@ fn print_validate_or_approve_message_args(args: &[u8], indent: &str) {
     let Ok((id, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} {chain}-{id}", "cc_id:".dimmed());
+    println_kv(indent, "cc_id", format!("{chain}-{id}"));
     let Ok((source_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
@@ -1460,8 +1473,8 @@ fn print_validate_or_approve_message_args(args: &[u8], indent: &str) {
     let Ok((dest_addr, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} \"{source_addr}\"", "source_address:".dimmed());
-    println!("{indent}{} \"{dest_chain}\"", "destination_chain:".dimmed());
+    println_kv(indent, "source_address", format!("\"{source_addr}\""));
+    println_kv(indent, "destination_chain", format!("\"{dest_chain}\""));
     println!(
         "{indent}{} \"{dest_addr}\"",
         "destination_address:".dimmed()
@@ -1495,9 +1508,9 @@ fn print_execute_deploy_interchain_token_args(args: &[u8], indent: &str) {
     if rest.is_empty() {
         return;
     }
-    println!("{indent}{} \"{name}\"", "name:".dimmed());
-    println!("{indent}{} \"{symbol}\"", "symbol:".dimmed());
-    println!("{indent}{} {}", "decimals:".dimmed(), rest[0]);
+    println_kv(indent, "name", format!("\"{name}\""));
+    println_kv(indent, "symbol", format!("\"{symbol}\""));
+    println_kv(indent, "decimals", rest[0]);
 }
 
 // Anchor #[instruction] order: message: Message, source_chain: String,
@@ -1527,7 +1540,7 @@ fn print_execute_interchain_transfer_args(args: &[u8], indent: &str) {
     let Ok((source_chain, rest)) = decode_borsh_string(rest) else {
         return;
     };
-    println!("{indent}{} \"{source_chain}\"", "source_chain:".dimmed());
+    println_kv(indent, "source_chain", format!("\"{source_chain}\""));
     let Ok((source_addr, rest)) = decode_borsh_bytes(rest) else {
         return;
     };
@@ -1542,18 +1555,18 @@ fn print_execute_interchain_transfer_args(args: &[u8], indent: &str) {
     let dest = Pubkey::try_from(&rest[..32]).ok();
     let token_id = hex::encode(&rest[32..64]);
     let amount = u64::from_le_bytes(rest[64..72].try_into().unwrap_or_default());
-    println!("{indent}{} {token_id}", "token_id:".dimmed());
+    println_kv(indent, "token_id", token_id);
     if let Some(dest) = dest {
-        println!("{indent}{} {dest}", "destination:".dimmed());
+        println_kv(indent, "destination", dest);
     }
-    println!("{indent}{} {amount}", "amount:".dimmed());
+    println_kv(indent, "amount", amount);
 }
 
 fn print_unknown_args(args: &[u8], indent: &str) {
     if args.len() <= 64 {
-        println!("{indent}{} {}", "data:".dimmed(), hex::encode(args));
+        println_kv(indent, "data", hex::encode(args));
     } else {
-        println!("{indent}{} {} bytes", "data:".dimmed(), args.len());
+        println_kv(indent, "data", format!("{} bytes", args.len()));
     }
 }
 
