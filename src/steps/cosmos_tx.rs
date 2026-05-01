@@ -17,6 +17,17 @@ use crate::types::Network;
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
+/// Default deposit (in `uaxl`) attached to a cosmos governance proposal.
+/// Falls back to this when `.env` doesn't override `PROPOSAL_DEPOSIT`.
+const DEFAULT_PROPOSAL_DEPOSIT_UAXL: &str = "3000000000";
+
+/// Multisig proposal `reward_amount` per signer, in `uaxl`.
+const DEFAULT_REWARD_AMOUNT_UAXL: &str = "1000000";
+
+/// Default `block_expiry` for the VotingVerifier when the chain config
+/// doesn't supply one. 50 blocks ≈ poll-window default Axelar advertises.
+const DEFAULT_VV_BLOCK_EXPIRY: u64 = 50;
+
 pub async fn run(ctx: &mut DeployContext, step: &Step, step_name: &str) -> Result<()> {
     let mnemonic = ctx.state.mnemonic.clone();
     let env = ctx.state.env;
@@ -224,7 +235,7 @@ async fn run_instantiate(
                             "service_name": vv_config["serviceName"],
                             "source_gateway_address": vv_config["sourceGatewayAddress"],
                             "voting_threshold": vv_config["votingThreshold"],
-                            "block_expiry": vv_config["blockExpiry"].as_u64().unwrap_or(50).to_string(),
+                            "block_expiry": vv_config["blockExpiry"].as_u64().unwrap_or(DEFAULT_VV_BLOCK_EXPIRY).to_string(),
                             "confirmation_height": vv_config["confirmationHeight"],
                             "source_chain": chain_axelar_id,
                             "rewards_address": rewards_addr,
@@ -281,7 +292,7 @@ async fn run_instantiate(
             &ctx.target_json,
             "/axelar/govProposalExpeditedDepositAmount",
         )
-        .unwrap_or_else(|_| "3000000000".to_string());
+        .unwrap_or_else(|_| DEFAULT_PROPOSAL_DEPOSIT_UAXL.to_string());
         let title = format!("Instantiate chain contracts for {chain_axelar_id}");
         let summary = format!(
             "Instantiate Gateway, VotingVerifier and MultisigProver contracts for {chain_axelar_id} via Coordinator"
@@ -422,7 +433,7 @@ async fn run_register_deployment(
             &ctx.target_json,
             "/axelar/govProposalExpeditedDepositAmount",
         )
-        .unwrap_or_else(|_| "3000000000".to_string());
+        .unwrap_or_else(|_| DEFAULT_PROPOSAL_DEPOSIT_UAXL.to_string());
         let title = format!("Register {chain_axelar_id} deployment on Coordinator");
         vec![build_submit_proposal_any(
             axelar_address,
@@ -492,6 +503,11 @@ async fn run_create_reward_pools(
         &format!("/axelar/contracts/VotingVerifier/{chain_axelar_id}/address"),
     )?;
 
+    // Rewards-pool params per network. epoch_duration is in cosmos blocks
+    // (testnet/stagenet share the 600 default; mainnet's 14845 ≈ 24h at
+    // ~5.8s/block). participation_threshold is a ratio, rewards_per_epoch in
+    // uaxl. These match `axelar-contract-deployments` epoch params for the
+    // amplifier rewards pool.
     let (epoch_duration, participation_threshold, rewards_per_epoch) = match env {
         "devnet-amplifier" => ("100", json!(["7", "10"]), "100"),
         "mainnet" => ("14845", json!(["8", "10"]), "3424660000"),
@@ -538,7 +554,7 @@ async fn run_create_reward_pools(
             &ctx.target_json,
             "/axelar/govProposalExpeditedDepositAmount",
         )
-        .unwrap_or_else(|_| "3000000000".to_string());
+        .unwrap_or_else(|_| DEFAULT_PROPOSAL_DEPOSIT_UAXL.to_string());
         let title = format!("Create reward pools for {chain_axelar_id}");
         let summary =
             format!("Create reward pools for {chain_axelar_id} voting verifier and multisig");
@@ -605,7 +621,7 @@ async fn run_add_rewards(
         &format!("/axelar/contracts/VotingVerifier/{chain_axelar_id}/address"),
     )?;
 
-    let reward_amount = "1000000";
+    let reward_amount = DEFAULT_REWARD_AMOUNT_UAXL;
     let funds = vec![ProtoCoin {
         denom: fee_denom.to_string(),
         amount: reward_amount.to_string(),
@@ -743,7 +759,7 @@ async fn run_register_its_on_hub(
             &ctx.target_json,
             "/axelar/govProposalExpeditedDepositAmount",
         )
-        .unwrap_or_else(|_| "3000000000".to_string());
+        .unwrap_or_else(|_| DEFAULT_PROPOSAL_DEPOSIT_UAXL.to_string());
         let title = format!("Register {chain_axelar_id} on ITS Hub");
         let summary = format!(
             "Register {chain_axelar_id} ITS edge contract ({its_edge_contract}) on InterchainTokenService Hub"
