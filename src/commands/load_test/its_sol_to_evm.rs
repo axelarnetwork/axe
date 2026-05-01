@@ -21,9 +21,7 @@ use crate::utils::read_contract_address;
 use alloy::primitives::Address;
 use std::path::Path;
 
-const TOKEN_NAME: &str = "AXE";
-const TOKEN_SYMBOL: &str = "AXE";
-const TOKEN_DECIMALS: u8 = 9;
+// Token spec lives in `crate::types::LOAD_TEST_SOL_SPEC`.
 const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
 /// Distribute 100x per key so cached tokens last across many runs.
 const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
@@ -215,7 +213,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                                     .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
                             metrics.source_address = source_addr;
                             metrics.send_instant = Some(submit_start);
-                            metrics.gmp_destination_chain = "axelar".to_string();
+                            metrics.gmp_destination_chain =
+                                crate::types::HubChain::NAME.to_string();
                             metrics.gmp_destination_address = gmp_dest;
                             metrics
                         }
@@ -563,20 +562,21 @@ async fn setup_its_token(
     let salt = generate_salt();
     // Mint a large fixed supply so the token can be reused across runs without redeploying.
     let total_supply: u64 = 1_000_000 * 1_000_000_000; // 1M tokens (9 decimals)
+    let spec = crate::types::LOAD_TEST_SOL_SPEC;
 
     ui::info("deploying new ITS token on Solana...");
-    ui::kv("name", TOKEN_NAME);
-    ui::kv("symbol", TOKEN_SYMBOL);
-    ui::kv("decimals", &TOKEN_DECIMALS.to_string());
+    ui::kv("name", spec.name);
+    ui::kv("symbol", spec.symbol);
+    ui::kv("decimals", &spec.decimals.to_string());
     ui::kv("supply", &total_supply.to_string());
 
     let deploy_sig = solana::send_its_deploy_interchain_token(
         solana_rpc,
         keypair,
         &salt,
-        TOKEN_NAME,
-        TOKEN_SYMBOL,
-        TOKEN_DECIMALS,
+        spec.name,
+        spec.symbol,
+        spec.decimals,
         total_supply,
         Some(&keypair.pubkey()), // deployer as minter for ongoing supply
     )?;

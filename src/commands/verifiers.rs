@@ -138,26 +138,37 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
     ("axelar1k4whz7vj0jurjlwmu3rnx7gfanme8wx4lhzecu", "axelar2"),
 ];
 
-const SUPPORTED_NETWORKS: &[&str] = &["testnet", "mainnet"];
+const SUPPORTED_NETWORKS: &[crate::types::Network] = &[
+    crate::types::Network::Testnet,
+    crate::types::Network::Mainnet,
+];
 
-fn verifiers_for_network(network: &str) -> Result<&'static [(&'static str, &'static str)]> {
+fn verifiers_for_network(
+    network: crate::types::Network,
+) -> Result<&'static [(&'static str, &'static str)]> {
+    use crate::types::Network;
     match network {
-        "testnet" => Ok(TESTNET_VERIFIERS),
-        "mainnet" => Ok(MAINNET_VERIFIERS),
+        Network::Testnet => Ok(TESTNET_VERIFIERS),
+        Network::Mainnet => Ok(MAINNET_VERIFIERS),
         _ => Err(eyre::eyre!(
             "verifier mapping only available for: {}. \
              Other networks (devnet-amplifier, stagenet) are internally operated.",
-            SUPPORTED_NETWORKS.join(", ")
+            SUPPORTED_NETWORKS
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
 
 /// Look up a verifier's friendly name by address on a given network. Returns
 /// `None` for unknown addresses or networks without a hardcoded mapping.
-pub fn lookup_name(network: &str, addr: &str) -> Option<&'static str> {
+pub fn lookup_name(network: crate::types::Network, addr: &str) -> Option<&'static str> {
+    use crate::types::Network;
     let table = match network {
-        "testnet" => TESTNET_VERIFIERS,
-        "mainnet" => MAINNET_VERIFIERS,
+        Network::Testnet => TESTNET_VERIFIERS,
+        Network::Mainnet => MAINNET_VERIFIERS,
         _ => return None,
     };
     table
@@ -166,7 +177,7 @@ pub fn lookup_name(network: &str, addr: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-fn resolve_config(network: &str) -> Result<PathBuf> {
+fn resolve_config(network: crate::types::Network) -> Result<PathBuf> {
     let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
     let path = config_dir.join(format!("{network}.json"));
     if !path.exists() {
@@ -252,8 +263,9 @@ fn truncate_address(addr: &str) -> String {
 }
 
 pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> {
-    let known_verifiers = verifiers_for_network(&network)?;
-    let config_path = resolve_config(&network)?;
+    let network: crate::types::Network = network.parse()?;
+    let known_verifiers = verifiers_for_network(network)?;
+    let config_path = resolve_config(network)?;
     let chain_axelar_id = resolve_chain_axelar_id(&config_path, &chain)?;
 
     let (lcd, _chain_id, _fee_denom, _gas_price) = read_axelar_config(&config_path)?;

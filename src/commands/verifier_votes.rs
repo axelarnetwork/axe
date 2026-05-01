@@ -8,9 +8,12 @@ use crate::commands::verifiers::lookup_name;
 use crate::cosmos::{read_axelar_contract_field, rpc_block_time, rpc_tx_search};
 use crate::ui;
 
-const SUPPORTED_NETWORKS: &[&str] = &["testnet", "mainnet"];
+const SUPPORTED_NETWORKS: &[crate::types::Network] = &[
+    crate::types::Network::Testnet,
+    crate::types::Network::Mainnet,
+];
 
-fn resolve_config(network: &str) -> Result<PathBuf> {
+fn resolve_config(network: crate::types::Network) -> Result<PathBuf> {
     let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
     let path = config_dir.join(format!("{network}.json"));
     if !path.exists() {
@@ -156,14 +159,19 @@ pub async fn run(
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    if !SUPPORTED_NETWORKS.contains(&network.as_str()) {
+    let network: crate::types::Network = network.parse()?;
+    if !SUPPORTED_NETWORKS.contains(&network) {
         return Err(eyre::eyre!(
             "verifier-votes only supports: {}",
-            SUPPORTED_NETWORKS.join(", ")
+            SUPPORTED_NETWORKS
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
 
-    let config_path = resolve_config(&network)?;
+    let config_path = resolve_config(network)?;
     let chain_axelar_id = resolve_chain_axelar_id(&config_path, &chain)?;
     let rpc = read_axelar_rpc_from(&config_path)?;
 
@@ -174,7 +182,7 @@ pub async fn run(
         )
     })?;
 
-    let display_name = lookup_name(&network, &verifier);
+    let display_name = lookup_name(network, &verifier);
     let verifier_display = match display_name {
         Some(name) => format!("{name} ({verifier})"),
         None => verifier.clone(),

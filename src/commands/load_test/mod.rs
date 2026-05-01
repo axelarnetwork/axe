@@ -124,24 +124,25 @@ fn save_cache(axelar_id: &str, cache: &serde_json::Value) -> Result<()> {
 fn chain_type(
     chains: &serde_json::Map<String, serde_json::Value>,
     chain_id: &str,
-) -> Option<String> {
+) -> Option<crate::types::ChainType> {
     chains
         .get(chain_id)?
         .get("chainType")?
-        .as_str()
-        .map(String::from)
+        .as_str()?
+        .parse()
+        .ok()
 }
 
 /// Find chains by chainType, optionally skipping core-* prefixed chains.
 fn find_chains_by_type(
     chains: &serde_json::Map<String, serde_json::Value>,
-    chain_type_filter: &str,
+    chain_type_filter: crate::types::ChainType,
     skip_core: bool,
 ) -> Vec<String> {
     chains
         .iter()
         .filter(|(k, v)| {
-            v.get("chainType").and_then(|t| t.as_str()) == Some(chain_type_filter)
+            v.get("chainType").and_then(|t| t.as_str()) == Some(chain_type_filter.as_str())
                 && !(skip_core && k.starts_with("core-"))
         })
         .map(|(k, _)| k.clone())
@@ -149,16 +150,16 @@ fn find_chains_by_type(
 }
 
 /// Infer test type from source and destination chain types.
-fn infer_test_type(source_type: &str, dest_type: &str) -> Result<TestType> {
+fn infer_test_type(
+    source_type: crate::types::ChainType,
+    dest_type: crate::types::ChainType,
+) -> Result<TestType> {
+    use crate::types::ChainType;
     match (source_type, dest_type) {
-        ("svm", "evm") => Ok(TestType::SolToEvm),
-        ("evm", "svm") => Ok(TestType::EvmToSol),
-        ("evm", "evm") => Ok(TestType::EvmToEvm),
-        ("svm", "svm") => Ok(TestType::SolToSol),
-        _ => Err(eyre::eyre!(
-            "unsupported chain type combination: {source_type} -> {dest_type}. \
-             Supported: svm -> evm, evm -> svm, evm -> evm, svm -> svm"
-        )),
+        (ChainType::Svm, ChainType::Evm) => Ok(TestType::SolToEvm),
+        (ChainType::Evm, ChainType::Svm) => Ok(TestType::EvmToSol),
+        (ChainType::Evm, ChainType::Evm) => Ok(TestType::EvmToEvm),
+        (ChainType::Svm, ChainType::Svm) => Ok(TestType::SolToSol),
     }
 }
 
@@ -213,7 +214,7 @@ pub fn resolve_from_config(
                 .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
             let dst_type = chain_type(chains, &dst)
                 .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
-            let tt = infer_test_type(&src_type, &dst_type)?;
+            let tt = infer_test_type(src_type, dst_type)?;
             ui::info(&format!("inferred test type: {tt}"));
             (tt, src, dst)
         }
@@ -286,12 +287,13 @@ fn auto_detect_chains(
     source_override: Option<String>,
     dest_override: Option<String>,
 ) -> Result<(String, String)> {
+    use crate::types::ChainType;
     match test_type {
         TestType::SolToEvm => {
             let source = match source_override {
                 Some(s) => s,
                 None => {
-                    let svm = find_chains_by_type(chains, "svm", false);
+                    let svm = find_chains_by_type(chains, ChainType::Svm, false);
                     match svm.len() {
                         0 => return Err(eyre::eyre!("no SVM (Solana) chain found in config")),
                         1 => {
@@ -310,7 +312,7 @@ fn auto_detect_chains(
             let dest = match dest_override {
                 Some(d) => d,
                 None => {
-                    let evm = find_chains_by_type(chains, "evm", true);
+                    let evm = find_chains_by_type(chains, ChainType::Evm, true);
                     if evm.is_empty() {
                         return Err(eyre::eyre!("no EVM chain found in config"));
                     }
@@ -327,7 +329,7 @@ fn auto_detect_chains(
             let source = match source_override {
                 Some(s) => s,
                 None => {
-                    let evm = find_chains_by_type(chains, "evm", true);
+                    let evm = find_chains_by_type(chains, ChainType::Evm, true);
                     match evm.len() {
                         0 => return Err(eyre::eyre!("no EVM chain found in config")),
                         1 => {
@@ -346,7 +348,7 @@ fn auto_detect_chains(
             let dest = match dest_override {
                 Some(d) => d,
                 None => {
-                    let svm = find_chains_by_type(chains, "svm", false);
+                    let svm = find_chains_by_type(chains, ChainType::Svm, false);
                     if svm.is_empty() {
                         return Err(eyre::eyre!("no SVM (Solana) chain found in config"));
                     }
@@ -363,7 +365,7 @@ fn auto_detect_chains(
             let source = match source_override {
                 Some(s) => s,
                 None => {
-                    let evm = find_chains_by_type(chains, "evm", true);
+                    let evm = find_chains_by_type(chains, ChainType::Evm, true);
                     if evm.len() < 2 {
                         return Err(eyre::eyre!(
                             "need at least 2 EVM chains in config for evm-to-evm"
@@ -376,7 +378,7 @@ fn auto_detect_chains(
             let dest = match dest_override {
                 Some(d) => d,
                 None => {
-                    let evm = find_chains_by_type(chains, "evm", true);
+                    let evm = find_chains_by_type(chains, ChainType::Evm, true);
                     let picked = evm
                         .iter()
                         .find(|c| **c != source)
@@ -394,7 +396,7 @@ fn auto_detect_chains(
             let source = match source_override {
                 Some(s) => s,
                 None => {
-                    let svm = find_chains_by_type(chains, "svm", false);
+                    let svm = find_chains_by_type(chains, ChainType::Svm, false);
                     if svm.is_empty() {
                         return Err(eyre::eyre!("no SVM (Solana) chain found in config"));
                     }
@@ -425,77 +427,76 @@ fn auto_detect_all(
     source_override: Option<String>,
     dest_override: Option<String>,
 ) -> Result<(TestType, String, String)> {
+    use crate::types::ChainType;
     // If one chain is given, figure out the other
     if let Some(ref src) = source_override {
         let src_type = chain_type(chains, src)
             .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
-        if src_type == "svm" {
-            let evm = find_chains_by_type(chains, "evm", true);
-            let dst = dest_override.unwrap_or_else(|| {
-                ui::info(&format!(
-                    "auto-detected destination: {} (use --destination-chain to override)",
-                    evm[0]
-                ));
-                evm[0].clone()
-            });
-            ui::info("inferred test type: sol-to-evm");
-            return Ok((TestType::SolToEvm, src.clone(), dst));
-        }
-        if src_type == "evm" {
-            let svm = find_chains_by_type(chains, "svm", false);
-            if svm.is_empty() {
-                return Err(eyre::eyre!(
-                    "no SVM chain found in config to pair with EVM source"
-                ));
+        match src_type {
+            ChainType::Svm => {
+                let evm = find_chains_by_type(chains, ChainType::Evm, true);
+                let dst = dest_override.unwrap_or_else(|| {
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        evm[0]
+                    ));
+                    evm[0].clone()
+                });
+                ui::info("inferred test type: sol-to-evm");
+                return Ok((TestType::SolToEvm, src.clone(), dst));
             }
-            let dst = dest_override.unwrap_or_else(|| {
-                ui::info(&format!(
-                    "auto-detected destination: {} (use --destination-chain to override)",
-                    svm[0]
-                ));
-                svm[0].clone()
-            });
-            ui::info("inferred test type: evm-to-sol");
-            return Ok((TestType::EvmToSol, src.clone(), dst));
+            ChainType::Evm => {
+                let svm = find_chains_by_type(chains, ChainType::Svm, false);
+                if svm.is_empty() {
+                    return Err(eyre::eyre!(
+                        "no SVM chain found in config to pair with EVM source"
+                    ));
+                }
+                let dst = dest_override.unwrap_or_else(|| {
+                    ui::info(&format!(
+                        "auto-detected destination: {} (use --destination-chain to override)",
+                        svm[0]
+                    ));
+                    svm[0].clone()
+                });
+                ui::info("inferred test type: evm-to-sol");
+                return Ok((TestType::EvmToSol, src.clone(), dst));
+            }
         }
-        return Err(eyre::eyre!(
-            "cannot infer test type from source chain type '{src_type}'. Use --test-type to specify."
-        ));
     }
 
     if let Some(ref dst) = dest_override {
         let dst_type = chain_type(chains, dst)
             .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
-        if dst_type == "evm" {
-            let svm = find_chains_by_type(chains, "svm", false);
-            if svm.is_empty() {
-                return Err(eyre::eyre!(
-                    "no SVM chain found in config to pair with EVM destination"
-                ));
+        match dst_type {
+            ChainType::Evm => {
+                let svm = find_chains_by_type(chains, ChainType::Svm, false);
+                if svm.is_empty() {
+                    return Err(eyre::eyre!(
+                        "no SVM chain found in config to pair with EVM destination"
+                    ));
+                }
+                ui::info(&format!("auto-detected source: {}", svm[0]));
+                ui::info("inferred test type: sol-to-evm");
+                return Ok((TestType::SolToEvm, svm[0].clone(), dst.clone()));
             }
-            ui::info(&format!("auto-detected source: {}", svm[0]));
-            ui::info("inferred test type: sol-to-evm");
-            return Ok((TestType::SolToEvm, svm[0].clone(), dst.clone()));
-        }
-        if dst_type == "svm" {
-            let evm = find_chains_by_type(chains, "evm", true);
-            if evm.is_empty() {
-                return Err(eyre::eyre!(
-                    "no EVM chain found in config to pair with SVM destination"
-                ));
+            ChainType::Svm => {
+                let evm = find_chains_by_type(chains, ChainType::Evm, true);
+                if evm.is_empty() {
+                    return Err(eyre::eyre!(
+                        "no EVM chain found in config to pair with SVM destination"
+                    ));
+                }
+                ui::info(&format!("auto-detected source: {}", evm[0]));
+                ui::info("inferred test type: evm-to-sol");
+                return Ok((TestType::EvmToSol, evm[0].clone(), dst.clone()));
             }
-            ui::info(&format!("auto-detected source: {}", evm[0]));
-            ui::info("inferred test type: evm-to-sol");
-            return Ok((TestType::EvmToSol, evm[0].clone(), dst.clone()));
         }
-        return Err(eyre::eyre!(
-            "cannot infer test type from destination chain type '{dst_type}'. Use --test-type to specify."
-        ));
     }
 
     // Nothing specified — look for valid combinations
-    let svm = find_chains_by_type(chains, "svm", false);
-    let evm = find_chains_by_type(chains, "evm", true);
+    let svm = find_chains_by_type(chains, ChainType::Svm, false);
+    let evm = find_chains_by_type(chains, ChainType::Evm, true);
 
     if !svm.is_empty() && !evm.is_empty() {
         ui::info(&format!(
@@ -536,32 +537,20 @@ pub fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) -> Result
 }
 
 /// Returns the network this binary was compiled for based on cargo features.
-fn compiled_network() -> &'static str {
-    if cfg!(feature = "mainnet") {
-        "mainnet"
-    } else if cfg!(feature = "testnet") {
-        "testnet"
-    } else if cfg!(feature = "stagenet") {
-        "stagenet"
-    } else {
-        "devnet-amplifier"
-    }
-}
-
 /// Try to detect the target network from the config file path.
 /// Looks for known network names in the filename (e.g. "stagenet.json", "devnet-amplifier.json").
-fn detect_network_from_config(config: &std::path::Path) -> Option<&'static str> {
+fn detect_network_from_config(config: &std::path::Path) -> Option<crate::types::Network> {
     let name = config.file_stem()?.to_str()?;
-    ["mainnet", "testnet", "stagenet", "devnet-amplifier"]
+    crate::types::Network::ALL
         .iter()
-        .find(|&&network| name == network)
         .copied()
+        .find(|n| n.as_str() == name)
 }
 
 pub async fn run(args: LoadTestArgs) -> Result<()> {
     // Check for network mismatch between compiled binary and config
     if let Some(target_network) = detect_network_from_config(&args.config) {
-        let compiled = compiled_network();
+        let compiled = crate::types::Network::from_features();
         if compiled != target_network {
             eyre::bail!(
                 "binary was compiled for '{compiled}' but config targets '{target_network}'. \

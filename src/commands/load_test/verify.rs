@@ -827,7 +827,13 @@ async fn poll_pipeline_its_hub(
                         }
                         Phase::Routed => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id).await
+                            match check_cosmos_routed(
+                                lcd,
+                                cosm_gateway_dest,
+                                crate::types::HubChain::NAME,
+                                sl_id,
+                            )
+                            .await
                             {
                                 Ok(true) => CheckOutcome::PhaseComplete {
                                     elapsed: send_instant.elapsed().as_secs_f64(),
@@ -1686,7 +1692,13 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                         }
                         Phase::Routed => {
                             let sl_id = second_leg_id.as_deref().unwrap_or("");
-                            match check_cosmos_routed(lcd, cosm_gateway_dest, "axelar", sl_id).await
+                            match check_cosmos_routed(
+                                lcd,
+                                cosm_gateway_dest,
+                                crate::types::HubChain::NAME,
+                                sl_id,
+                            )
+                            .await
                             {
                                 Ok(true) => CheckOutcome::PhaseComplete {
                                     elapsed: send_instant.elapsed().as_secs_f64(),
@@ -1707,7 +1719,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                 .unwrap_or(Address::ZERO);
                             match check_evm_is_message_approved(
                                 gw_contract,
-                                "axelar",
+                                crate::types::HubChain::NAME,
                                 sl_id,
                                 sl_src_addr,
                                 sl_dst_addr,
@@ -1734,7 +1746,7 @@ async fn poll_pipeline_its_hub_evm<P: Provider>(
                                 .unwrap_or(Address::ZERO);
                             match check_evm_is_message_approved(
                                 gw_contract,
-                                "axelar",
+                                crate::types::HubChain::NAME,
                                 sl_id,
                                 sl_src_addr,
                                 sl_dst_addr,
@@ -2008,9 +2020,14 @@ pub async fn wait_for_its_remote_deploy(
             }
             DeployPhase::Routed => {
                 let sl_id = second_leg_id.as_deref().unwrap_or("");
-                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
-                    .await
-                    .unwrap_or(false)
+                if check_cosmos_routed(
+                    &lcd,
+                    &cosm_gateway_dest,
+                    crate::types::HubChain::NAME,
+                    sl_id,
+                )
+                .await
+                .unwrap_or(false)
                 {
                     spinner.set_message("remote deploy: routed to destination");
                     phase = DeployPhase::Approved;
@@ -2024,7 +2041,7 @@ pub async fn wait_for_its_remote_deploy(
                 let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
                 match check_evm_is_message_approved(
                     &gw_contract,
-                    "axelar",
+                    crate::types::HubChain::NAME,
                     sl_id,
                     "",
                     Address::ZERO,
@@ -2053,7 +2070,7 @@ pub async fn wait_for_its_remote_deploy(
                 let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
                 match check_evm_is_message_approved(
                     &gw_contract,
-                    "axelar",
+                    crate::types::HubChain::NAME,
                     sl_id,
                     "",
                     Address::ZERO,
@@ -2175,9 +2192,14 @@ pub async fn wait_for_its_remote_deploy_to_solana(
             }
             DeployPhase::Routed => {
                 let sl_id = second_leg_id.as_deref().unwrap_or("");
-                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
-                    .await
-                    .unwrap_or(false)
+                if check_cosmos_routed(
+                    &lcd,
+                    &cosm_gateway_dest,
+                    crate::types::HubChain::NAME,
+                    sl_id,
+                )
+                .await
+                .unwrap_or(false)
                 {
                     spinner.set_message("remote deploy: routed to Solana");
                     phase = DeployPhase::Approved;

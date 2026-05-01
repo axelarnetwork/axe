@@ -449,16 +449,18 @@ pub async fn run_config(
     let src = source_chain.ok_or_else(|| eyre::eyre!("--source-chain required with --config"))?;
     let dst = destination_chain.unwrap_or_else(|| src.clone());
 
-    let src_type = chains
+    let src_type: crate::types::ChainType = chains
         .get(&src)
         .and_then(|v| v.get("chainType"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
-    let dst_type = chains
+        .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?
+        .parse()?;
+    let dst_type: crate::types::ChainType = chains
         .get(&dst)
         .and_then(|v| v.get("chainType"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
+        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?
+        .parse()?;
 
     let src_rpc = chains
         .get(&src)
@@ -495,10 +497,11 @@ pub async fn run_config(
     // Solana keypair balance checks: catch underfunded keys here with a clear
     // error rather than the cryptic "Attempt to debit an account but found no
     // record of a prior credit" we get from the RPC at send-time.
-    if src_type == "svm" || dst_type == "svm" {
+    use crate::types::ChainType;
+    if src_type == ChainType::Svm || dst_type == ChainType::Svm {
         use solana_sdk::signer::Signer;
         let keypair = crate::solana::load_keypair(None)?;
-        if src_type == "svm" {
+        if src_type == ChainType::Svm {
             crate::solana::check_solana_balance(
                 src_rpc,
                 "source",
@@ -506,7 +509,7 @@ pub async fn run_config(
                 crate::solana::MIN_SOL_SEND_LAMPORTS,
             )?;
         }
-        if dst_type == "svm" {
+        if dst_type == ChainType::Svm {
             let dst_rpc = chains
                 .get(&dst)
                 .and_then(|v| v.get("rpc"))
@@ -526,7 +529,7 @@ pub async fn run_config(
 
     let (message_id, payload_hash_hex, source_address, destination_address, payload) =
         match src_type {
-            "svm" => {
+            ChainType::Svm => {
                 let keypair = crate::solana::load_keypair(None)?;
                 let memo_program = crate::commands::load_test::evm_sender::memo_program_id();
                 let dest_addr = memo_program.to_string();
@@ -568,12 +571,11 @@ pub async fn run_config(
                     payload,
                 )
             }
-            "evm" => {
+            ChainType::Evm => {
                 return Err(eyre::eyre!(
                     "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
                 ));
             }
-            other => return Err(eyre::eyre!("unsupported source chain type: {other}")),
         };
 
     // --- Cosmos relay (steps 2-6, chain-agnostic) ---
@@ -756,7 +758,7 @@ pub async fn run_config(
         .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
 
     match dst_type {
-        "svm" => {
+        ChainType::Svm => {
             // Step 7: Approve on Solana gateway
             ui::step_header(7, 8, "Approve on Solana gateway");
             let dst_rpc = chains
@@ -793,12 +795,11 @@ pub async fn run_config(
                 crate::solana::execute_on_memo(dst_rpc, &keypair, gmp_message, &payload)?;
             ui::tx_hash("execute", &memo_sig.to_string());
         }
-        "evm" => {
+        ChainType::Evm => {
             return Err(eyre::eyre!(
                 "EVM destination not yet supported in config mode. Use --axelar-id for EVM chains."
             ));
         }
-        other => return Err(eyre::eyre!("unsupported destination chain type: {other}")),
     }
 
     ui::section("Complete");

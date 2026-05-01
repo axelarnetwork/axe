@@ -35,10 +35,8 @@ const TOTAL_STEPS: usize = 10;
 // Destination chain (Amplifier chain with an active relayer)
 const DEST_CHAIN: &str = "flow";
 
-// Token parameters
-const TOKEN_NAME: &str = "Axe Test Token";
-const TOKEN_SYMBOL: &str = "AXE";
-const TOKEN_DECIMALS: u8 = 18;
+// Token parameters live in `crate::types::EVM_LEGACY_SPEC` (legacy EVM-direct
+// `run`) and `ITS_CONFIG_SPEC` (config-mode `run_config`).
 
 pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
@@ -160,11 +158,12 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::step_header(1, TOTAL_STEPS, "Deploy interchain token");
 
     let salt = generate_salt();
-    let initial_supply = U256::from(1000u64) * U256::from(10u64).pow(U256::from(TOKEN_DECIMALS));
+    let spec = crate::types::EVM_LEGACY_SPEC;
+    let initial_supply = U256::from(1000u64) * U256::from(10u64).pow(U256::from(spec.decimals));
 
-    ui::kv("name", TOKEN_NAME);
-    ui::kv("symbol", TOKEN_SYMBOL);
-    ui::kv("decimals", &TOKEN_DECIMALS.to_string());
+    ui::kv("name", spec.name);
+    ui::kv("symbol", spec.symbol);
+    ui::kv("decimals", &spec.decimals.to_string());
     ui::kv("initial supply", &format!("{initial_supply}"));
     ui::kv("salt", &format!("{salt}"));
 
@@ -172,9 +171,9 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let deploy_call = factory
         .deployInterchainToken(
             salt,
-            TOKEN_NAME.to_string(),
-            TOKEN_SYMBOL.to_string(),
-            TOKEN_DECIMALS,
+            spec.name.to_string(),
+            spec.symbol.to_string(),
+            spec.decimals,
             initial_supply,
             deployer_address,
         )
@@ -544,7 +543,8 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // ── Step 8: Send interchain transfer ────────────────────────────────
     ui::step_header(8, TOTAL_STEPS, "Send interchain transfer");
 
-    let transfer_amount = U256::from(100u64) * U256::from(10u64).pow(U256::from(TOKEN_DECIMALS));
+    let transfer_amount = U256::from(100u64)
+        * U256::from(10u64).pow(U256::from(crate::types::EVM_LEGACY_SPEC.decimals));
     let receiver: Address = "0x000000000000000000000000000000000000dEaD".parse()?;
     let receiver_bytes = Bytes::copy_from_slice(receiver.as_slice());
     let transfer_gas = U256::from(200_000_000_000_000_000u64); // 0.2 ETH for gas
@@ -925,31 +925,14 @@ pub fn extract_contract_call_event(
 const PHASE_A_STEPS: usize = 11;
 const PHASE_B_STEPS: usize = 9;
 
-const TOKEN_NAME_CFG: &str = "Axe ITS Test";
-const TOKEN_SYMBOL_CFG: &str = "AXE";
-const TOKEN_DECIMALS_CFG: u8 = 9;
-// Initial supply on the source side (in base units at TOKEN_DECIMALS_CFG decimals).
-const INITIAL_SUPPLY: u64 = 1_000_000_000_000; // 1000 tokens
+// Initial supply for the config-mode test, in base units of `ITS_CONFIG_SPEC`.
+// 1_000_000_000_000 = 1000 tokens at 9 decimals.
+const INITIAL_SUPPLY: u64 = 1_000_000_000_000;
 
-/// ABI message types for the ITS hub envelope (must match
-/// `interchain-token-service/contracts/InterchainTokenService.sol`).
-const ITS_MESSAGE_TYPE_INTERCHAIN_TRANSFER: u64 = 0;
-const ITS_MESSAGE_TYPE_DEPLOY_INTERCHAIN_TOKEN: u64 = 1;
-const ITS_MESSAGE_TYPE_RECEIVE_FROM_HUB: u64 = 4;
+// ITS message-type discriminators are the `ItsMessageType` enum in `types.rs`.
 
-/// The Axelar network name baked in by feature flags. Used to namespace cache
-/// files so a `mainnet` build doesn't read a `testnet` deploy from disk.
-fn network_name() -> &'static str {
-    if cfg!(feature = "mainnet") {
-        "mainnet"
-    } else if cfg!(feature = "testnet") {
-        "testnet"
-    } else if cfg!(feature = "stagenet") {
-        "stagenet"
-    } else {
-        "devnet-amplifier"
-    }
-}
+// Cache files are namespaced by `Network::from_features()` so a `mainnet`
+// build doesn't read a `testnet` deploy from disk.
 
 /// Cache of a successful Phase A run. Keyed on
 /// `(network, src, dst, deployer_pubkey)` so a fresh run can skip the deploy
@@ -968,7 +951,7 @@ fn cache_path(src: &str, dst: &str, deployer: &str) -> PathBuf {
         .join("axe");
     data_dir.join(format!(
         "its-test-{}-{src}-{dst}-{deployer}.json",
-        network_name()
+        crate::types::Network::from_features()
     ))
 }
 
@@ -1021,16 +1004,19 @@ pub async fn run_config(
         .get(&dst)
         .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
 
-    let src_type = src_entry
+    use crate::types::ChainType;
+    let src_type: ChainType = src_entry
         .get("chainType")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("source chain '{src}' has no chainType"))?;
-    let dst_type = dst_entry
+        .ok_or_else(|| eyre::eyre!("source chain '{src}' has no chainType"))?
+        .parse()?;
+    let dst_type: ChainType = dst_entry
         .get("chainType")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' has no chainType"))?;
+        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' has no chainType"))?
+        .parse()?;
 
-    if src_type != "svm" || dst_type != "evm" {
+    if src_type != ChainType::Svm || dst_type != ChainType::Evm {
         return Err(eyre::eyre!(
             "ITS config-mode currently supports svm → evm only (got {src_type} → {dst_type})"
         ));
@@ -1048,17 +1034,21 @@ pub async fn run_config(
         .to_string();
 
     // Cosmos-side identifiers for the source/destination chains. Consensus
-    // chains use a capitalised axelarId distinct from the JSON key.
-    let src_axelar_id = src_entry
+    // chains use a capitalised axelarId distinct from the JSON key — keep
+    // them as separate types so the compiler refuses to confuse them.
+    use crate::types::ChainAxelarId;
+    let src_axelar_id: ChainAxelarId = src_entry
         .get("axelarId")
         .and_then(|v| v.as_str())
         .unwrap_or(&src)
-        .to_string();
-    let dst_axelar_id = dst_entry
+        .to_owned()
+        .into();
+    let dst_axelar_id: ChainAxelarId = dst_entry
         .get("axelarId")
         .and_then(|v| v.as_str())
         .unwrap_or(&dst)
-        .to_string();
+        .to_owned()
+        .into();
 
     ui::section(&format!("ITS Test: {src} → {dst}"));
     ui::kv("source", &format!("{src} ({src_axelar_id}, {src_type})"));
@@ -1124,24 +1114,17 @@ pub async fn run_config(
         .connect_http(dst_rpc.parse()?);
 
     // --- Resolve contract addresses ---
+    use crate::types::{cosm_gateway_pointer, multisig_prover_pointer, voting_verifier_pointer};
     let dst_its_proxy = read_contract_address(&config, &dst, "InterchainTokenService")?;
     let dst_evm_gateway = read_contract_address(&config, &dst, "AxelarGateway")?;
-    let src_cosm_gateway = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/Gateway/{src_axelar_id}/address"),
-    )?;
-    let voting_verifier = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/VotingVerifier/{src_axelar_id}/address"),
-    )?;
-    let dst_cosm_gateway = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/Gateway/{dst_axelar_id}/address"),
-    )?;
-    let dst_multisig_prover = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/MultisigProver/{dst_axelar_id}/address"),
-    )?;
+    let src_cosm_gateway =
+        read_axelar_contract_field(&config, &cosm_gateway_pointer(&src_axelar_id))?;
+    let voting_verifier =
+        read_axelar_contract_field(&config, &voting_verifier_pointer(&src_axelar_id))?;
+    let dst_cosm_gateway =
+        read_axelar_contract_field(&config, &cosm_gateway_pointer(&dst_axelar_id))?;
+    let dst_multisig_prover =
+        read_axelar_contract_field(&config, &multisig_prover_pointer(&dst_axelar_id))?;
     let axelarnet_gateway =
         read_axelar_contract_field(&config, "/axelar/contracts/AxelarnetGateway/address")?;
     let its_hub_address =
@@ -1163,8 +1146,16 @@ pub async fn run_config(
     //   * Newer: exposes `isTrustedChain(chain)` + `itsHubAddress()` getters.
     // We probe the legacy API first since it's on more deployments today.
     let its = InterchainTokenService::new(dst_its_proxy, &dst_provider);
-    let legacy_trust = its.trustedAddress(src_axelar_id.clone()).call().await.ok();
-    let new_trust = its.isTrustedChain(src_axelar_id.clone()).call().await.ok();
+    let legacy_trust = its
+        .trustedAddress(src_axelar_id.clone().into())
+        .call()
+        .await
+        .ok();
+    let new_trust = its
+        .isTrustedChain(src_axelar_id.clone().into())
+        .call()
+        .await
+        .ok();
     let trusted = match (legacy_trust.as_deref(), new_trust) {
         (Some(s), _) if !s.is_empty() => true,
         (_, Some(b)) => b,
@@ -1200,7 +1191,11 @@ pub async fn run_config(
     // Resolve the hub address that the destination ITS expects in `execute`'s
     // sourceAddress. Try legacy `trustedAddress("axelar")` first, then new
     // `itsHubAddress()`. Fall back to the cosm config.
-    let hub_address_evm_view: String = match its.trustedAddress("axelar".to_string()).call().await {
+    let hub_address_evm_view: String = match its
+        .trustedAddress(crate::types::HubChain::NAME.to_string())
+        .call()
+        .await
+    {
         Ok(s) if !s.is_empty() => s,
         _ => match its.itsHubAddress().call().await {
             Ok(s) if !s.is_empty() => s,
@@ -1334,7 +1329,7 @@ pub async fn run_config(
         &token_id,
         &source_ata,
         &mint,
-        &dst_axelar_id,
+        dst_axelar_id.as_str(),
         &receiver_bytes,
         amount,
         gas_value,
@@ -1361,10 +1356,10 @@ pub async fn run_config(
     );
     let xfer_payload_hash = FixedBytes::<32>::from(xfer_gw.payload_hash);
     relay_to_hub(
-        &src_axelar_id,
+        src_axelar_id.as_str(),
         &xfer_first_leg_id,
         &xfer_gw.sender,
-        "axelar",
+        crate::types::HubChain::NAME,
         &its_hub_address,
         &xfer_payload_hash,
         &xfer_gw.payload,
@@ -1456,8 +1451,8 @@ pub async fn run_config(
 async fn run_phase_a_deploy<P: Provider>(
     src: &str,
     dst: &str,
-    src_axelar_id: &str,
-    dst_axelar_id: &str,
+    src_axelar_id: &crate::types::ChainAxelarId,
+    dst_axelar_id: &crate::types::ChainAxelarId,
     src_rpc: &str,
     sol_keypair: &solana_sdk::signature::Keypair,
     sol_pubkey: solana_sdk::pubkey::Pubkey,
@@ -1499,13 +1494,14 @@ async fn run_phase_a_deploy<P: Provider>(
 
     // Step A2: Solana — deploy local interchain token
     ui::step_header(2, PHASE_A_STEPS, "Deploy local interchain token (Solana)");
+    let spec = crate::types::ITS_CONFIG_SPEC;
     let local_sig = crate::solana::send_its_deploy_interchain_token(
         src_rpc,
         sol_keypair,
         &salt_bytes,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
+        spec.name,
+        spec.symbol,
+        spec.decimals,
         INITIAL_SUPPLY,
         None,
     )?;
@@ -1524,7 +1520,7 @@ async fn run_phase_a_deploy<P: Provider>(
         src_rpc,
         sol_keypair,
         &salt_bytes,
-        dst_axelar_id,
+        dst_axelar_id.as_str(),
         gas_value,
     )?;
     ui::tx_hash("solana tx", &remote_sig);
@@ -1549,11 +1545,11 @@ async fn run_phase_a_deploy<P: Provider>(
 
     // Sanity: the local reconstruction should match what the gateway actually saw.
     let local_payload = encode_send_to_hub_deploy(
-        dst_axelar_id,
+        dst_axelar_id.as_str(),
         &token_id,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
+        spec.name,
+        spec.symbol,
+        spec.decimals,
         None,
     )?;
     let local_hash = keccak256(&local_payload);
@@ -1580,10 +1576,10 @@ async fn run_phase_a_deploy<P: Provider>(
         "Source → hub (verify, route, hub-execute)",
     );
     relay_to_hub(
-        src_axelar_id,
+        src_axelar_id.as_str(),
         &first_leg_id,
         &gw_sender,
-        "axelar",
+        crate::types::HubChain::NAME,
         its_hub_address,
         &first_leg_payload_hash,
         &first_leg_payload,
@@ -1600,13 +1596,7 @@ async fn run_phase_a_deploy<P: Provider>(
     .await?;
 
     // Step A5..10: hub → destination EVM, manual proof + execute
-    let deploy_inner = encode_inner_deploy(
-        &token_id,
-        TOKEN_NAME_CFG,
-        TOKEN_SYMBOL_CFG,
-        TOKEN_DECIMALS_CFG,
-        &[],
-    );
+    let deploy_inner = encode_inner_deploy(&token_id, spec.name, spec.symbol, spec.decimals, &[]);
     let dest_payload_deploy = encode_receive_from_hub(src_axelar_id, &deploy_inner);
 
     let _command_id = relay_to_destination(
@@ -1715,7 +1705,7 @@ fn encode_inner_deploy(
     minter: &[u8],
 ) -> Vec<u8> {
     (
-        U256::from(ITS_MESSAGE_TYPE_DEPLOY_INTERCHAIN_TOKEN),
+        crate::types::ItsMessageType::DeployInterchainToken.as_u256(),
         FixedBytes::<32>::from(*token_id),
         name.to_string(),
         symbol.to_string(),
@@ -1735,7 +1725,7 @@ fn encode_inner_transfer(
     data: &[u8],
 ) -> Vec<u8> {
     (
-        U256::from(ITS_MESSAGE_TYPE_INTERCHAIN_TRANSFER),
+        crate::types::ItsMessageType::InterchainTransfer.as_u256(),
         FixedBytes::<32>::from(*token_id),
         Bytes::copy_from_slice(source_address),
         Bytes::copy_from_slice(destination_address),
@@ -1747,9 +1737,12 @@ fn encode_inner_transfer(
 
 /// ABI-encode the outer hub envelope for an inbound ITS message.
 /// Format: `abi.encode(uint256 messageType=4, string originalSourceChain, bytes innerPayload)`.
-fn encode_receive_from_hub(original_source_chain: &str, inner: &[u8]) -> Vec<u8> {
+fn encode_receive_from_hub(
+    original_source_chain: &crate::types::ChainAxelarId,
+    inner: &[u8],
+) -> Vec<u8> {
     (
-        U256::from(ITS_MESSAGE_TYPE_RECEIVE_FROM_HUB),
+        crate::types::ItsMessageType::ReceiveFromHub.as_u256(),
         original_source_chain.to_string(),
         Bytes::copy_from_slice(inner),
     )
@@ -1763,9 +1756,9 @@ fn encode_receive_from_hub(original_source_chain: &str, inner: &[u8]) -> Vec<u8>
 #[allow(clippy::too_many_arguments)]
 async fn relay_to_destination<P: Provider>(
     first_leg_message_id: &str,
-    src_axelar_id: &str,
+    src_axelar_id: &crate::types::ChainAxelarId,
     dest_payload: &[u8],
-    _dst_axelar_id: &str,
+    _dst_axelar_id: &crate::types::ChainAxelarId,
     _dst_chain_key: &str,
     dst_its_proxy: Address,
     dst_evm_gateway: Address,
@@ -1792,9 +1785,14 @@ async fn relay_to_destination<P: Provider>(
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-        if check_hub_approved(lcd, axelarnet_gateway, src_axelar_id, first_leg_message_id)
-            .await
-            .unwrap_or(false)
+        if check_hub_approved(
+            lcd,
+            axelarnet_gateway,
+            src_axelar_id.as_str(),
+            first_leg_message_id,
+        )
+        .await
+        .unwrap_or(false)
         {
             hub_approved = true;
             spinner.finish_and_clear();
@@ -1861,9 +1859,14 @@ async fn relay_to_destination<P: Provider>(
         if i > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-        if check_cosmos_routed(lcd, dst_cosm_gateway, "axelar", &second_leg.message_id)
-            .await
-            .unwrap_or(false)
+        if check_cosmos_routed(
+            lcd,
+            dst_cosm_gateway,
+            crate::types::HubChain::NAME,
+            &second_leg.message_id,
+        )
+        .await
+        .unwrap_or(false)
         {
             routed = true;
             spinner.finish_and_clear();
@@ -1887,7 +1890,7 @@ async fn relay_to_destination<P: Provider>(
     );
     let construct_proof_msg = json!({
         "construct_proof": [{
-            "source_chain": "axelar",
+            "source_chain": crate::types::HubChain::NAME,
             "message_id": second_leg.message_id,
         }]
     });
@@ -1954,7 +1957,7 @@ async fn relay_to_destination<P: Provider>(
     let approved = gw
         .isContractCallApproved(
             command_id,
-            "axelar".to_string(),
+            crate::types::HubChain::NAME.to_string(),
             second_leg.source_address.clone(),
             dst_its_proxy,
             payload_hash_b32,
@@ -1973,7 +1976,7 @@ async fn relay_to_destination<P: Provider>(
     let its = InterchainTokenService::new(dst_its_proxy, dst_provider);
     let exec_call = its.execute(
         command_id,
-        "axelar".to_string(),
+        crate::types::HubChain::NAME.to_string(),
         second_leg.source_address.clone(),
         Bytes::copy_from_slice(dest_payload),
     );

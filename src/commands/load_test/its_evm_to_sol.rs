@@ -30,9 +30,7 @@ use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
 use crate::utils::read_contract_address;
 
-const TOKEN_NAME: &str = "AXE";
-const TOKEN_SYMBOL: &str = "AXE";
-const TOKEN_DECIMALS: u8 = 18;
+// Token spec lives in `crate::types::LOAD_TEST_EVM_SPEC`.
 /// Default gas value for ITS cross-chain transfers.
 #[cfg(feature = "devnet-amplifier")]
 fn default_gas_value_wei(_source_chain: &str) -> u128 {
@@ -525,11 +523,12 @@ async fn deploy_its_token<P: Provider>(
     gas_value: U256,
 ) -> eyre::Result<(FixedBytes<32>, Address, Option<String>)> {
     let salt = generate_salt();
+    let spec = crate::types::LOAD_TEST_EVM_SPEC;
 
     ui::info("deploying new ITS token...");
-    ui::kv("name", TOKEN_NAME);
-    ui::kv("symbol", TOKEN_SYMBOL);
-    ui::kv("decimals", &TOKEN_DECIMALS.to_string());
+    ui::kv("name", spec.name);
+    ui::kv("symbol", spec.symbol);
+    ui::kv("decimals", &spec.decimals.to_string());
     ui::kv("supply", &format!("{total_supply}"));
 
     let factory = InterchainTokenFactory::new(factory_addr, provider);
@@ -537,9 +536,9 @@ async fn deploy_its_token<P: Provider>(
     let deploy_call = factory
         .deployInterchainToken(
             salt,
-            TOKEN_NAME.to_string(),
-            TOKEN_SYMBOL.to_string(),
-            TOKEN_DECIMALS,
+            spec.name.to_string(),
+            spec.symbol.to_string(),
+            spec.decimals,
             total_supply,
             deployer,
         )

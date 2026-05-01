@@ -6,6 +6,7 @@ mod preflight;
 mod solana;
 mod state;
 mod steps;
+mod types;
 pub mod ui;
 mod utils;
 
