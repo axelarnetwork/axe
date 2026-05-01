@@ -16,12 +16,11 @@ use eyre::eyre;
 use futures::future::join_all;
 use tokio::sync::{Mutex, Semaphore};
 
+use super::LoadTestArgs;
+use super::helpers::{check_evm_balance, finish_report, validate_evm_rpc, validate_solana_rpc};
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::{
-    LoadTestArgs, check_evm_balance, finish_report, read_its_cache, save_its_cache,
-    validate_evm_rpc, validate_solana_rpc,
-};
+use super::resolve::{read_its_cache, save_its_cache};
 use crate::commands::event_extractors::{
     extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
