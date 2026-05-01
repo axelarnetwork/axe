@@ -46,6 +46,13 @@ pub fn derive_axelar_wallet(mnemonic_str: &str) -> Result<(SigningKey, String)> 
 /// generous buffer.
 const GAS_MULTIPLIER: f64 = 3.0;
 
+/// Parse a numeric LCD response field that comes back as a JSON string,
+/// defaulting to zero on missing/unparseable values. Many cosmos LCD endpoints
+/// represent u64/u128 as strings (e.g. `"sequence": "42"`).
+fn parse_or_zero<T: std::str::FromStr + Default>(s: Option<&str>) -> T {
+    s.and_then(|x| x.parse().ok()).unwrap_or_default()
+}
+
 // --- LCD REST queries ---
 
 pub async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
@@ -54,16 +61,8 @@ pub async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
     let account = resp
         .get("account")
         .ok_or_else(|| eyre::eyre!("no account in response: {resp}"))?;
-    let account_number: u64 = account["account_number"]
-        .as_str()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
-    let sequence: u64 = account["sequence"]
-        .as_str()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    let account_number: u64 = parse_or_zero(account["account_number"].as_str());
+    let sequence: u64 = parse_or_zero(account["sequence"].as_str());
     Ok((account_number, sequence))
 }
 
@@ -71,12 +70,7 @@ pub async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
 pub async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
     let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{address}/by_denom?denom={denom}");
     let resp: Value = reqwest::get(&url).await?.json().await?;
-    let amount: u128 = resp
-        .pointer("/balance/amount")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    let amount: u128 = parse_or_zero(resp.pointer("/balance/amount").and_then(|v| v.as_str()));
     Ok(amount)
 }
 
@@ -137,12 +131,7 @@ pub async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
     {
         return Err(eyre::eyre!("simulation failed: {err}"));
     }
-    let gas_used: u64 = resp
-        .pointer("/gas_info/gas_used")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    let gas_used: u64 = parse_or_zero(resp.pointer("/gas_info/gas_used").and_then(|v| v.as_str()));
     if gas_used == 0 {
         return Err(eyre::eyre!(
             "simulation returned 0 gas — response: {}",
