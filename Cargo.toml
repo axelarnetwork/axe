@@ -49,8 +49,7 @@ testnet = ["solana-axelar-gateway/testnet", "solana-axelar-gas-service/testnet",
 mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet", "solana-axelar-memo/mainnet", "solana-axelar-its/mainnet"]
 
 [lints.clippy]
-# Catch new functions whose cognitive complexity grows past the threshold
-# set in `clippy.toml` (currently 75 — chosen to grandfather the existing
-# offenders, the worst of which sits at 71). The pre-commit hook runs
-# clippy with `-D warnings` so this denies any regression.
+# Catch new functions whose cognitive complexity grows past clippy's default
+# threshold (25). The pre-commit hook runs clippy with `-D warnings` so this
+# denies any regression.
 cognitive_complexity = "deny"

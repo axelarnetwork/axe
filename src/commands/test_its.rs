@@ -94,57 +94,15 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         .unwrap_or_default();
 
     if !trusted {
-        ui::error(&format!(
-            "\"{DEST_CHAIN}\" is not a trusted chain on the ITS at {its_proxy_addr}"
-        ));
-
-        // Query owner on source ITS to tell the user who can fix it
-        let source_owner = Ownable::new(its_proxy_addr, &provider)
-            .owner()
-            .call()
-            .await
-            .ok();
-
-        // Query owner on destination ITS
-        let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
-        let flow_owner = Ownable::new(dest_its_addr, &dest_provider)
-            .owner()
-            .call()
-            .await
-            .ok();
-
-        let mut lines: Vec<String> = vec![
-            format!(
-                "The ITS on {axelar_id} does not trust \"{DEST_CHAIN}\" as a destination chain."
-            ),
-            String::new(),
-            format!("1. On {axelar_id} — set \"{DEST_CHAIN}\" as trusted:"),
-        ];
-        if let Some(owner) = source_owner {
-            lines.push(format!("   owner: {owner}"));
-        }
-        lines.push(format!("   cast send {its_proxy_addr} \\"));
-        lines.push("     'setTrustedChain(string)' \\".to_string());
-        lines.push(format!("     '{DEST_CHAIN}' \\"));
-        lines.push(format!("     --rpc-url {rpc_url} \\"));
-        lines.push("     --private-key $PRIVATE_KEY".into());
-        lines.push(String::new());
-        lines.push(format!(
-            "2. On {DEST_CHAIN} — set \"{axelar_id}\" as trusted:"
-        ));
-        if let Some(owner) = flow_owner {
-            lines.push(format!("   owner: {owner}"));
-        }
-        lines.push(format!("   cast send {dest_its_addr} \\"));
-        lines.push("     'setTrustedChain(string)' \\".to_string());
-        lines.push(format!("     '{axelar_id}' \\"));
-        lines.push(format!("     --rpc-url {dest_rpc} \\"));
-        lines.push("     --private-key $PRIVATE_KEY".into());
-        lines.push(String::new());
-        lines.push("Both sides must trust each other for cross-chain ITS to work.".into());
-
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        ui::action_required(&line_refs);
+        print_untrusted_chain_remediation(
+            &axelar_id,
+            its_proxy_addr,
+            dest_its_addr,
+            &rpc_url,
+            &dest_rpc,
+            &provider,
+        )
+        .await?;
         return Ok(());
     }
     ui::success(&format!("\"{DEST_CHAIN}\" is trusted on {axelar_id} ITS"));
@@ -358,68 +316,9 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     .await?;
 
     // ── Step 7: Poll destination chain to confirm token deployed ─────────
-    ui::step_header(
-        7,
-        TOTAL_STEPS,
-        &format!("Poll {DEST_CHAIN} for token deployment"),
-    );
-
     let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
-    let dest_its = InterchainTokenService::new(dest_its_addr, &dest_provider);
-
-    ui::address(&format!("{DEST_CHAIN} ITS"), &format!("{dest_its_addr}"));
-    ui::kv("tokenId", &format!("{token_id}"));
-
-    // Get the predicted token address on the destination chain
-    let predicted_addr = dest_its
-        .interchainTokenAddress(token_id)
-        .call()
-        .await
-        .map_err(|e| eyre::eyre!("failed to query interchainTokenAddress on {DEST_CHAIN}: {e}"))?;
-    ui::address("predicted token addr", &format!("{predicted_addr}"));
-
-    let spinner = ui::wait_spinner(&format!("Waiting for token to appear on {DEST_CHAIN}..."));
-    let mut deployed_addr = Address::ZERO;
-
-    for i in 0..30 {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-
-        // Try calling name() on the predicted address — if it succeeds, the token is deployed
-        // (get_code_at doesn't work reliably on some chains like Flow)
-        let token = ERC20::new(predicted_addr, &dest_provider);
-        match token.name().call().await {
-            Ok(name) => {
-                spinner.finish_and_clear();
-                ui::success(&format!("Token responds to name() → \"{name}\""));
-                deployed_addr = predicted_addr;
-                break;
-            }
-            Err(_) => {
-                spinner.set_message(format!(
-                    "Token not yet deployed (attempt {}/30, addr={predicted_addr})...",
-                    i + 1
-                ));
-            }
-        }
-    }
-
-    spinner.finish_and_clear();
-
-    if deployed_addr == Address::ZERO {
-        ui::warn(&format!(
-            "Token not yet deployed on {DEST_CHAIN} after 5 minutes"
-        ));
-        ui::info("The relayer may still be processing. Check axelarscan for status.");
-        ui::kv("tokenId", &format!("{token_id}"));
-    } else {
-        ui::success(&format!("Token deployed on {DEST_CHAIN}!"));
-        ui::address(
-            &format!("token address ({DEST_CHAIN})"),
-            &format!("{deployed_addr}"),
-        );
-    }
+    let predicted_addr =
+        poll_for_remote_token_deploy(&dest_provider, dest_its_addr, token_id).await?;
 
     // ── Step 8: Send interchain transfer ────────────────────────────────
     ui::step_header(8, TOTAL_STEPS, "Send interchain transfer");
@@ -490,44 +389,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     .await?;
 
     // ── Step 10: Verify transfer on destination ──────────────────────────
-    ui::step_header(10, TOTAL_STEPS, &format!("Verify transfer on {DEST_CHAIN}"));
-
-    ui::address("token", &format!("{predicted_addr}"));
-    ui::address("receiver", &format!("{receiver}"));
-
-    let dest_token = ERC20::new(predicted_addr, &dest_provider);
-    let spinner = ui::wait_spinner(&format!("Waiting for balance to appear on {DEST_CHAIN}..."));
-
-    let mut final_balance = U256::ZERO;
-    for i in 0..30 {
-        if i > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-
-        match dest_token.balanceOf(receiver).call().await {
-            Ok(bal) => {
-                if bal > U256::ZERO {
-                    final_balance = bal;
-                    break;
-                }
-                spinner.set_message(format!("Balance still 0 (attempt {}/30)...", i + 1));
-            }
-            Err(_) => {
-                spinner.set_message(format!("Query failed (attempt {}/30)...", i + 1));
-            }
-        }
-    }
-
-    spinner.finish_and_clear();
-
-    if final_balance > U256::ZERO {
-        ui::success(&format!(
-            "Receiver {receiver} has balance {final_balance} on {DEST_CHAIN}"
-        ));
-    } else {
-        ui::warn(&format!("Balance still 0 on {DEST_CHAIN} after 5 minutes"));
-        ui::info("The relayer may still be processing. Check axelarscan for status.");
-    }
+    poll_for_balance_on_destination(&dest_provider, predicted_addr, receiver).await;
 
     // ── Complete ────────────────────────────────────────────────────────
     ui::section("Complete");
@@ -643,6 +505,180 @@ async fn relay_to_hub(
     Ok(())
 }
 
+/// Print the cast-send remediation block when DEST_CHAIN isn't trusted on the
+/// source-chain ITS (or vice versa). The owner addresses are queried so the
+/// user knows which key needs to sign the setTrustedChain calls.
+async fn print_untrusted_chain_remediation<P: Provider>(
+    axelar_id: &str,
+    its_proxy_addr: Address,
+    dest_its_addr: Address,
+    rpc_url: &str,
+    dest_rpc: &str,
+    provider: &P,
+) -> Result<()> {
+    ui::error(&format!(
+        "\"{DEST_CHAIN}\" is not a trusted chain on the ITS at {its_proxy_addr}"
+    ));
+
+    let source_owner = Ownable::new(its_proxy_addr, provider)
+        .owner()
+        .call()
+        .await
+        .ok();
+
+    let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
+    let flow_owner = Ownable::new(dest_its_addr, &dest_provider)
+        .owner()
+        .call()
+        .await
+        .ok();
+
+    let mut lines: Vec<String> = vec![
+        format!("The ITS on {axelar_id} does not trust \"{DEST_CHAIN}\" as a destination chain."),
+        String::new(),
+        format!("1. On {axelar_id} — set \"{DEST_CHAIN}\" as trusted:"),
+    ];
+    if let Some(owner) = source_owner {
+        lines.push(format!("   owner: {owner}"));
+    }
+    lines.push(format!("   cast send {its_proxy_addr} \\"));
+    lines.push("     'setTrustedChain(string)' \\".to_string());
+    lines.push(format!("     '{DEST_CHAIN}' \\"));
+    lines.push(format!("     --rpc-url {rpc_url} \\"));
+    lines.push("     --private-key $PRIVATE_KEY".into());
+    lines.push(String::new());
+    lines.push(format!(
+        "2. On {DEST_CHAIN} — set \"{axelar_id}\" as trusted:"
+    ));
+    if let Some(owner) = flow_owner {
+        lines.push(format!("   owner: {owner}"));
+    }
+    lines.push(format!("   cast send {dest_its_addr} \\"));
+    lines.push("     'setTrustedChain(string)' \\".to_string());
+    lines.push(format!("     '{axelar_id}' \\"));
+    lines.push(format!("     --rpc-url {dest_rpc} \\"));
+    lines.push("     --private-key $PRIVATE_KEY".into());
+    lines.push(String::new());
+    lines.push("Both sides must trust each other for cross-chain ITS to work.".into());
+
+    let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    ui::action_required(&line_refs);
+    Ok(())
+}
+
+/// Wait for the destination-chain ITS to deploy the predicted token contract
+/// (post hub relay). Uses `name()` instead of `get_code_at` since the latter
+/// is unreliable on some EVMs (Flow). Returns the predicted address either
+/// way; the caller can decide what to do if name() never responds.
+async fn poll_for_remote_token_deploy<P: Provider>(
+    dest_provider: &P,
+    dest_its_addr: Address,
+    token_id: FixedBytes<32>,
+) -> Result<Address> {
+    let dest_its = InterchainTokenService::new(dest_its_addr, dest_provider);
+
+    ui::step_header(
+        7,
+        TOTAL_STEPS,
+        &format!("Poll {DEST_CHAIN} for token deployment"),
+    );
+    ui::address(&format!("{DEST_CHAIN} ITS"), &format!("{dest_its_addr}"));
+    ui::kv("tokenId", &format!("{token_id}"));
+
+    let predicted_addr = dest_its
+        .interchainTokenAddress(token_id)
+        .call()
+        .await
+        .map_err(|e| eyre::eyre!("failed to query interchainTokenAddress on {DEST_CHAIN}: {e}"))?;
+    ui::address("predicted token addr", &format!("{predicted_addr}"));
+
+    let spinner = ui::wait_spinner(&format!("Waiting for token to appear on {DEST_CHAIN}..."));
+    let mut deployed = false;
+
+    for i in 0..30 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        let token = ERC20::new(predicted_addr, dest_provider);
+        match token.name().call().await {
+            Ok(name) => {
+                spinner.finish_and_clear();
+                ui::success(&format!("Token responds to name() → \"{name}\""));
+                deployed = true;
+                break;
+            }
+            Err(_) => {
+                spinner.set_message(format!(
+                    "Token not yet deployed (attempt {}/30, addr={predicted_addr})...",
+                    i + 1
+                ));
+            }
+        }
+    }
+    spinner.finish_and_clear();
+
+    if deployed {
+        ui::success(&format!("Token deployed on {DEST_CHAIN}!"));
+        ui::address(
+            &format!("token address ({DEST_CHAIN})"),
+            &format!("{predicted_addr}"),
+        );
+    } else {
+        ui::warn(&format!(
+            "Token not yet deployed on {DEST_CHAIN} after 5 minutes"
+        ));
+        ui::info("The relayer may still be processing. Check axelarscan for status.");
+        ui::kv("tokenId", &format!("{token_id}"));
+    }
+
+    Ok(predicted_addr)
+}
+
+/// Poll the destination-chain ERC20 until the receiver's balance is non-zero
+/// (i.e. the relayer has executed the transfer). Logs success/timeout but
+/// never errors — a stuck relay isn't a fatal test failure.
+async fn poll_for_balance_on_destination<P: Provider>(
+    dest_provider: &P,
+    predicted_addr: Address,
+    receiver: Address,
+) {
+    ui::step_header(10, TOTAL_STEPS, &format!("Verify transfer on {DEST_CHAIN}"));
+    ui::address("token", &format!("{predicted_addr}"));
+    ui::address("receiver", &format!("{receiver}"));
+
+    let dest_token = ERC20::new(predicted_addr, dest_provider);
+    let spinner = ui::wait_spinner(&format!("Waiting for balance to appear on {DEST_CHAIN}..."));
+
+    let mut final_balance = U256::ZERO;
+    for i in 0..30 {
+        if i > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+        match dest_token.balanceOf(receiver).call().await {
+            Ok(bal) => {
+                if bal > U256::ZERO {
+                    final_balance = bal;
+                    break;
+                }
+                spinner.set_message(format!("Balance still 0 (attempt {}/30)...", i + 1));
+            }
+            Err(_) => {
+                spinner.set_message(format!("Query failed (attempt {}/30)...", i + 1));
+            }
+        }
+    }
+    spinner.finish_and_clear();
+
+    if final_balance > U256::ZERO {
+        ui::success(&format!(
+            "Receiver {receiver} has balance {final_balance} on {DEST_CHAIN}"
+        ));
+    } else {
+        ui::warn(&format!("Balance still 0 on {DEST_CHAIN} after 5 minutes"));
+        ui::info("The relayer may still be processing. Check axelarscan for status.");
+    }
+}
+
 /// Extract tokenId and token address from InterchainTokenDeployed event in receipt logs.
 /// Reads topics/data directly to avoid ABI decode issues with indexed field differences.
 pub fn extract_token_deployed_event(
@@ -749,6 +785,113 @@ fn save_cache(path: &Path, cache: &ItsTestCache) -> Result<()> {
     }
     std::fs::write(path, serde_json::to_string_pretty(cache)?)?;
     Ok(())
+}
+
+/// Probe whether the destination ITS trusts the source chain. Two ITS API
+/// generations are deployed in the wild — the older one returns a string from
+/// `trustedAddress(chain)`, the newer exposes `isTrustedChain(chain)`. If
+/// neither says trusted, print remediation and return `Ok(false)`.
+async fn check_destination_trusts_source<P: Provider>(
+    its: &InterchainTokenService::InterchainTokenServiceInstance<&P>,
+    src_axelar_id: &crate::types::ChainAxelarId,
+    dst_its_proxy: Address,
+    dst: &str,
+    dst_rpc: &str,
+) -> Result<bool> {
+    let legacy_trust = its
+        .trustedAddress(src_axelar_id.clone().into())
+        .call()
+        .await
+        .ok();
+    let new_trust = its
+        .isTrustedChain(src_axelar_id.clone().into())
+        .call()
+        .await
+        .ok();
+    let trusted = match (legacy_trust.as_deref(), new_trust) {
+        (Some(s), _) if !s.is_empty() => true,
+        (_, Some(b)) => b,
+        _ => false,
+    };
+    if trusted {
+        return Ok(true);
+    }
+
+    ui::error(&format!(
+        "destination ITS at {dst_its_proxy} on {dst} does not trust source chain '{src_axelar_id}'"
+    ));
+    let owner = Ownable::new(dst_its_proxy, its.provider())
+        .owner()
+        .call()
+        .await
+        .ok();
+    let mut lines: Vec<String> = vec![format!(
+        "Set '{src_axelar_id}' as trusted on the destination ITS:"
+    )];
+    if let Some(owner) = owner {
+        lines.push(format!("  owner: {owner}"));
+    }
+    lines.push(format!(
+        "  cast send {dst_its_proxy} 'setTrustedChain(string)' '{src_axelar_id}' \\"
+    ));
+    lines.push(format!(
+        "    --rpc-url {dst_rpc} --private-key $PRIVATE_KEY"
+    ));
+    let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    ui::action_required(&line_refs);
+    Ok(false)
+}
+
+/// Resolve the hub bech32 the destination ITS expects in `execute`'s
+/// `sourceAddress`. Probes legacy `trustedAddress("axelar")` first, then new
+/// `itsHubAddress()`, falling back to the cosm config.
+async fn resolve_hub_address_evm_view<P: Provider>(
+    its: &InterchainTokenService::InterchainTokenServiceInstance<&P>,
+    its_hub_address: &str,
+) -> String {
+    match its
+        .trustedAddress(crate::types::HubChain::NAME.to_string())
+        .call()
+        .await
+    {
+        Ok(s) if !s.is_empty() => s,
+        _ => match its.itsHubAddress().call().await {
+            Ok(s) if !s.is_empty() => s,
+            _ => its_hub_address.to_string(),
+        },
+    }
+}
+
+/// If a cached Phase-A deploy for this (src, dst, deployer) tuple still has a
+/// valid destination token (responds to `name()`), return it so we can skip
+/// Phase A entirely. Returns None on any cache miss / staleness.
+async fn try_load_cached_phase_a<P: Provider>(
+    cache_file: &Path,
+    fresh_token: bool,
+    sol_pubkey: &solana_sdk::pubkey::Pubkey,
+    dst_provider: &P,
+) -> Option<(String, [u8; 32], Address)> {
+    if fresh_token {
+        return None;
+    }
+    let c = read_cache(cache_file)?;
+    if c.deployer != sol_pubkey.to_string() {
+        return None;
+    }
+    let tid_bytes: [u8; 32] = match alloy::hex::decode(c.token_id_hex.trim_start_matches("0x")) {
+        Ok(b) if b.len() == 32 => {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&b);
+            a
+        }
+        _ => return None,
+    };
+    let addr: Address = c.dest_token_address.parse().ok()?;
+    let token = ERC20::new(addr, dst_provider);
+    match token.name().call().await {
+        Ok(name) => Some((name, tid_bytes, addr)),
+        Err(_) => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -922,69 +1065,14 @@ pub async fn run_config(
     ui::address("ITS hub (cosm)", &its_hub_address);
 
     // --- Trust-chain check: dest ITS must trust the source chain ---
-    // Two ITS API generations are deployed in the wild:
-    //   * Older (the canonical 0xB5FB... testnet/mainnet deployment): exposes
-    //     `trustedAddress(chain)` — returns "hub" for hub-routed chains and the
-    //     hub's bech32 for "axelar". `isTrustedChain` reverts on this version.
-    //   * Newer: exposes `isTrustedChain(chain)` + `itsHubAddress()` getters.
-    // We probe the legacy API first since it's on more deployments today.
     let its = InterchainTokenService::new(dst_its_proxy, &dst_provider);
-    let legacy_trust = its
-        .trustedAddress(src_axelar_id.clone().into())
-        .call()
-        .await
-        .ok();
-    let new_trust = its
-        .isTrustedChain(src_axelar_id.clone().into())
-        .call()
-        .await
-        .ok();
-    let trusted = match (legacy_trust.as_deref(), new_trust) {
-        (Some(s), _) if !s.is_empty() => true,
-        (_, Some(b)) => b,
-        _ => false,
-    };
-    if !trusted {
-        ui::error(&format!(
-            "destination ITS at {dst_its_proxy} on {dst} does not trust source chain '{src_axelar_id}'"
-        ));
-        let owner = Ownable::new(dst_its_proxy, &dst_provider)
-            .owner()
-            .call()
-            .await
-            .ok();
-        let mut lines: Vec<String> = vec![format!(
-            "Set '{src_axelar_id}' as trusted on the destination ITS:"
-        )];
-        if let Some(owner) = owner {
-            lines.push(format!("  owner: {owner}"));
-        }
-        lines.push(format!(
-            "  cast send {dst_its_proxy} 'setTrustedChain(string)' '{src_axelar_id}' \\"
-        ));
-        lines.push(format!(
-            "    --rpc-url {dst_rpc} --private-key $PRIVATE_KEY"
-        ));
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        ui::action_required(&line_refs);
+    if !check_destination_trusts_source(&its, &src_axelar_id, dst_its_proxy, &dst, &dst_rpc).await?
+    {
         return Ok(());
     }
     ui::success(&format!("destination ITS trusts '{src_axelar_id}'"));
 
-    // Resolve the hub address that the destination ITS expects in `execute`'s
-    // sourceAddress. Try legacy `trustedAddress("axelar")` first, then new
-    // `itsHubAddress()`. Fall back to the cosm config.
-    let hub_address_evm_view: String = match its
-        .trustedAddress(crate::types::HubChain::NAME.to_string())
-        .call()
-        .await
-    {
-        Ok(s) if !s.is_empty() => s,
-        _ => match its.itsHubAddress().call().await {
-            Ok(s) if !s.is_empty() => s,
-            _ => its_hub_address.clone(),
-        },
-    };
+    let hub_address_evm_view = resolve_hub_address_evm_view(&its, &its_hub_address).await;
     ui::kv("hub address (EVM view)", &hub_address_evm_view);
 
     // ─────────────────────────────────────────────────────────────────────
@@ -996,35 +1084,8 @@ pub async fn run_config(
     // the cached tokenId. Pass `--fresh-token` to force a redeploy.
     // ─────────────────────────────────────────────────────────────────────
     let cache_file = cache_path(&src, &dst, &sol_pubkey.to_string());
-    let cached: Option<(String, [u8; 32], Address)> = if fresh_token {
-        None
-    } else if let Some(c) = read_cache(&cache_file) {
-        if c.deployer != sol_pubkey.to_string() {
-            None
-        } else {
-            let tid_bytes = match alloy::hex::decode(c.token_id_hex.trim_start_matches("0x")) {
-                Ok(b) if b.len() == 32 => {
-                    let mut a = [0u8; 32];
-                    a.copy_from_slice(&b);
-                    a
-                }
-                _ => [0u8; 32],
-            };
-            match c.dest_token_address.parse::<Address>() {
-                Ok(addr) if tid_bytes != [0u8; 32] => {
-                    // Validate the cached token still exists on the dest chain.
-                    let token = ERC20::new(addr, &dst_provider);
-                    match token.name().call().await {
-                        Ok(name) => Some((name, tid_bytes, addr)),
-                        Err(_) => None,
-                    }
-                }
-                _ => None,
-            }
-        }
-    } else {
-        None
-    };
+    let cached =
+        try_load_cached_phase_a(&cache_file, fresh_token, &sol_pubkey, &dst_provider).await;
 
     let (token_id, dest_token_addr) = if let Some((name, tid, addr)) = cached {
         ui::section("Phase A: skipped (cached deploy still valid)");

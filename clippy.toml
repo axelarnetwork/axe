@@ -1,6 +1,0 @@
-# Lint thresholds for the `axe` crate.
-#
-# This is the *temporary* threshold while we refactor the eight existing
-# offenders. The plan is to drive this back down to clippy's default 25.
-# See `.claude/plans/greedy-leaping-parnas.md` for the staged refactor.
-cognitive-complexity-threshold = 35

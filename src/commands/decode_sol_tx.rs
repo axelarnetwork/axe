@@ -870,27 +870,7 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
     let sig =
         Signature::from_str(txid).map_err(|e| eyre::eyre!("invalid Solana signature: {e}"))?;
 
-    // Try all Solana networks to find the transaction
-    let mut tx_data: Option<(String, EncodedConfirmedTransactionWithStatusMeta)> = None;
-
-    for (network, rpc_url) in SOLANA_RPCS {
-        let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
-        if let Ok(data) = rpc.get_transaction_with_config(
-            &sig,
-            solana_client::rpc_config::RpcTransactionConfig {
-                encoding: Some(UiTransactionEncoding::Json),
-                commitment: Some(CommitmentConfig::confirmed()),
-                max_supported_transaction_version: Some(0),
-            },
-        ) {
-            tx_data = Some((network.to_string(), data));
-            break;
-        }
-    }
-
-    let (network, tx_data) = tx_data.ok_or_else(|| {
-        eyre::eyre!("transaction not found on any Solana network (tried devnet, testnet, mainnet)")
-    })?;
+    let (network, tx_data) = try_fetch_transaction_from_any_network(&sig)?;
 
     let slot = tx_data.slot;
     let block_time = tx_data.block_time.unwrap_or(0);
@@ -901,13 +881,54 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
         .as_ref()
         .ok_or_else(|| eyre::eyre!("transaction has no metadata"))?;
 
-    let status = if meta.err.is_some() {
-        "Failed"
-    } else {
-        "Success"
-    };
+    let all_keys = collect_all_account_keys(&tx_data, meta);
+    let known = known_programs();
 
-    // Extract account keys
+    print_tx_header(&network, txid, slot, block_time, meta);
+
+    if let solana_transaction_status::EncodedTransaction::Json(ui_tx) =
+        &tx_data.transaction.transaction
+        && let solana_transaction_status::UiMessage::Raw(raw) = &ui_tx.message
+    {
+        print_top_level_instructions(&raw.instructions, &all_keys, &known);
+    }
+
+    if let OptionSerializer::Some(inner_ixs) = &meta.inner_instructions {
+        print_inner_instructions(inner_ixs, &all_keys, &known);
+    }
+
+    Ok(())
+}
+
+/// Try each known Solana network in order until one returns the transaction.
+/// Errors only when none have it.
+fn try_fetch_transaction_from_any_network(
+    sig: &Signature,
+) -> Result<(String, EncodedConfirmedTransactionWithStatusMeta)> {
+    for (network, rpc_url) in SOLANA_RPCS {
+        let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+        if let Ok(data) = rpc.get_transaction_with_config(
+            sig,
+            solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(UiTransactionEncoding::Json),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        ) {
+            return Ok((network.to_string(), data));
+        }
+    }
+    Err(eyre::eyre!(
+        "transaction not found on any Solana network (tried devnet, testnet, mainnet)"
+    ))
+}
+
+/// Concatenate the static account keys with any addresses loaded via ALTs so
+/// account-index lookups in the printers find every key.
+fn collect_all_account_keys(
+    tx_data: &EncodedConfirmedTransactionWithStatusMeta,
+    meta: &solana_transaction_status::UiTransactionStatusMeta,
+) -> Vec<Pubkey> {
     let account_keys: Vec<Pubkey> = match &tx_data.transaction.transaction {
         solana_transaction_status::EncodedTransaction::Json(ui_tx) => match &ui_tx.message {
             solana_transaction_status::UiMessage::Raw(raw) => raw
@@ -920,8 +941,7 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
         _ => vec![],
     };
 
-    // Get loaded addresses (from ALTs)
-    let mut all_keys = account_keys.clone();
+    let mut all_keys = account_keys;
     if let OptionSerializer::Some(loaded) = &meta.loaded_addresses {
         for k in &loaded.writable {
             if let Ok(pk) = Pubkey::from_str(k) {
@@ -934,15 +954,26 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
             }
         }
     }
+    all_keys
+}
 
-    let known = known_programs();
-
+fn print_tx_header(
+    network: &str,
+    txid: &str,
+    slot: u64,
+    block_time: i64,
+    meta: &solana_transaction_status::UiTransactionStatusMeta,
+) {
+    let status = if meta.err.is_some() {
+        "Failed"
+    } else {
+        "Success"
+    };
     let compute_units = match &meta.compute_units_consumed {
         OptionSerializer::Some(cu) => Some(*cu),
         _ => None,
     };
 
-    // Print header
     println!("{} Solana {}", "Network:".bold(), network.cyan());
     println!("{} {}", "Tx:".bold(), txid);
     println!("{} {}", "Slot:".bold(), slot);
@@ -966,185 +997,206 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
         let fee = meta.fee as f64 / 1e9;
         println!("{} ◎{fee}", "Fee:".bold());
     }
+}
 
-    // Print top-level instructions
-    if let solana_transaction_status::EncodedTransaction::Json(ui_tx) =
-        &tx_data.transaction.transaction
-        && let solana_transaction_status::UiMessage::Raw(raw) = &ui_tx.message
-    {
-        println!("\n{}", "━━ Instructions ━━".bold());
-        for (i, ix) in raw.instructions.iter().enumerate() {
-            let program_idx = ix.program_id_index as usize;
-            let program_id = all_keys.get(program_idx);
-            let program_label = program_id.and_then(|pk| known.get(pk)).copied();
-            let program_addr = program_id.map_or("unknown".to_string(), |pk| pk.to_string());
+fn print_top_level_instructions(
+    instructions: &[solana_transaction_status::UiCompiledInstruction],
+    all_keys: &[Pubkey],
+    known: &HashMap<Pubkey, &'static str>,
+) {
+    println!("\n{}", "━━ Instructions ━━".bold());
+    for (i, ix) in instructions.iter().enumerate() {
+        let program_idx = ix.program_id_index as usize;
+        let program_id = all_keys.get(program_idx);
+        let program_label = program_id.and_then(|pk| known.get(pk)).copied();
+        let program_addr = program_id.map_or("unknown".to_string(), |pk| pk.to_string());
 
-            // Skip ComputeBudget instructions (noise)
-            if program_label == Some("ComputeBudget") {
-                continue;
-            }
+        if program_label == Some("ComputeBudget") {
+            continue;
+        }
 
-            let data_bytes = bs58::decode(&ix.data).into_vec().unwrap_or_default();
-            let ix_name = instruction_name(&data_bytes).unwrap_or("unknown");
+        let data_bytes = bs58::decode(&ix.data).into_vec().unwrap_or_default();
+        let ix_name = instruction_name(&data_bytes).unwrap_or("unknown");
 
-            if let Some(label) = program_label {
-                println!(
-                    "\n[{}] {} {} {}",
-                    i.to_string().dimmed(),
-                    label.cyan(),
-                    ix_name.bold(),
-                    format!("({})", program_addr).dimmed(),
-                );
-            } else {
-                println!(
-                    "\n[{}] {} {}",
-                    i.to_string().dimmed(),
-                    program_addr.cyan(),
-                    ix_name.bold()
-                );
-            }
+        if let Some(label) = program_label {
+            println!(
+                "\n[{}] {} {} {}",
+                i.to_string().dimmed(),
+                label.cyan(),
+                ix_name.bold(),
+                format!("({})", program_addr).dimmed(),
+            );
+        } else {
+            println!(
+                "\n[{}] {} {}",
+                i.to_string().dimmed(),
+                program_addr.cyan(),
+                ix_name.bold()
+            );
+        }
 
-            // Decode instruction arguments
-            decode_instruction_args(ix_name, &data_bytes, "  │ ");
+        decode_instruction_args(ix_name, &data_bytes, "  │ ");
 
-            // Print accounts with role labels
-            println!("  {}", "Accounts:".dimmed());
-            let labels = account_labels(ix_name);
-            for (j, &acc_idx) in ix.accounts.iter().enumerate() {
-                let acc = all_keys.get(acc_idx as usize);
-                let label = labels.get(j).copied();
-                let acc_str = acc.map_or("?".to_string(), |pk| format_account(pk, &known, label));
-                println!("  │ {}: {}", j.to_string().dimmed(), acc_str);
+        println!("  {}", "Accounts:".dimmed());
+        let labels = account_labels(ix_name);
+        for (j, &acc_idx) in ix.accounts.iter().enumerate() {
+            let acc = all_keys.get(acc_idx as usize);
+            let label = labels.get(j).copied();
+            let acc_str = acc.map_or("?".to_string(), |pk| format_account(pk, known, label));
+            println!("  │ {}: {}", j.to_string().dimmed(), acc_str);
+        }
+    }
+}
+
+fn print_inner_instructions(
+    inner_ixs: &[solana_transaction_status::UiInnerInstructions],
+    all_keys: &[Pubkey],
+    known: &HashMap<Pubkey, &'static str>,
+) {
+    if !inner_ixs.is_empty() {
+        println!("\n{}", "━━ Inner Instructions (CPI) ━━".bold());
+    }
+    for group in inner_ixs {
+        for (i, ix) in group.instructions.iter().enumerate() {
+            if let UiInstruction::Compiled(ci) = ix {
+                print_inner_compiled_instruction(group.index, i, ci, all_keys, known);
             }
         }
     }
+}
 
-    // Print inner instructions (CPI events)
-    if let OptionSerializer::Some(inner_ixs) = &meta.inner_instructions {
-        if !inner_ixs.is_empty() {
-            println!("\n{}", "━━ Inner Instructions (CPI) ━━".bold());
-        }
-        for group in inner_ixs {
-            for (i, ix) in group.instructions.iter().enumerate() {
-                if let UiInstruction::Compiled(ci) = ix {
-                    let program_id = all_keys.get(ci.program_id_index as usize);
-                    let program_name = program_id
-                        .and_then(|pk| known.get(pk))
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| {
-                            program_id.map_or("?".to_string(), |pk| {
-                                let s = pk.to_string();
-                                if s.len() > 8 {
-                                    format!("{}..{}", &s[..4], &s[s.len() - 4..])
-                                } else {
-                                    s
-                                }
-                            })
-                        });
-
-                    let data_bytes = bs58::decode(&ci.data).into_vec().unwrap_or_default();
-
-                    // Skip noisy system/token plumbing CPI calls
-                    let is_system_program = matches!(
-                        program_name.as_str(),
-                        "SystemProgram"
-                            | "Token2022"
-                            | "TokenProgram"
-                            | "AssociatedToken"
-                            | "MetaplexMetadata"
-                            | "ComputeBudget"
-                    );
-                    let is_event = data_bytes.len() >= 16 && data_bytes[..8] == *EVENT_IX_TAG_LE;
-
-                    if is_system_program && !is_event {
-                        continue;
-                    }
-
-                    // Check if this is an Anchor CPI event
-                    if is_event {
-                        let event_disc = &data_bytes[8..16];
-                        let event = event_name(event_disc).unwrap_or("UnknownEvent");
-                        println!(
-                            "\n  [{}:{}] {} {} (depth {})",
-                            group.index,
-                            i,
-                            program_name.cyan(),
-                            format!("EVENT: {event}").yellow().bold(),
-                            ci.stack_height.unwrap_or(0),
-                        );
-
-                        // Try to decode event data
-                        let decoded = match event {
-                            "CallContractEvent" => {
-                                try_decode_call_contract_event(&data_bytes[16..])
-                            }
-                            "InterchainTransferSentEvent" => {
-                                try_decode_interchain_transfer_sent_event(&data_bytes[16..])
-                            }
-                            "InterchainTransferReceivedEvent" => {
-                                try_decode_interchain_transfer_received_event(&data_bytes[16..])
-                            }
-                            "InterchainTokenDeployedEvent" => {
-                                try_decode_interchain_token_deployed_event(&data_bytes[16..])
-                            }
-                            "TokenManagerDeployedEvent" => {
-                                try_decode_token_manager_deployed_event(&data_bytes[16..])
-                            }
-                            "MessageApprovedEvent" => {
-                                try_decode_message_approved_event(&data_bytes[16..])
-                            }
-                            "MessageExecutedEvent" => {
-                                try_decode_message_executed_event(&data_bytes[16..])
-                            }
-                            "VerifierSetRotatedEvent" => {
-                                try_decode_verifier_set_rotated_event(&data_bytes[16..])
-                            }
-                            "GasPaidEvent" => try_decode_gas_paid_event(&data_bytes[16..]),
-                            "GasAddedEvent" => try_decode_gas_added_event(&data_bytes[16..]),
-                            "GasRefundedEvent" => try_decode_gas_refunded_event(&data_bytes[16..]),
-                            "InterchainTokenDeploymentStartedEvent" => {
-                                try_decode_interchain_token_deployment_started_event(
-                                    &data_bytes[16..],
-                                )
-                            }
-                            _ => None,
-                        };
-                        if let Some(decoded) = decoded {
-                            for line in decoded.lines() {
-                                println!("      {line}");
-                            }
-                        }
-                    } else {
-                        let ix_name = instruction_name(&data_bytes).unwrap_or("unknown");
-                        println!(
-                            "\n  [{}:{}] {} {} (depth {})",
-                            group.index,
-                            i,
-                            program_name.cyan(),
-                            ix_name.bold(),
-                            ci.stack_height.unwrap_or(0),
-                        );
-
-                        // Decode instruction arguments
-                        decode_instruction_args(ix_name, &data_bytes, "    │ ");
-
-                        // Print inner instruction accounts with labels
-                        println!("    {}", "Accounts:".dimmed());
-                        let inner_labels = account_labels(ix_name);
-                        for (j, &acc_idx) in ci.accounts.iter().enumerate() {
-                            let acc = all_keys.get(acc_idx as usize);
-                            let label = inner_labels.get(j).copied();
-                            let acc_str =
-                                acc.map_or("?".to_string(), |pk| format_account(pk, &known, label));
-                            println!("    │ {}: {}", j.to_string().dimmed(), acc_str);
-                        }
-                    }
+fn print_inner_compiled_instruction(
+    group_index: u8,
+    i: usize,
+    ci: &solana_transaction_status::UiCompiledInstruction,
+    all_keys: &[Pubkey],
+    known: &HashMap<Pubkey, &'static str>,
+) {
+    let program_id = all_keys.get(ci.program_id_index as usize);
+    let program_name = program_id
+        .and_then(|pk| known.get(pk))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            program_id.map_or("?".to_string(), |pk| {
+                let s = pk.to_string();
+                if s.len() > 8 {
+                    format!("{}..{}", &s[..4], &s[s.len() - 4..])
+                } else {
+                    s
                 }
-            }
-        }
+            })
+        });
+
+    let data_bytes = bs58::decode(&ci.data).into_vec().unwrap_or_default();
+
+    let is_system_program = matches!(
+        program_name.as_str(),
+        "SystemProgram"
+            | "Token2022"
+            | "TokenProgram"
+            | "AssociatedToken"
+            | "MetaplexMetadata"
+            | "ComputeBudget"
+    );
+    let is_event = data_bytes.len() >= 16 && data_bytes[..8] == *EVENT_IX_TAG_LE;
+
+    if is_system_program && !is_event {
+        return;
     }
 
-    Ok(())
+    if is_event {
+        print_inner_anchor_event(group_index, i, ci, &program_name, &data_bytes);
+    } else {
+        print_inner_regular_instruction(
+            group_index,
+            i,
+            ci,
+            &program_name,
+            &data_bytes,
+            all_keys,
+            known,
+        );
+    }
+}
+
+fn print_inner_anchor_event(
+    group_index: u8,
+    i: usize,
+    ci: &solana_transaction_status::UiCompiledInstruction,
+    program_name: &str,
+    data_bytes: &[u8],
+) {
+    let event_disc = &data_bytes[8..16];
+    let event = event_name(event_disc).unwrap_or("UnknownEvent");
+    println!(
+        "\n  [{}:{}] {} {} (depth {})",
+        group_index,
+        i,
+        program_name.cyan(),
+        format!("EVENT: {event}").yellow().bold(),
+        ci.stack_height.unwrap_or(0),
+    );
+
+    let decoded = decode_anchor_event(event, &data_bytes[16..]);
+    if let Some(decoded) = decoded {
+        for line in decoded.lines() {
+            println!("      {line}");
+        }
+    }
+}
+
+/// Dispatch a borsh-encoded Anchor event payload to the right typed decoder
+/// based on the event name. Returns `None` for events we don't know how to
+/// pretty-print.
+fn decode_anchor_event(event: &str, body: &[u8]) -> Option<String> {
+    match event {
+        "CallContractEvent" => try_decode_call_contract_event(body),
+        "InterchainTransferSentEvent" => try_decode_interchain_transfer_sent_event(body),
+        "InterchainTransferReceivedEvent" => try_decode_interchain_transfer_received_event(body),
+        "InterchainTokenDeployedEvent" => try_decode_interchain_token_deployed_event(body),
+        "TokenManagerDeployedEvent" => try_decode_token_manager_deployed_event(body),
+        "MessageApprovedEvent" => try_decode_message_approved_event(body),
+        "MessageExecutedEvent" => try_decode_message_executed_event(body),
+        "VerifierSetRotatedEvent" => try_decode_verifier_set_rotated_event(body),
+        "GasPaidEvent" => try_decode_gas_paid_event(body),
+        "GasAddedEvent" => try_decode_gas_added_event(body),
+        "GasRefundedEvent" => try_decode_gas_refunded_event(body),
+        "InterchainTokenDeploymentStartedEvent" => {
+            try_decode_interchain_token_deployment_started_event(body)
+        }
+        _ => None,
+    }
+}
+
+fn print_inner_regular_instruction(
+    group_index: u8,
+    i: usize,
+    ci: &solana_transaction_status::UiCompiledInstruction,
+    program_name: &str,
+    data_bytes: &[u8],
+    all_keys: &[Pubkey],
+    known: &HashMap<Pubkey, &'static str>,
+) {
+    let ix_name = instruction_name(data_bytes).unwrap_or("unknown");
+    println!(
+        "\n  [{}:{}] {} {} (depth {})",
+        group_index,
+        i,
+        program_name.cyan(),
+        ix_name.bold(),
+        ci.stack_height.unwrap_or(0),
+    );
+
+    decode_instruction_args(ix_name, data_bytes, "    │ ");
+
+    println!("    {}", "Accounts:".dimmed());
+    let inner_labels = account_labels(ix_name);
+    for (j, &acc_idx) in ci.accounts.iter().enumerate() {
+        let acc = all_keys.get(acc_idx as usize);
+        let label = inner_labels.get(j).copied();
+        let acc_str = acc.map_or("?".to_string(), |pk| format_account(pk, known, label));
+        println!("    │ {}: {}", j.to_string().dimmed(), acc_str);
+    }
 }
 
 /// Decode instruction arguments based on the instruction name. Each arm
