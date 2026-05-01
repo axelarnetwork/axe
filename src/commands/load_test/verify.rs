@@ -2645,3 +2645,34 @@ fn check_solana_incoming_message(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_payload_hash;
+
+    #[test]
+    fn parse_payload_hash_accepts_64_hex_chars() {
+        let hex = "966599ba69b19c258625680014e1df0b6eb3d738cb5ec021eaacbdefb7ab69f8";
+        let parsed = parse_payload_hash(hex).unwrap();
+        assert_eq!(format!("{parsed:x}"), hex);
+    }
+
+    #[test]
+    fn parse_payload_hash_strips_0x_prefix() {
+        let hex = "0x966599ba69b19c258625680014e1df0b6eb3d738cb5ec021eaacbdefb7ab69f8";
+        assert!(parse_payload_hash(hex).is_ok());
+    }
+
+    #[test]
+    fn parse_payload_hash_rejects_wrong_length() {
+        let err = parse_payload_hash("deadbeef").unwrap_err();
+        assert!(err.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn parse_payload_hash_rejects_invalid_hex() {
+        // 'g' is not a hex digit; alloy::hex::decode bubbles a decode error.
+        let err = parse_payload_hash("gg".repeat(32).as_str()).unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+}

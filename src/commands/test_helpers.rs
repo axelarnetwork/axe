@@ -369,3 +369,60 @@ pub async fn execute_on_axelarnet_gateway(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn wasm_event(attrs: &[(&str, &str)]) -> serde_json::Value {
+        json!({
+            "tx_response": {
+                "events": [
+                    {
+                        "type": "wasm-routing",
+                        "attributes": attrs
+                            .iter()
+                            .map(|(k, v)| json!({ "key": k, "value": v }))
+                            .collect::<Vec<_>>(),
+                    }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn extract_poll_id_finds_attr_in_wasm_event() {
+        let resp = wasm_event(&[("poll_id", "42"), ("other", "x")]);
+        assert_eq!(extract_poll_id(&resp), Some("42".to_string()));
+    }
+
+    #[test]
+    fn extract_poll_id_strips_surrounding_quotes() {
+        // Cosmos LCD sometimes wraps numeric attribute values in quotes; the
+        // helper must trim them so callers can parse the raw integer.
+        let resp = wasm_event(&[("poll_id", "\"123\"")]);
+        assert_eq!(extract_poll_id(&resp), Some("123".to_string()));
+    }
+
+    #[test]
+    fn extract_poll_id_returns_none_when_no_event_or_attr() {
+        assert_eq!(extract_poll_id(&json!({})), None);
+        assert_eq!(extract_poll_id(&wasm_event(&[("foo", "bar")])), None);
+    }
+
+    #[test]
+    fn extract_event_attr_errors_when_missing() {
+        let err = extract_event_attr(&wasm_event(&[("foo", "bar")]), "missing").unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn extract_event_attr_returns_value() {
+        let resp = wasm_event(&[("multisig_session_id", "7")]);
+        assert_eq!(
+            extract_event_attr(&resp, "multisig_session_id").unwrap(),
+            "7"
+        );
+    }
+}
