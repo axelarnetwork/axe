@@ -68,10 +68,7 @@ pub fn read_contract_address(
         .chains
         .get(axelar_id)
         .ok_or_else(|| eyre::eyre!("chain '{axelar_id}' not found in target json"))?;
-    let addr_str = chain
-        .contract_address(contract_name)
-        .ok_or_else(|| eyre::eyre!("{contract_name} not deployed yet for {axelar_id}"))?;
-    Ok(addr_str.parse()?)
+    Ok(chain.contract_address(contract_name, axelar_id)?.parse()?)
 }
 
 /// Derive the axelar-contract-deployments repo root from target_json path.
@@ -138,10 +135,7 @@ pub fn compute_domain_separator(target_json: &Path, axelar_id: &str) -> Result<F
         .and_then(|c| c.axelar_id.as_deref())
         .ok_or_else(|| eyre::eyre!("no axelarId for chain {axelar_id}"))?;
 
-    let router_address = cfg
-        .axelar
-        .global_contract_address("Router")
-        .ok_or_else(|| eyre::eyre!("no axelar.contracts.Router.address in target json"))?;
+    let router_address = cfg.axelar.global_contract_address("Router")?;
 
     let axelar_chain_id = cfg
         .axelar

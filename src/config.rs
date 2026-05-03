@@ -107,39 +107,73 @@ pub struct AxelarConfig {
 }
 
 impl AxelarConfig {
-    /// Look up `axelar.contracts.<contract>.<chain>.address`. Returns `None`
-    /// if the contract or chain entry is missing or the entry has no
-    /// `address` field (some entries are metadata, like `lastUploadedCodeId`).
-    pub fn contract_address(&self, contract: &str, chain: &str) -> Option<&str> {
-        self.contracts
-            .as_ref()?
-            .get(contract)?
-            .get(chain)?
-            .get("address")?
-            .as_str()
+    /// Look up `axelar.contracts.<contract>.<chain>.address`. Errors with a
+    /// `field not found` message if the contract entry, chain entry, or
+    /// address string is missing — callers can `.ok()` to opt back into
+    /// `Option` semantics where absence is acceptable.
+    pub fn contract_address(&self, contract: &str, chain: &str) -> Result<&str> {
+        let opt = (|| -> Option<&str> {
+            self.contracts
+                .as_ref()?
+                .get(contract)?
+                .get(chain)?
+                .get("address")?
+                .as_str()
+        })();
+        opt.ok_or_else(|| {
+            eyre::eyre!("no axelar.contracts.{contract}.{chain}.address in target json")
+        })
     }
 
     /// Look up `axelar.contracts.<contract>.address` — the chain-agnostic
     /// (global) form used by hub-level contracts like AxelarnetGateway,
     /// Router, Multisig, Coordinator, etc., which don't have a per-chain
     /// breakdown at this level.
-    pub fn global_contract_address(&self, contract: &str) -> Option<&str> {
-        self.contracts
-            .as_ref()?
-            .get(contract)?
-            .get("address")?
-            .as_str()
+    pub fn global_contract_address(&self, contract: &str) -> Result<&str> {
+        let opt = (|| -> Option<&str> {
+            self.contracts
+                .as_ref()?
+                .get(contract)?
+                .get("address")?
+                .as_str()
+        })();
+        opt.ok_or_else(|| eyre::eyre!("no axelar.contracts.{contract}.address in target json"))
     }
 
     /// Parse the raw `"0.007uaxl"`-shaped `gasPrice` into `(price, denom)`.
-    /// Returns `None` if the field is missing or doesn't carry a numeric
-    /// prefix; callers should `?` and produce a contextual error rather
-    /// than silently picking a default.
-    pub fn parse_gas_price(&self) -> Option<(f64, String)> {
-        let raw = self.gas_price.as_deref()?;
-        let split = raw.find(|c: char| c.is_alphabetic())?;
-        let price: f64 = raw[..split].parse().ok()?;
-        Some((price, raw[split..].to_string()))
+    /// Errors if the field is missing or doesn't carry a numeric prefix;
+    /// silent defaults are unsafe because the hub binds the denom and price
+    /// to specific deployments.
+    pub fn parse_gas_price(&self) -> Result<(f64, String)> {
+        let raw = self
+            .gas_price
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("no axelar.gasPrice in target json"))?;
+        let split = raw
+            .find(|c: char| c.is_alphabetic())
+            .ok_or_else(|| eyre::eyre!("axelar.gasPrice '{raw}' has no denom suffix"))?;
+        let price: f64 = raw[..split]
+            .parse()
+            .map_err(|e| eyre::eyre!("axelar.gasPrice '{raw}' numeric prefix invalid: {e}"))?;
+        Ok((price, raw[split..].to_string()))
+    }
+
+    /// The four fields needed to sign and broadcast a cosmos tx against the
+    /// Axelar hub: `(lcd, chain_id, fee_denom, gas_price)`. Errors if any
+    /// of them are missing or unparseable. Replaces the old free-standing
+    /// `cosmos::read_axelar_config` once all callers have switched to the
+    /// typed config.
+    pub fn cosmos_tx_params(&self) -> Result<(String, String, String, f64)> {
+        let (price, denom) = self.parse_gas_price()?;
+        let lcd = self
+            .lcd
+            .clone()
+            .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?;
+        let chain_id = self
+            .chain_id
+            .clone()
+            .ok_or_else(|| eyre::eyre!("no axelar.chainId in target json"))?;
+        Ok((lcd, chain_id, denom, price))
     }
 }
 
@@ -159,11 +193,13 @@ pub struct ContractEntry {
 }
 
 impl ChainConfig {
-    /// Look up `chains.<this>.contracts.<contract>.address`. Returns `None`
-    /// if the contracts map is missing, the named contract is absent, or
-    /// the entry has no `address` field.
-    pub fn contract_address(&self, contract: &str) -> Option<&str> {
-        self.contracts.as_ref()?.get(contract)?.address.as_deref()
+    /// Look up `chains.<this>.contracts.<contract>.address`. Errors with a
+    /// `not deployed yet` message if the contract entry or address is
+    /// missing — callers can `.ok()` to opt back into `Option` semantics.
+    pub fn contract_address(&self, contract: &str, axelar_id: &str) -> Result<&str> {
+        let opt =
+            (|| -> Option<&str> { self.contracts.as_ref()?.get(contract)?.address.as_deref() })();
+        opt.ok_or_else(|| eyre::eyre!("{contract} not deployed yet for {axelar_id}"))
     }
 }
 
@@ -231,9 +267,10 @@ mod tests {
         assert_eq!(flow.token_symbol.as_deref(), Some("FLOW"));
         assert_eq!(flow.decimals, Some(18));
         assert_eq!(
-            flow.contract_address("AxelarGateway"),
-            Some("0xe432150cce91c13a887f7D836923d5597adD8E31"),
+            flow.contract_address("AxelarGateway", "flow").unwrap(),
+            "0xe432150cce91c13a887f7D836923d5597adD8E31",
         );
+        assert!(flow.contract_address("AxelarMissing", "flow").is_err());
 
         let sol = cfg.chains.get("solana").expect("solana present");
         assert_eq!(sol.chain_type.as_deref(), Some("svm"));
@@ -257,15 +294,23 @@ mod tests {
         assert!((price - 0.007).abs() < 1e-12);
         assert_eq!(denom, "uaxl");
 
+        let (lcd, chain_id, fee_denom, gas_price) =
+            cfg.axelar.cosmos_tx_params().expect("tx params resolve");
+        assert_eq!(lcd, "https://lcd-axelar-testnet.imperator.co");
+        assert_eq!(chain_id, "axelar-testnet-lisbon-3");
+        assert_eq!(fee_denom, "uaxl");
+        assert!((gas_price - 0.007).abs() < 1e-12);
+
         assert_eq!(
-            cfg.axelar.contract_address("Gateway", "flow"),
-            Some("axelar1w8frw33jn0yx59845wdgk0yru6fxvgr6hlh4xfdtdf08y5jamcnsyu0z6u"),
+            cfg.axelar.contract_address("Gateway", "flow").unwrap(),
+            "axelar1w8frw33jn0yx59845wdgk0yru6fxvgr6hlh4xfdtdf08y5jamcnsyu0z6u",
         );
-        // Metadata keys (lastUploadedCodeId) carry no `address` and must
-        // surface as None rather than panicking.
-        assert_eq!(
-            cfg.axelar.contract_address("Gateway", "lastUploadedCodeId"),
-            None
+        // Metadata keys (lastUploadedCodeId) carry no `address` field, so the
+        // lookup surfaces as a `field not found` error rather than panicking.
+        assert!(
+            cfg.axelar
+                .contract_address("Gateway", "lastUploadedCodeId")
+                .is_err()
         );
     }
 
@@ -289,7 +334,7 @@ mod tests {
         assert!(cfg.chains.contains_key("solana"), "solana chain present");
         assert!(cfg.axelar.lcd.is_some(), "axelar.lcd present");
         assert!(
-            cfg.axelar.parse_gas_price().is_some(),
+            cfg.axelar.parse_gas_price().is_ok(),
             "axelar.gasPrice parses",
         );
     }

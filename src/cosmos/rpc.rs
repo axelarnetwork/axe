@@ -226,19 +226,9 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
 /// masked config drift (e.g. a missing `gasPrice` falling back to
 /// `0.007uaxl`), so callers should always hit a real on-disk config.
 pub fn read_axelar_config(target_json: &Path) -> Result<(String, String, String, f64)> {
-    let cfg = crate::config::ChainsConfig::load(target_json)?;
-    let (price, denom) = cfg.axelar.parse_gas_price().ok_or_else(|| {
-        eyre::eyre!("no parseable axelar.gasPrice in target json (expected e.g. \"0.007uaxl\")")
-    })?;
-    let lcd = cfg
+    crate::config::ChainsConfig::load(target_json)?
         .axelar
-        .lcd
-        .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?;
-    let chain_id = cfg
-        .axelar
-        .chain_id
-        .ok_or_else(|| eyre::eyre!("no axelar.chainId in target json"))?;
-    Ok((lcd, chain_id, denom, price))
+        .cosmos_tx_params()
 }
 
 /// Read a string field from axelar contracts config

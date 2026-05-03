@@ -9,17 +9,18 @@ use std::time::Instant;
 use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 use serde_json::json;
+use solana_sdk::signer::Signer;
 
 use destination::approve_and_execute_evm;
 use sender_receiver::ensure_sender_receiver_deployed;
 use source::send_evm_call_contract;
 
 use crate::cli::resolve_axelar_id;
-use crate::cosmos::{
-    check_axelar_balance, derive_axelar_wallet, read_axelar_config, read_axelar_contract_field,
-};
+use crate::config::ChainsConfig;
+use crate::cosmos::{check_axelar_balance, derive_axelar_wallet};
 use crate::preflight;
 use crate::state::read_state;
+use crate::types::ChainType;
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -32,6 +33,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     let rpc_url = state.rpc_url.clone();
     let target_json = state.target_json.clone();
+    let cfg = ChainsConfig::load(&target_json)?;
 
     let private_key = state
         .deployer_private_key
@@ -71,23 +73,14 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::section("Amplifier Routing");
 
     let (signing_key, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&target_json)?;
+    let (lcd, chain_id, fee_denom, gas_price) = cfg.axelar.cosmos_tx_params()?;
 
-    let cosm_gateway = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/Gateway/{axelar_id}/address"),
-    )?;
-    let voting_verifier = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/VotingVerifier/{axelar_id}/address"),
-    )?;
-    let multisig_prover = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/MultisigProver/{axelar_id}/address"),
-    )?;
+    let cosm_gateway = cfg.axelar.contract_address("Gateway", &axelar_id)?;
+    let voting_verifier = cfg.axelar.contract_address("VotingVerifier", &axelar_id)?;
+    let multisig_prover = cfg.axelar.contract_address("MultisigProver", &axelar_id)?;
 
-    ui::address("cosmos gateway", &cosm_gateway);
-    ui::address("voting verifier", &voting_verifier);
+    ui::address("cosmos gateway", cosm_gateway);
+    ui::address("voting verifier", voting_verifier);
     ui::address("axelar address", &axelar_address);
 
     let gmp_msg = json!({
@@ -108,9 +101,9 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         chain_id: &chain_id,
         fee_denom: &fee_denom,
         gas_price,
-        cosm_gateway: &cosm_gateway,
-        voting_verifier: Some(&voting_verifier),
-        multisig_prover: &multisig_prover,
+        cosm_gateway,
+        voting_verifier: Some(voting_verifier),
+        multisig_prover,
     };
     let execute_data_hex =
         relay::run_full_sequence(&ctx, &gmp_msg, &axelar_id, &message_id, TOTAL_STEPS).await?;
@@ -148,36 +141,34 @@ pub async fn run_config(
     destination_chain: Option<String>,
     mnemonic_override: Option<String>,
 ) -> Result<()> {
-    let config_content =
-        std::fs::read_to_string(&config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+    let cfg = ChainsConfig::load(&config)?;
 
-    let chains = config_root
-        .get("chains")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| eyre::eyre!("no 'chains' in config"))?;
-
-    // Resolve source and destination chains
     let src = source_chain.ok_or_else(|| eyre::eyre!("--source-chain required with --config"))?;
     let dst = destination_chain.unwrap_or_else(|| src.clone());
 
-    let src_type: crate::types::ChainType = chains
+    let src_cfg = cfg
+        .chains
         .get(&src)
-        .and_then(|v| v.get("chainType"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?
-        .parse()?;
-    let dst_type: crate::types::ChainType = chains
+        .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
+    let dst_cfg = cfg
+        .chains
         .get(&dst)
-        .and_then(|v| v.get("chainType"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?
+        .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
+
+    let src_type: ChainType = src_cfg
+        .chain_type
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("no chainType for source chain '{src}'"))?
+        .parse()?;
+    let dst_type: ChainType = dst_cfg
+        .chain_type
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("no chainType for destination chain '{dst}'"))?
         .parse()?;
 
-    let src_rpc = chains
-        .get(&src)
-        .and_then(|v| v.get("rpc"))
-        .and_then(|v| v.as_str())
+    let src_rpc = src_cfg
+        .rpc
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no RPC for source chain '{src}'"))?;
 
     let gmp_start = Instant::now();
@@ -185,13 +176,12 @@ pub async fn run_config(
     ui::kv("source", &format!("{src} ({src_type})"));
     ui::kv("destination", &format!("{dst} ({dst_type})"));
 
-    // --- Preflight: derive Axelar wallet and check it can pay for the relay ---
     let mnemonic = mnemonic_override
         .clone()
         .or_else(|| std::env::var("MNEMONIC").ok())
         .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
     let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&config)?;
+    let (lcd, chain_id, fee_denom, gas_price) = cfg.axelar.cosmos_tx_params()?;
 
     ui::section("Preflight");
     ui::address("axelar address", &axelar_address);
@@ -206,12 +196,10 @@ pub async fn run_config(
     )
     .await?;
 
-    // Solana keypair balance checks: catch underfunded keys here with a clear
-    // error rather than the cryptic "Attempt to debit an account but found no
-    // record of a prior credit" we get from the RPC at send-time.
-    use crate::types::ChainType;
+    // Catch underfunded Solana keys here with a clear error rather than the
+    // cryptic "Attempt to debit an account but found no record of a prior
+    // credit" we'd otherwise get from the RPC at send-time.
     if src_type == ChainType::Svm || dst_type == ChainType::Svm {
-        use solana_sdk::signer::Signer;
         let keypair = crate::solana::load_keypair(None)?;
         if src_type == ChainType::Svm {
             crate::solana::check_solana_balance(
@@ -222,10 +210,9 @@ pub async fn run_config(
             )?;
         }
         if dst_type == ChainType::Svm {
-            let dst_rpc = chains
-                .get(&dst)
-                .and_then(|v| v.get("rpc"))
-                .and_then(|v| v.as_str())
+            let dst_rpc = dst_cfg
+                .rpc
+                .as_deref()
                 .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
             crate::solana::check_solana_balance(
                 dst_rpc,
@@ -254,21 +241,13 @@ pub async fn run_config(
     } = sent;
     let payload_hash_hex = alloy::hex::encode(payload_hash);
 
-    let cosm_gateway =
-        read_axelar_contract_field(&config, &format!("/axelar/contracts/Gateway/{src}/address"))?;
-    let voting_verifier = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/VotingVerifier/{src}/address"),
-    )
-    .ok();
-    let multisig_prover = read_axelar_contract_field(
-        &config,
-        &format!("/axelar/contracts/MultisigProver/{dst}/address"),
-    )?;
+    let cosm_gateway = cfg.axelar.contract_address("Gateway", &src)?;
+    let voting_verifier = cfg.axelar.contract_address("VotingVerifier", &src).ok();
+    let multisig_prover = cfg.axelar.contract_address("MultisigProver", &dst)?;
 
     ui::section("Amplifier Routing");
-    ui::address("cosmos gateway", &cosm_gateway);
-    if let Some(ref vv) = voting_verifier {
+    ui::address("cosmos gateway", cosm_gateway);
+    if let Some(vv) = voting_verifier {
         ui::address("voting verifier", vv);
     }
     ui::address("axelar address", &axelar_address);
@@ -291,18 +270,17 @@ pub async fn run_config(
         chain_id: &chain_id,
         fee_denom: &fee_denom,
         gas_price,
-        cosm_gateway: &cosm_gateway,
-        voting_verifier: voting_verifier.as_deref(),
-        multisig_prover: &multisig_prover,
+        cosm_gateway,
+        voting_verifier,
+        multisig_prover,
     };
     let execute_data_hex = relay::run_full_sequence(&ctx, &gmp_msg, &src, &message_id, 8).await?;
 
     match dst_type {
         ChainType::Svm => {
-            let dst_rpc = chains
-                .get(&dst)
-                .and_then(|v| v.get("rpc"))
-                .and_then(|v| v.as_str())
+            let dst_rpc = dst_cfg
+                .rpc
+                .as_deref()
                 .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
             destination::approve_and_execute_svm(
                 dst_rpc,
