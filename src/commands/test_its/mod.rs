@@ -66,6 +66,17 @@ const DEST_CHAIN: &str = "flow";
 
 const PHASE_B_STEPS: usize = 9;
 
+/// Default cross-chain gas budget (in source-chain native units, lamports for
+/// SVM senders) for an ITS `deployRemoteInterchainToken` / link-token
+/// proposal. 0.01 SOL covers the relay round-trip with comfortable headroom
+/// at testnet rates.
+const DEFAULT_ITS_GAS_VALUE_LAMPORTS: u64 = 10_000_000;
+
+/// Default ITS interchain-transfer amount in token base units. The SVM-side
+/// test token mints with 9 decimals, so 1_000_000 base units = 0.001 token —
+/// large enough for a balance-poll signal, small enough not to dust mints.
+const DEFAULT_ITS_TRANSFER_AMOUNT_BASE_UNITS: u64 = 1_000_000;
+
 // Token parameters live in `crate::types::EVM_LEGACY_SPEC` (legacy EVM-direct
 // `run`) and `ITS_CONFIG_SPEC` (config-mode `run_config`).
 //
@@ -472,7 +483,7 @@ pub async fn run_config(
     fresh_token: bool,
 ) -> Result<()> {
     let start = Instant::now();
-    let gas_value = gas_value.unwrap_or(10_000_000);
+    let gas_value = gas_value.unwrap_or(DEFAULT_ITS_GAS_VALUE_LAMPORTS);
 
     let cfg = ChainsConfig::load(&config)?;
 
@@ -693,7 +704,7 @@ pub async fn run_config(
     // Phase B: interchain transfer (manual relay)
     // ─────────────────────────────────────────────────────────────────────
     let phase_b_start = Instant::now();
-    let amount = amount.unwrap_or(1_000_000); // 0.001 token at 9 decimals
+    let amount = amount.unwrap_or(DEFAULT_ITS_TRANSFER_AMOUNT_BASE_UNITS);
     let receiver_bytes = evm_signer_address.as_slice().to_vec();
     let token_program_2022 =
         solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
