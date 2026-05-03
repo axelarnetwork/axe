@@ -312,29 +312,6 @@ impl From<ChainAxelarId> for String {
     }
 }
 
-/// JSON pointer to the Cosmos `Gateway` contract address for a given chain.
-/// Takes a `ChainAxelarId` because that's what the Axelar deployments use as
-/// the path segment (NOT the JSON key — they often differ).
-pub fn cosm_gateway_pointer(chain: &ChainAxelarId) -> String {
-    format!("/axelar/contracts/Gateway/{}/address", chain.as_str())
-}
-
-/// JSON pointer to the `VotingVerifier` contract address for a given chain.
-pub fn voting_verifier_pointer(chain: &ChainAxelarId) -> String {
-    format!(
-        "/axelar/contracts/VotingVerifier/{}/address",
-        chain.as_str()
-    )
-}
-
-/// JSON pointer to the `MultisigProver` contract address for a given chain.
-pub fn multisig_prover_pointer(chain: &ChainAxelarId) -> String {
-    format!(
-        "/axelar/contracts/MultisigProver/{}/address",
-        chain.as_str()
-    )
-}
-
 // ---------------------------------------------------------------------------
 // ItsMessageType — the discriminator for inbound/outbound ITS messages.
 // ---------------------------------------------------------------------------

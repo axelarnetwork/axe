@@ -50,12 +50,12 @@ use crate::commands::test_helpers::{
     end_poll_with_retry, execute_on_axelarnet_gateway, route_messages_with_retry,
     submit_verify_messages_amplifier, wait_for_poll_votes,
 };
-use crate::cosmos::{
-    derive_axelar_wallet, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
-};
+use crate::config::ChainsConfig;
+use crate::cosmos::derive_axelar_wallet;
 use crate::evm::{ERC20, InterchainToken, InterchainTokenFactory, InterchainTokenService, Ownable};
 use crate::preflight;
 use crate::state::read_state;
+use crate::types::{ChainAxelarId, ChainType};
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -81,6 +81,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     let rpc_url = state.rpc_url.clone();
     let target_json = state.target_json.clone();
+    let cfg = ChainsConfig::load(&target_json)?;
 
     let private_key = state
         .deployer_private_key
@@ -93,25 +94,18 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
 
-    // --- Pre-flight: check deployer balance ---
-    let token_symbol = std::fs::read_to_string(&target_json)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|root| {
-            root.pointer(&format!("/chains/{axelar_id}/tokenSymbol"))
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "ETH".to_string());
-    preflight::check_evm_balances(&rpc_url, &[("deployer", deployer_address)], &token_symbol)
-        .await?;
+    preflight::check_deployer_balance(&rpc_url, deployer_address, &target_json, &axelar_id).await?;
 
     let its_factory_addr =
         read_contract_address(&target_json, &axelar_id, "InterchainTokenFactory")?;
     let its_proxy_addr = read_contract_address(&target_json, &axelar_id, "InterchainTokenService")?;
 
-    // Read destination chain config from testnet.json
-    let dest_rpc = read_axelar_contract_field(&target_json, &format!("/chains/{DEST_CHAIN}/rpc"))?;
+    let dest_rpc = cfg
+        .chains
+        .get(DEST_CHAIN)
+        .and_then(|c| c.rpc.as_deref())
+        .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{DEST_CHAIN}' in target json"))?
+        .to_string();
     let dest_its_addr = read_contract_address(&target_json, DEST_CHAIN, "InterchainTokenService")?;
 
     ui::section(&format!("ITS Test: {axelar_id} → {DEST_CHAIN}"));
@@ -229,16 +223,16 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     ui::section("Amplifier Routing (source → hub)");
 
     let (signing_key, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&target_json)?;
+    let (lcd, chain_id, fee_denom, gas_price) = cfg.axelar.cosmos_tx_params()?;
 
-    let cosm_gateway = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/Gateway/{axelar_id}/address"),
-    )?;
-    let voting_verifier = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/VotingVerifier/{axelar_id}/address"),
-    )?;
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", &axelar_id)?
+        .to_string();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", &axelar_id)?
+        .to_string();
 
     ui::address("cosmos gateway", &cosm_gateway);
     ui::address("voting verifier", &voting_verifier);
@@ -309,8 +303,10 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     // ── Step 6: Execute on AxelarnetGateway (hub) ───────────────────────
     ui::step_header(6, TOTAL_STEPS, "Execute on AxelarnetGateway (hub)");
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(&target_json, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
     ui::address("AxelarnetGateway", &axelarnet_gateway);
 
     execute_on_axelarnet_gateway(
@@ -478,34 +474,28 @@ pub async fn run_config(
     let start = Instant::now();
     let gas_value = gas_value.unwrap_or(10_000_000);
 
-    let config_content =
-        std::fs::read_to_string(&config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
-    let chains = config_root
-        .get("chains")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| eyre::eyre!("no 'chains' in config"))?;
+    let cfg = ChainsConfig::load(&config)?;
 
     let src = source_chain.ok_or_else(|| eyre::eyre!("--source-chain required"))?;
     let dst = destination_chain.ok_or_else(|| eyre::eyre!("--destination-chain required"))?;
 
-    let src_entry = chains
+    let src_cfg = cfg
+        .chains
         .get(&src)
         .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
-    let dst_entry = chains
+    let dst_cfg = cfg
+        .chains
         .get(&dst)
         .ok_or_else(|| eyre::eyre!("destination chain '{dst}' not found in config"))?;
 
-    use crate::types::ChainType;
-    let src_type: ChainType = src_entry
-        .get("chainType")
-        .and_then(|v| v.as_str())
+    let src_type: ChainType = src_cfg
+        .chain_type
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("source chain '{src}' has no chainType"))?
         .parse()?;
-    let dst_type: ChainType = dst_entry
-        .get("chainType")
-        .and_then(|v| v.as_str())
+    let dst_type: ChainType = dst_cfg
+        .chain_type
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("destination chain '{dst}' has no chainType"))?
         .parse()?;
 
@@ -515,33 +505,22 @@ pub async fn run_config(
         ));
     }
 
-    let src_rpc = src_entry
-        .get("rpc")
-        .and_then(|v| v.as_str())
+    let src_rpc = src_cfg
+        .rpc
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no RPC for source chain '{src}'"))?
         .to_string();
-    let dst_rpc = dst_entry
-        .get("rpc")
-        .and_then(|v| v.as_str())
+    let dst_rpc = dst_cfg
+        .rpc
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?
         .to_string();
 
     // Cosmos-side identifiers for the source/destination chains. Consensus
     // chains use a capitalised axelarId distinct from the JSON key — keep
     // them as separate types so the compiler refuses to confuse them.
-    use crate::types::ChainAxelarId;
-    let src_axelar_id: ChainAxelarId = src_entry
-        .get("axelarId")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&src)
-        .to_owned()
-        .into();
-    let dst_axelar_id: ChainAxelarId = dst_entry
-        .get("axelarId")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&dst)
-        .to_owned()
-        .into();
+    let src_axelar_id: ChainAxelarId = src_cfg.axelar_id_or(&src).into();
+    let dst_axelar_id: ChainAxelarId = dst_cfg.axelar_id_or(&dst).into();
 
     ui::section(&format!("ITS Test: {src} → {dst}"));
     ui::kv("source", &format!("{src} ({src_axelar_id}, {src_type})"));
@@ -555,8 +534,13 @@ pub async fn run_config(
         .or_else(|| std::env::var("MNEMONIC").ok())
         .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
     let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&config)?;
-    let axelar_rpc = read_axelar_rpc(&config)?;
+    let (lcd, chain_id, fee_denom, gas_price) = cfg.axelar.cosmos_tx_params()?;
+    let axelar_rpc = cfg
+        .axelar
+        .rpc
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("no axelar.rpc in target json"))?
+        .to_string();
 
     ui::section("Preflight");
     ui::address("axelar address", &axelar_address);
@@ -591,10 +575,10 @@ pub async fn run_config(
     let evm_signer_address = evm_signer.address();
     ui::address("evm signer / receiver", &format!("{evm_signer_address}"));
 
-    let token_symbol = dst_entry
-        .get("tokenSymbol")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ETH");
+    let token_symbol = dst_cfg
+        .token_symbol
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("no tokenSymbol for destination chain '{dst}'"))?;
     preflight::check_evm_balances(
         &dst_rpc,
         &[("dest evm signer", evm_signer_address)],
@@ -607,21 +591,32 @@ pub async fn run_config(
         .connect_http(dst_rpc.parse()?);
 
     // --- Resolve contract addresses ---
-    use crate::types::{cosm_gateway_pointer, multisig_prover_pointer, voting_verifier_pointer};
     let dst_its_proxy = read_contract_address(&config, &dst, "InterchainTokenService")?;
     let dst_evm_gateway = read_contract_address(&config, &dst, "AxelarGateway")?;
-    let src_cosm_gateway =
-        read_axelar_contract_field(&config, &cosm_gateway_pointer(&src_axelar_id))?;
-    let voting_verifier =
-        read_axelar_contract_field(&config, &voting_verifier_pointer(&src_axelar_id))?;
-    let dst_cosm_gateway =
-        read_axelar_contract_field(&config, &cosm_gateway_pointer(&dst_axelar_id))?;
-    let dst_multisig_prover =
-        read_axelar_contract_field(&config, &multisig_prover_pointer(&dst_axelar_id))?;
-    let axelarnet_gateway =
-        read_axelar_contract_field(&config, "/axelar/contracts/AxelarnetGateway/address")?;
-    let its_hub_address =
-        read_axelar_contract_field(&config, "/axelar/contracts/InterchainTokenService/address")?;
+    let src_cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", src_axelar_id.as_str())?
+        .to_string();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", src_axelar_id.as_str())?
+        .to_string();
+    let dst_cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", dst_axelar_id.as_str())?
+        .to_string();
+    let dst_multisig_prover = cfg
+        .axelar
+        .contract_address("MultisigProver", dst_axelar_id.as_str())?
+        .to_string();
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
+    let its_hub_address = cfg
+        .axelar
+        .global_contract_address("InterchainTokenService")?
+        .to_string();
 
     ui::address("dest ITS proxy", &format!("{dst_its_proxy}"));
     ui::address("dest EVM gateway", &format!("{dst_evm_gateway}"));

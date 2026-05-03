@@ -201,6 +201,17 @@ impl ChainConfig {
             (|| -> Option<&str> { self.contracts.as_ref()?.get(contract)?.address.as_deref() })();
         opt.ok_or_else(|| eyre::eyre!("{contract} not deployed yet for {axelar_id}"))
     }
+
+    /// Return this chain's `axelarId`, falling back to the supplied JSON key
+    /// when the field is absent. The cosmos-side `axelarId` often differs
+    /// from the JSON key (e.g. JSON key `"avalanche"` but
+    /// `axelarId: "Avalanche"`); for chains where it isn't set, callers
+    /// conventionally reuse the JSON key.
+    pub fn axelar_id_or(&self, fallback: &str) -> String {
+        self.axelar_id
+            .clone()
+            .unwrap_or_else(|| fallback.to_owned())
+    }
 }
 
 #[cfg(test)]
