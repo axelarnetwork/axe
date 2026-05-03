@@ -1,4 +1,5 @@
 mod destination;
+mod relay;
 mod sender_receiver;
 mod source;
 
@@ -15,8 +16,7 @@ use source::send_evm_call_contract;
 
 use crate::cli::resolve_axelar_id;
 use crate::commands::test_helpers::{
-    end_poll_with_retry, extract_event_attr, extract_poll_id, route_messages_with_retry,
-    submit_verify_messages_amplifier, wait_for_poll_votes, wait_for_proof,
+    extract_event_attr, extract_poll_id, wait_for_poll_votes, wait_for_proof,
 };
 use crate::cosmos::{
     build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
@@ -72,7 +72,6 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         payload_hash,
     } = sent;
 
-    // --- Amplifier routing ---
     ui::section("Amplifier Routing");
 
     let (signing_key, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
@@ -86,12 +85,15 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         &target_json,
         &format!("/axelar/contracts/VotingVerifier/{axelar_id}/address"),
     )?;
+    let multisig_prover = read_axelar_contract_field(
+        &target_json,
+        &format!("/axelar/contracts/MultisigProver/{axelar_id}/address"),
+    )?;
 
     ui::address("cosmos gateway", &cosm_gateway);
     ui::address("voting verifier", &voting_verifier);
     ui::address("axelar address", &axelar_address);
 
-    // Build the message object (shared by verify and route)
     let gmp_msg = json!({
         "cc_id": {
             "message_id": message_id,
@@ -103,101 +105,26 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         "payload_hash": format!("{}", alloy::hex::encode(payload_hash.as_slice())),
     });
 
-    // Step 2: verify_messages
-    ui::step_header(2, TOTAL_STEPS, "verify_messages");
-    let poll_id = submit_verify_messages_amplifier(
-        &gmp_msg,
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
+    let ctx = relay::AmplifierContext {
+        signing_key: &signing_key,
+        axelar_address: &axelar_address,
+        lcd: &lcd,
+        chain_id: &chain_id,
+        fee_denom: &fee_denom,
         gas_price,
-        &cosm_gateway,
-    )
-    .await?;
+        cosm_gateway: &cosm_gateway,
+        voting_verifier: &voting_verifier,
+        multisig_prover: &multisig_prover,
+    };
+    let execute_data_hex =
+        relay::run_full_sequence(&ctx, &gmp_msg, &axelar_id, &message_id, TOTAL_STEPS).await?;
 
-    if let Some(poll_id) = poll_id {
-        ui::kv("poll_id", &poll_id);
-
-        // Step 3: Wait for votes + end poll
-        ui::step_header(3, TOTAL_STEPS, "Wait for poll votes + end poll");
-        wait_for_poll_votes(&lcd, &voting_verifier, &poll_id).await?;
-        end_poll_with_retry(
-            &poll_id,
-            &signing_key,
-            &axelar_address,
-            &lcd,
-            &chain_id,
-            &fee_denom,
-            gas_price,
-            &voting_verifier,
-        )
-        .await?;
-    } else {
-        ui::info("no new poll created — message already being verified by active verifiers");
-        ui::step_header(3, TOTAL_STEPS, "Wait for poll votes + end poll");
-        ui::info("skipped (existing poll)");
-    }
-
-    // Step 4: route_messages
-    ui::step_header(4, TOTAL_STEPS, "route_messages");
-    route_messages_with_retry(
-        &gmp_msg,
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        &cosm_gateway,
-    )
-    .await?;
-
-    // Step 5: construct_proof on MultisigProver
-    ui::step_header(5, TOTAL_STEPS, "construct_proof");
-    let multisig_prover = read_axelar_contract_field(
-        &target_json,
-        &format!("/axelar/contracts/MultisigProver/{axelar_id}/address"),
-    )?;
-    ui::address("multisig prover", &multisig_prover);
-
-    let construct_proof_msg = json!({
-        "construct_proof": [{
-            "source_chain": axelar_id,
-            "message_id": message_id,
-        }]
-    });
-    let construct_any =
-        build_execute_msg_any(&axelar_address, &multisig_prover, &construct_proof_msg)?;
-    let construct_resp = sign_and_broadcast_cosmos_tx(
-        &signing_key,
-        &axelar_address,
-        &lcd,
-        &chain_id,
-        &fee_denom,
-        gas_price,
-        vec![construct_any],
-    )
-    .await?;
-
-    let session_id = extract_event_attr(&construct_resp, "multisig_session_id")?;
-    ui::kv("multisig_session_id", &session_id);
-
-    // Step 6: Poll proof until signed
-    ui::step_header(6, TOTAL_STEPS, "Wait for proof signing");
-    let proof = wait_for_proof(&lcd, &multisig_prover, &session_id).await?;
-    ui::success("proof ready");
-
-    let execute_data_hex = proof["status"]["completed"]["execute_data"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
     approve_and_execute_evm(
         &provider,
         gateway_addr,
         sender_receiver_addr,
         &axelar_id,
-        execute_data_hex,
+        &execute_data_hex,
         &payload_bytes,
         payload_hash,
         7,
