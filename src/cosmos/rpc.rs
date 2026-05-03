@@ -221,42 +221,24 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
     ))
 }
 
-/// Read Axelar LCD url, chain ID, fee denom, and gas price from target json
+/// Read Axelar LCD url, chain ID, fee denom, and gas price from target json.
+/// Errors if any of the fields are missing — silent defaults previously
+/// masked config drift (e.g. a missing `gasPrice` falling back to
+/// `0.007uaxl`), so callers should always hit a real on-disk config.
 pub fn read_axelar_config(target_json: &Path) -> Result<(String, String, String, f64)> {
-    let content = fs::read_to_string(target_json)?;
-    let root: Value = serde_json::from_str(&content)?;
-    let lcd = root
-        .pointer("/axelar/lcd")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?
-        .to_string();
-    let chain_id = root
-        .pointer("/axelar/chainId")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no axelar.chainId in target json"))?
-        .to_string();
-    let gas_price_str = root
-        .pointer("/axelar/gasPrice")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0.007uaxl");
-    let (price_num, denom) = parse_gas_price(gas_price_str);
-    Ok((lcd, chain_id, denom, price_num))
-}
-
-fn parse_gas_price(s: &str) -> (f64, String) {
-    let mut split_at = 0;
-    for (i, c) in s.char_indices() {
-        if c.is_alphabetic() {
-            split_at = i;
-            break;
-        }
-    }
-    if split_at == 0 {
-        return (0.007, "uaxl".to_string());
-    }
-    let price: f64 = s[..split_at].parse().unwrap_or(0.007);
-    let denom = s[split_at..].to_string();
-    (price, denom)
+    let cfg = crate::config::ChainsConfig::load(target_json)?;
+    let (price, denom) = cfg.axelar.parse_gas_price().ok_or_else(|| {
+        eyre::eyre!("no parseable axelar.gasPrice in target json (expected e.g. \"0.007uaxl\")")
+    })?;
+    let lcd = cfg
+        .axelar
+        .lcd
+        .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?;
+    let chain_id = cfg
+        .axelar
+        .chain_id
+        .ok_or_else(|| eyre::eyre!("no axelar.chainId in target json"))?;
+    Ok((lcd, chain_id, denom, price))
 }
 
 /// Read a string field from axelar contracts config
