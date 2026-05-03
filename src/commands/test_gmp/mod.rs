@@ -1,18 +1,15 @@
+mod destination;
 mod sender_receiver;
 mod source;
 
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy::{
-    primitives::{Bytes, keccak256},
-    providers::{Provider, ProviderBuilder},
-    rpc::types::TransactionRequest,
-    signers::local::PrivateKeySigner,
-};
+use alloy::{primitives::keccak256, providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 use serde_json::json;
 
+use destination::approve_and_execute_evm;
 use sender_receiver::ensure_sender_receiver_deployed;
 use source::send_evm_call_contract;
 
@@ -25,7 +22,6 @@ use crate::cosmos::{
     build_execute_msg_any, check_axelar_balance, derive_axelar_wallet, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
-use crate::evm::{AxelarAmplifierGateway, SenderReceiver};
 use crate::preflight;
 use crate::state::read_state;
 use crate::timing::{AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_INTERVAL};
@@ -193,66 +189,22 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let proof = wait_for_proof(&lcd, &multisig_prover, &session_id).await?;
     ui::success("proof ready");
 
-    // Step 7: Submit execute_data to EVM gateway + check approval
-    ui::step_header(7, TOTAL_STEPS, "Submit proof to EVM gateway");
     let execute_data_hex = proof["status"]["completed"]["execute_data"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("no execute_data in proof response"))?;
-    let execute_data = alloy::hex::decode(execute_data_hex)?;
-
-    let approve_tx = TransactionRequest::default()
-        .to(gateway_addr)
-        .input(Bytes::from(execute_data).into());
-    let pending_approve = provider.send_transaction(approve_tx).await?;
-    let approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
-
-    // Extract commandId from the ContractCallApproved event (topic[1])
-    let command_id = approve_receipt
-        .inner
-        .logs()
-        .iter()
-        .find_map(|log| {
-            if log.topics().len() >= 2 && log.address() == gateway_addr {
-                Some(log.topics()[1])
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| eyre::eyre!("commandId not found in approve tx logs"))?;
-    ui::kv("commandId", &format!("{command_id}"));
-
-    let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
-    let approved = gw_contract
-        .isContractCallApproved(
-            command_id,
-            axelar_id.clone(),
-            format!("{sender_receiver_addr}"),
-            sender_receiver_addr,
-            payload_hash,
-        )
-        .call()
-        .await?;
-    ui::kv("isContractCallApproved", &format!("{approved}"));
-
-    if !approved {
-        return Err(eyre::eyre!("message not approved on EVM gateway"));
-    }
-
-    // Step 8: Execute on SenderReceiver
-    ui::step_header(8, TOTAL_STEPS, "Execute on SenderReceiver");
-    let sr_contract = SenderReceiver::new(sender_receiver_addr, &provider);
-    let exec_call = sr_contract.execute(
-        command_id,
-        axelar_id.clone(),
-        format!("{sender_receiver_addr}"),
-        Bytes::from(payload_bytes.clone()),
-    );
-    let pending_exec = exec_call.send().await?;
-    let _exec_receipt = crate::evm::broadcast_and_log(pending_exec, "tx").await?;
-
-    // Verify the message was stored
-    let stored_message = sr_contract.message().call().await?;
-    ui::kv("stored message", &format!("\"{stored_message}\""));
+    approve_and_execute_evm(
+        &provider,
+        gateway_addr,
+        sender_receiver_addr,
+        &axelar_id,
+        execute_data_hex,
+        &payload_bytes,
+        payload_hash,
+        7,
+        8,
+        TOTAL_STEPS,
+    )
+    .await?;
 
     ui::section("Complete");
     ui::success(&format!(
