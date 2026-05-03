@@ -4,16 +4,21 @@ use alloy::{
     sol_types::{SolEvent, SolValue},
 };
 use eyre::Result;
+use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
+use crate::commands::load_test::evm_sender::{make_executable_payload, memo_program_id};
 use crate::evm::{ContractCall, SenderReceiver};
+use crate::solana::{extract_its_message_id, load_keypair, send_call_contract};
 use crate::ui;
 
 /// The bits of a freshly sent GMP `callContract` that downstream Amplifier
-/// steps need: the routing fields, the message id, and both the raw payload
-/// (for `execute`) and its hash (for `isContractCallApproved`).
+/// steps need: the routing fields (incl. who sent it), the message id, and
+/// both the raw payload (for destination `execute`) and its hash (for the
+/// `isContractCallApproved` check).
 pub struct SentGmp {
     pub destination_chain: String,
     pub destination_address: String,
+    pub source_address: String,
     pub message_id: String,
     pub payload_bytes: Vec<u8>,
     pub payload_hash: B256,
@@ -74,8 +79,61 @@ pub async fn send_evm_call_contract<P: Provider>(
     ui::kv("payload_hash", &format!("{payload_hash}"));
 
     Ok(SentGmp {
+        source_address: format!("{sender_receiver}"),
         destination_chain,
         destination_address,
+        message_id,
+        payload_bytes,
+        payload_hash,
+    })
+}
+
+/// Step 1 for an SVM source: call the gateway's `call_contract` from the
+/// loaded keypair, addressed to the SVM memo program with an executable
+/// payload. The message id comes back from the gateway log via
+/// `extract_its_message_id`, falling back to `<sig>-1.1` if the log isn't
+/// indexable yet.
+pub fn send_svm_call_contract(
+    src_rpc: &str,
+    destination_chain: &str,
+    step_idx: usize,
+    total_steps: usize,
+) -> Result<SentGmp> {
+    let keypair = load_keypair(None)?;
+    let memo_program = memo_program_id();
+    let destination_address = memo_program.to_string();
+
+    let counter_pda = Pubkey::find_program_address(&[b"counter"], &memo_program).0;
+    let payload_bytes = make_executable_payload(&None, &counter_pda);
+    let payload_hash = keccak256(&payload_bytes);
+
+    ui::step_header(step_idx, total_steps, "Send callContract");
+    ui::kv("destination address", &destination_address);
+
+    let (_sig, metrics) = send_call_contract(
+        src_rpc,
+        &keypair,
+        destination_chain,
+        &destination_address,
+        &payload_bytes,
+    )?;
+
+    let raw_sig = metrics.signature.clone();
+    let message_id =
+        extract_its_message_id(src_rpc, &raw_sig).unwrap_or_else(|_| format!("{raw_sig}-1.1"));
+
+    ui::tx_hash("tx", &raw_sig);
+    ui::kv("message_id", &message_id);
+    ui::kv("payload_hash", &alloy::hex::encode(payload_hash));
+    ui::success(&format!(
+        "confirmed ({}ms)",
+        metrics.latency_ms.unwrap_or(0)
+    ));
+
+    Ok(SentGmp {
+        destination_chain: destination_chain.to_string(),
+        destination_address,
+        source_address: keypair.pubkey().to_string(),
         message_id,
         payload_bytes,
         payload_hash,

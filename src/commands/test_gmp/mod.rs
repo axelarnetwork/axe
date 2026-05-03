@@ -6,7 +6,7 @@ mod source;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use alloy::{primitives::keccak256, providers::ProviderBuilder, signers::local::PrivateKeySigner};
+use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 use serde_json::json;
 
@@ -67,6 +67,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let source::SentGmp {
         destination_chain,
         destination_address,
+        source_address,
         message_id,
         payload_bytes,
         payload_hash,
@@ -101,8 +102,8 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
         },
         "destination_chain": destination_chain,
         "destination_address": destination_address,
-        "source_address": format!("{sender_receiver_addr}"),
-        "payload_hash": format!("{}", alloy::hex::encode(payload_hash.as_slice())),
+        "source_address": source_address,
+        "payload_hash": alloy::hex::encode(payload_hash.as_slice()),
     });
 
     let ctx = relay::AmplifierContext {
@@ -240,59 +241,23 @@ pub async fn run_config(
         }
     }
 
-    // --- Step 1: Send callContract ---
-    ui::step_header(1, 8, "Send callContract");
-
-    let (message_id, payload_hash_hex, source_address, destination_address, payload) =
-        match src_type {
-            ChainType::Svm => {
-                let keypair = crate::solana::load_keypair(None)?;
-                let memo_program = crate::commands::load_test::evm_sender::memo_program_id();
-                let dest_addr = memo_program.to_string();
-
-                let payload = crate::commands::load_test::evm_sender::make_executable_payload(
-                    &None,
-                    &solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program)
-                        .0,
-                );
-                let payload_hash = keccak256(&payload);
-
-                ui::kv("destination address", &dest_addr);
-
-                let (_sig, metrics) = crate::solana::send_call_contract(
-                    src_rpc, &keypair, &dst, &dest_addr, &payload,
-                )?;
-
-                let raw_sig = metrics.signature.clone();
-                let message_id = crate::solana::extract_its_message_id(src_rpc, &raw_sig)
-                    .unwrap_or_else(|_| format!("{raw_sig}-1.1"));
-
-                ui::tx_hash("tx", &raw_sig);
-                ui::kv("message_id", &message_id);
-                ui::kv("payload_hash", &alloy::hex::encode(payload_hash));
-                ui::success(&format!(
-                    "confirmed ({}ms)",
-                    metrics.latency_ms.unwrap_or(0)
-                ));
-
-                let source_addr = {
-                    use solana_sdk::signer::Signer;
-                    keypair.pubkey().to_string()
-                };
-                (
-                    message_id,
-                    alloy::hex::encode(payload_hash),
-                    source_addr,
-                    dest_addr,
-                    payload,
-                )
-            }
-            ChainType::Evm => {
-                return Err(eyre::eyre!(
-                    "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
-                ));
-            }
-        };
+    let sent = match src_type {
+        ChainType::Svm => source::send_svm_call_contract(src_rpc, &dst, 1, 8)?,
+        ChainType::Evm => {
+            return Err(eyre::eyre!(
+                "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
+            ));
+        }
+    };
+    let source::SentGmp {
+        destination_chain: _,
+        destination_address,
+        source_address,
+        message_id,
+        payload_bytes,
+        payload_hash,
+    } = sent;
+    let payload_hash_hex = alloy::hex::encode(payload_hash);
 
     // --- Cosmos relay (steps 2-6, chain-agnostic) ---
     let cosm_gateway =
@@ -508,7 +473,7 @@ pub async fn run_config(
             };
 
             let memo_sig =
-                crate::solana::execute_on_memo(dst_rpc, &keypair, gmp_message, &payload)?;
+                crate::solana::execute_on_memo(dst_rpc, &keypair, gmp_message, &payload_bytes)?;
             ui::tx_hash("execute", &memo_sig.to_string());
         }
         ChainType::Evm => {
