@@ -86,6 +86,8 @@ Deploys an interchain token locally, deploys it remotely to a destination chain 
 
 The `axe test load-test` command sends cross-chain transactions through the Axelar Amplifier pipeline and verifies them end-to-end. It supports two modes: **burst** (send N transactions as fast as possible) and **sustained** (send at a fixed TPS rate for a fixed duration).
 
+See [docs/load-test-coverage.md](docs/load-test-coverage.md) for the full source × destination × protocol matrix, per-environment chain availability, and required env vars / RPC overrides per chain.
+
 ## Modes
 
 ### Burst mode (default)

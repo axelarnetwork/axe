@@ -1466,7 +1466,10 @@ dependencies = [
  "alloy",
  "anchor-lang",
  "base64 0.22.1",
+ "bcs",
+ "bech32",
  "bip32",
+ "blake2",
  "borsh 1.6.0",
  "bs58",
  "chrono",
@@ -1502,6 +1505,7 @@ dependencies = [
  "stellar-rpc-client",
  "stellar-strkey 0.0.13",
  "stellar-xdr",
+ "sui-sdk-types",
  "tendermint-proto",
  "tokio",
  "xrpl_api",
@@ -1545,6 +1549,22 @@ name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
+
+[[package]]
+name = "bcs"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85b6598a2f5d564fb7855dc6b06fd1c38cff5a72bd8b863a4d021938497b440a"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "bech32"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
 name = "beef"
@@ -1636,6 +1656,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1689,6 +1718,12 @@ dependencies = [
  "serde",
  "serde-big-array",
 ]
+
+[[package]]
+name = "bnum"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119771309b95163ec7aaf79810da82f7cd0599c19722d48b9c03894dca833966"
 
 [[package]]
 name = "borsh"
@@ -1844,6 +1879,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bytestring"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "113b4343b5f6617e7ad401ced8de3cc8b012e73a594347c307b90db3e9271289"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]
@@ -5406,6 +5450,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "roaring"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dedc5658c6ecb3bdb5ef5f3295bb9253f42dcf3fd1402c03f6b1f7659c3c4a9"
+dependencies = [
+ "bytemuck",
+ "byteorder",
+]
+
+[[package]]
 name = "rs_merkle"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6353,7 +6407,7 @@ dependencies = [
  "alloy-primitives 0.7.7",
  "anchor-lang",
  "arrayref",
- "bnum",
+ "bnum 0.10.0",
  "borsh 1.6.0",
  "bytemuck",
  "hex",
@@ -8375,6 +8429,28 @@ name = "subtle-ng"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
+
+[[package]]
+name = "sui-sdk-types"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23f800c4c3539246ba94a825f6afe7faab0bc8fc4dda56c6cfa493ea2a32ecbd"
+dependencies = [
+ "base64ct",
+ "bcs",
+ "blake2",
+ "bnum 0.13.0",
+ "bs58",
+ "bytes",
+ "bytestring",
+ "itertools 0.14.0",
+ "roaring",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "serde_with",
+ "winnow",
+]
 
 [[package]]
 name = "syn"

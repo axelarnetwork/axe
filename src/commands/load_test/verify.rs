@@ -242,6 +242,14 @@ enum DestinationChecker<'a, P: Provider> {
         signer_pk: [u8; 32],
         _phantom: std::marker::PhantomData<&'a P>,
     },
+    /// Sui destination — query AxelarGateway events `MessageApproved`
+    /// (Approved phase) and `MessageExecuted` (Executed phase) by
+    /// `(source_chain, message_id)`.
+    Sui {
+        client: crate::sui::SuiClient,
+        gateway_pkg: String,
+        _phantom: std::marker::PhantomData<&'a P>,
+    },
 }
 
 #[allow(dead_code)]
@@ -311,6 +319,30 @@ impl<P: Provider> DestinationChecker<'_, P> {
                     None => Ok(ApprovalResult::NotYet),
                 }
             }
+            Self::Sui {
+                client, gateway_pkg, ..
+            } => {
+                // Sui events are immutable; check Executed first (it
+                // implies Approved). Two queries; both are idempotent.
+                let executed_event_type = format!("{gateway_pkg}::events::MessageExecuted");
+                let approved_event_type = format!("{gateway_pkg}::events::MessageApproved");
+                let executed = client
+                    .has_message_executed(&executed_event_type, source_chain, &tx.message_id)
+                    .await
+                    .unwrap_or(false);
+                if executed {
+                    return Ok(ApprovalResult::AlreadyExecuted);
+                }
+                let approved = client
+                    .has_message_approved(&approved_event_type, source_chain, &tx.message_id)
+                    .await
+                    .unwrap_or(false);
+                if approved {
+                    Ok(ApprovalResult::Approved)
+                } else {
+                    Ok(ApprovalResult::NotYet)
+                }
+            }
         }
     }
 
@@ -363,6 +395,16 @@ impl<P: Provider> DestinationChecker<'_, P> {
                     .unwrap_or(None);
                 Ok(matches!(executed, Some(true)))
             }
+            Self::Sui {
+                client, gateway_pkg, ..
+            } => {
+                let event_type = format!("{gateway_pkg}::events::MessageExecuted");
+                let executed = client
+                    .has_message_executed(&event_type, source_chain, &tx.message_id)
+                    .await
+                    .unwrap_or(false);
+                Ok(executed)
+            }
         }
     }
 
@@ -371,6 +413,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
             Self::Evm { .. } => "EVM approval",
             Self::Solana { .. } => "Solana approval",
             Self::Stellar { .. } => "Stellar approval",
+            Self::Sui { .. } => "Sui approval",
         }
     }
 
@@ -379,6 +422,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
             Self::Evm { .. } => "EVM execution",
             Self::Solana { .. } => "Solana execution",
             Self::Stellar { .. } => "Stellar execution",
+            Self::Sui { .. } => "Sui execution",
         }
     }
 }
@@ -758,6 +802,59 @@ async fn poll_pipeline<P: Provider>(
                                 last_progress = Instant::now();
                             }
                             Phase::Executed if matches!(executed, Some(true)) => {
+                                txs[i].timing.executed_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                DestinationChecker::Sui {
+                    client, gateway_pkg, ..
+                } => {
+                    let approved_event_type =
+                        format!("{gateway_pkg}::events::MessageApproved");
+                    let executed_event_type =
+                        format!("{gateway_pkg}::events::MessageExecuted");
+                    for &i in &dest_indices {
+                        let phase = txs[i].phase;
+                        let approved = client
+                            .has_message_approved(
+                                &approved_event_type,
+                                source_chain,
+                                &txs[i].message_id,
+                            )
+                            .await
+                            .unwrap_or(false);
+                        let executed = client
+                            .has_message_executed(
+                                &executed_event_type,
+                                source_chain,
+                                &txs[i].message_id,
+                            )
+                            .await
+                            .unwrap_or(false);
+                        match phase {
+                            Phase::Approved if executed => {
+                                let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                if txs[i].timing.approved_secs.is_none() {
+                                    txs[i].timing.approved_secs = Some(elapsed);
+                                }
+                                txs[i].timing.executed_secs = Some(elapsed);
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
+                            Phase::Approved if approved => {
+                                txs[i].timing.approved_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                txs[i].phase = Phase::Executed;
+                                last_progress = Instant::now();
+                            }
+                            Phase::Executed if executed => {
                                 txs[i].timing.executed_secs =
                                     Some(txs[i].send_instant.elapsed().as_secs_f64());
                                 txs[i].timing.executed_ok = Some(true);
@@ -1492,6 +1589,8 @@ pub enum SourceChainType {
     Xrpl,
     /// Stellar source: message ID = `0x{lowercase_tx_hash}-{event_index}`
     Stellar,
+    /// Sui source: message ID = `{base58_tx_digest}-{event_index}`
+    Sui,
 }
 
 /// Verify transactions on-chain through 4 Amplifier pipeline checkpoints:
@@ -1553,7 +1652,7 @@ pub async fn verify_onchain<P: Provider>(
             PendingTx {
                 idx,
                 message_id: match source_type {
-                    SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                    SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
                         tx.signature.clone()
                     }
                     SourceChainType::Svm => {
@@ -1715,7 +1814,7 @@ pub async fn verify_onchain_stellar_gmp(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
                     tx.signature.clone()
                 }
                 SourceChainType::Svm => {
@@ -1850,7 +1949,7 @@ pub(super) fn tx_to_pending_stellar_gmp(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
@@ -1893,7 +1992,7 @@ pub(super) fn tx_to_pending_solana(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
@@ -1938,7 +2037,7 @@ pub(super) fn tx_to_pending_evm(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
@@ -2075,6 +2174,180 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
 /// Runs verification concurrently with the send phase. Receives confirmed
 /// transactions via the channel and starts polling them immediately.
 #[allow(clippy::too_many_arguments)]
+// ---------------------------------------------------------------------------
+// Sui destination verifier (GMP)
+// ---------------------------------------------------------------------------
+
+/// Verify *->Sui GMP transactions through Amplifier. Uses Sui events polling
+/// (`MessageApproved` / `MessageExecuted` on the AxelarGateway events module)
+/// for the destination-side phases.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_sui_gmp_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    sui_rpc: &str,
+    mut rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
+    let sui_client = crate::sui::SuiClient::new(sui_rpc);
+
+    let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
+        DestinationChecker::Sui {
+            client: sui_client,
+            gateway_pkg,
+            _phantom: std::marker::PhantomData,
+        };
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        Some(&cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_address,
+        &checker,
+        None,
+        None,
+        Some(&mut rx),
+        Some(&send_done),
+        Some(spinner),
+    )
+    .await;
+
+    let report = compute_verification_report(&txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    Ok((report, timings))
+}
+
+/// Burst-mode Sui destination verifier — block on confirmed metrics array.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_sui_gmp(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    sui_rpc: &str,
+    metrics: &mut [TxMetrics],
+    source_type: SourceChainType,
+) -> Result<VerificationReport> {
+    let confirmed: Vec<usize> = metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+
+    let total = confirmed.len();
+    if total == 0 {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let voting_verifier = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
+    )
+    .ok();
+    let cosm_gateway = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+    let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
+    let sui_client = crate::sui::SuiClient::new(sui_rpc);
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::Routed
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| {
+            let tx = &metrics[idx];
+            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+            let message_id = match source_type {
+                SourceChainType::Evm
+                | SourceChainType::Xrpl
+                | SourceChainType::Stellar
+                | SourceChainType::Sui => tx.signature.clone(),
+                SourceChainType::Svm => {
+                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
+                }
+            };
+            PendingTx {
+                idx,
+                message_id,
+                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+                source_address: tx.source_address.clone(),
+                contract_addr: Address::ZERO,
+                payload_hash,
+                payload_hash_hex: tx.payload_hash.clone(),
+                command_id: None,
+                gmp_destination_chain: tx.gmp_destination_chain.clone(),
+                gmp_destination_address: destination_address.to_string(),
+                timing: AmplifierTiming::default(),
+                failed: false,
+                fail_reason: None,
+                phase: initial_phase,
+                second_leg_message_id: None,
+                second_leg_payload_hash: None,
+                second_leg_source_address: None,
+                second_leg_destination_address: None,
+            }
+        })
+        .collect();
+
+    let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
+        DestinationChecker::Sui {
+            client: sui_client,
+            gateway_pkg,
+            _phantom: std::marker::PhantomData,
+        };
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        &lcd,
+        voting_verifier.as_deref(),
+        Some(&cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_address,
+        &checker,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    Ok(compute_verification_report(&txs, metrics, peaks))
+}
+
 pub async fn verify_onchain_solana_streaming(
     config: &Path,
     source_chain: &str,
@@ -2189,7 +2462,7 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar => {
+                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
                     tx.signature.clone()
                 }
                 SourceChainType::Svm => {
@@ -3567,6 +3840,131 @@ pub async fn wait_for_its_remote_deploy_to_solana(
 
     spinner.finish_and_clear();
     ui::success("remote token deployed on Solana");
+    Ok(())
+}
+
+/// Wait for an ITS `deploy_remote_interchain_token` message to land on a
+/// Stellar destination. Mirrors the EVM/Solana variants but checks the
+/// destination Soroban gateway via `is_message_executed` for the second-leg
+/// id. Stellar gateway state is small (mint+associate) so we poll
+/// `is_message_executed` rather than tracking PDAs.
+#[allow(clippy::too_many_arguments)]
+pub async fn wait_for_its_remote_deploy_to_stellar(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    deploy_message_id: &str,
+    stellar_rpc: &str,
+    stellar_network_type: &str,
+    stellar_gateway_addr: &str,
+    signer_pk: [u8; 32],
+) -> Result<()> {
+    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let rpc = read_axelar_rpc(config)?;
+
+    let axelarnet_gateway =
+        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+
+    let cosm_gateway_dest = read_axelar_contract_field(
+        config,
+        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
+    )?;
+
+    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
+
+    ui::kv("deploy message ID", deploy_message_id);
+    let spinner =
+        ui::wait_spinner("waiting for remote deploy to propagate through hub to Stellar...");
+    let start = Instant::now();
+    let timeout = Duration::from_secs(300);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeployPhase {
+        HubApproved,
+        DiscoverSecondLeg,
+        Routed,
+        Executed,
+        Done,
+    }
+
+    let mut phase = DeployPhase::HubApproved;
+    let mut second_leg_id: Option<String> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            spinner.finish_and_clear();
+            eyre::bail!(
+                "remote deploy timed out after {}s at phase {phase:?}",
+                timeout.as_secs()
+            );
+        }
+
+        match phase {
+            DeployPhase::HubApproved => {
+                if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: hub approved");
+                    phase = DeployPhase::DiscoverSecondLeg;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for hub approval...");
+            }
+            DeployPhase::DiscoverSecondLeg => {
+                match discover_second_leg(&rpc, deploy_message_id).await {
+                    Ok(Some(info)) => {
+                        spinner.set_message(format!(
+                            "remote deploy: second leg discovered ({})",
+                            info.message_id
+                        ));
+                        second_leg_id = Some(info.message_id);
+                        phase = DeployPhase::Routed;
+                        continue;
+                    }
+                    Ok(None) => {
+                        spinner.set_message("remote deploy: discovering second leg...");
+                    }
+                    Err(e) => {
+                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
+                    }
+                }
+            }
+            DeployPhase::Routed => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    spinner.set_message("remote deploy: routed to Stellar");
+                    phase = DeployPhase::Executed;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for routing...");
+            }
+            DeployPhase::Executed => {
+                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                match stellar_client
+                    .gateway_is_message_executed(&signer_pk, stellar_gateway_addr, "axelar", sl_id)
+                    .await
+                {
+                    Ok(Some(true)) => {
+                        phase = DeployPhase::Done;
+                        continue;
+                    }
+                    _ => {
+                        spinner.set_message("remote deploy: waiting for Stellar execution...");
+                    }
+                }
+            }
+            DeployPhase::Done => break,
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    spinner.finish_and_clear();
+    ui::success("remote token deployed on Stellar");
     Ok(())
 }
 

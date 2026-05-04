@@ -7,6 +7,7 @@ mod solana;
 mod state;
 mod stellar;
 mod steps;
+mod sui;
 pub mod ui;
 mod utils;
 mod xrpl;
