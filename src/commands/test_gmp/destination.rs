@@ -65,22 +65,22 @@ pub async fn approve_and_execute_evm<P: Provider>(
     }
 
     // SenderReceiver.execute(commandId, ...) needs the gateway's internal
-    // approval key. Derivation differs between legacy gateways
-    // (`keccak256(source_chain || "-" || message_id)`, matching
-    // `solana_axelar_std::Message::command_id()`) and Amplifier-modern
-    // ones, so this call is best-effort: if it reverts, we still
-    // have proof the message was approved on chain via
-    // `isMessageApproved` above.
+    // approval key. The Amplifier EVM gateway uses
+    // `keccak256(string.concat(sourceChain, "_", messageId))` — underscore
+    // separator, *not* the dash that the Solana
+    // `solana_axelar_std::Message::command_id()` uses. The Cosmos hub
+    // emits both forms, with the EVM-flavoured underscore form serving as
+    // the on-chain approval key here.
     ui::step_header(step_idx_execute, total_steps, "Execute on SenderReceiver");
     let command_id_input = {
         let mut buf = Vec::with_capacity(source_chain.len() + 1 + message_id.len());
         buf.extend_from_slice(source_chain.as_bytes());
-        buf.push(b'-');
+        buf.push(b'_');
         buf.extend_from_slice(message_id.as_bytes());
         buf
     };
     let command_id = keccak256(&command_id_input);
-    ui::kv("commandId (Solana-canonical)", &format!("{command_id}"));
+    ui::kv("commandId", &format!("{command_id}"));
 
     let sr_contract = SenderReceiver::new(sender_receiver, provider);
     let exec_call = sr_contract.execute(
