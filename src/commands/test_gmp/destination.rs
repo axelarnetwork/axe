@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{Address, B256, Bytes},
+    primitives::{Address, B256, Bytes, keccak256},
     providers::Provider,
     rpc::types::TransactionRequest,
 };
@@ -25,6 +25,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
     sender_receiver: Address,
     source_chain: &str,
     source_address: &str,
+    message_id: &str,
     execute_data_hex: &str,
     payload_bytes: &[u8],
     payload_hash: B256,
@@ -39,20 +40,22 @@ pub async fn approve_and_execute_evm<P: Provider>(
         .to(gateway)
         .input(Bytes::from(execute_data).into());
     let pending_approve = provider.send_transaction(approve_tx).await?;
-    let approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
+    let _approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
 
-    let command_id = approve_receipt
-        .inner
-        .logs()
-        .iter()
-        .find_map(|log| {
-            if log.topics().len() >= 2 && log.address() == gateway {
-                Some(log.topics()[1])
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| eyre::eyre!("commandId not found in approve tx logs"))?;
+    // Derive commandId from (source_chain, message_id) — the canonical
+    // Amplifier formula (`keccak256(source_chain || "-" || message_id)`,
+    // matching `solana_axelar_std::Message::command_id()`). Reading it
+    // back from the approve receipt's `ContractCallApproved`/`MessageApproved`
+    // event is fragile across legacy vs modern gateway variants; deriving
+    // works regardless of which event the gateway happens to emit.
+    let command_id_input = {
+        let mut buf = Vec::with_capacity(source_chain.len() + 1 + message_id.len());
+        buf.extend_from_slice(source_chain.as_bytes());
+        buf.push(b'-');
+        buf.extend_from_slice(message_id.as_bytes());
+        buf
+    };
+    let command_id = keccak256(&command_id_input);
     ui::kv("commandId", &format!("{command_id}"));
 
     let gw_contract = AxelarAmplifierGateway::new(gateway, provider);
