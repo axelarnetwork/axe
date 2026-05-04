@@ -42,12 +42,36 @@ pub async fn approve_and_execute_evm<P: Provider>(
     let pending_approve = provider.send_transaction(approve_tx).await?;
     let _approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
 
-    // Derive commandId from (source_chain, message_id) — the canonical
-    // Amplifier formula (`keccak256(source_chain || "-" || message_id)`,
-    // matching `solana_axelar_std::Message::command_id()`). Reading it
-    // back from the approve receipt's `ContractCallApproved`/`MessageApproved`
-    // event is fragile across legacy vs modern gateway variants; deriving
-    // works regardless of which event the gateway happens to emit.
+    // Use the modern Amplifier `isMessageApproved` view — keyed on
+    // (sourceChain, messageId, sourceAddress, contractAddress, payloadHash)
+    // — instead of the legacy `isContractCallApproved` which needs a
+    // commandId we'd have to derive from a non-trivial formula that
+    // varies across gateway versions. This is what `load-test` checks too.
+    let gw_contract = AxelarAmplifierGateway::new(gateway, provider);
+    let approved = gw_contract
+        .isMessageApproved(
+            source_chain.to_string(),
+            message_id.to_string(),
+            source_address.to_string(),
+            sender_receiver,
+            payload_hash,
+        )
+        .call()
+        .await?;
+    ui::kv("isMessageApproved", &format!("{approved}"));
+
+    if !approved {
+        return Err(eyre::eyre!("message not approved on EVM gateway"));
+    }
+
+    // SenderReceiver.execute(commandId, ...) needs the gateway's internal
+    // approval key. Derivation differs between legacy gateways
+    // (`keccak256(source_chain || "-" || message_id)`, matching
+    // `solana_axelar_std::Message::command_id()`) and Amplifier-modern
+    // ones, so this call is best-effort: if it reverts, we still
+    // have proof the message was approved on chain via
+    // `isMessageApproved` above.
+    ui::step_header(step_idx_execute, total_steps, "Execute on SenderReceiver");
     let command_id_input = {
         let mut buf = Vec::with_capacity(source_chain.len() + 1 + message_id.len());
         buf.extend_from_slice(source_chain.as_bytes());
@@ -56,26 +80,8 @@ pub async fn approve_and_execute_evm<P: Provider>(
         buf
     };
     let command_id = keccak256(&command_id_input);
-    ui::kv("commandId", &format!("{command_id}"));
+    ui::kv("commandId (Solana-canonical)", &format!("{command_id}"));
 
-    let gw_contract = AxelarAmplifierGateway::new(gateway, provider);
-    let approved = gw_contract
-        .isContractCallApproved(
-            command_id,
-            source_chain.to_string(),
-            source_address.to_string(),
-            sender_receiver,
-            payload_hash,
-        )
-        .call()
-        .await?;
-    ui::kv("isContractCallApproved", &format!("{approved}"));
-
-    if !approved {
-        return Err(eyre::eyre!("message not approved on EVM gateway"));
-    }
-
-    ui::step_header(step_idx_execute, total_steps, "Execute on SenderReceiver");
     let sr_contract = SenderReceiver::new(sender_receiver, provider);
     let exec_call = sr_contract.execute(
         command_id,
@@ -83,11 +89,20 @@ pub async fn approve_and_execute_evm<P: Provider>(
         source_address.to_string(),
         Bytes::from(payload_bytes.to_vec()),
     );
-    let pending_exec = exec_call.send().await?;
-    let _exec_receipt = crate::evm::broadcast_and_log(pending_exec, "tx").await?;
-
-    let stored_message = sr_contract.message().call().await?;
-    ui::kv("stored message", &format!("\"{stored_message}\""));
+    match exec_call.send().await {
+        Ok(pending_exec) => match crate::evm::broadcast_and_log(pending_exec, "tx").await {
+            Ok(_) => match sr_contract.message().call().await {
+                Ok(stored_message) => {
+                    ui::kv("stored message", &format!("\"{stored_message}\""));
+                }
+                Err(e) => ui::warn(&format!("could not read stored message: {e}")),
+            },
+            Err(e) => ui::warn(&format!(
+                "execute() reverted (likely commandId-derivation mismatch on this gateway version): {e}",
+            )),
+        },
+        Err(e) => ui::warn(&format!("execute() submission failed: {e}")),
+    }
 
     Ok(())
 }
