@@ -20,7 +20,7 @@ use std::time::Instant;
 
 #[cfg(not(feature = "devnet-amplifier"))]
 use super::rpc::SYSTEM_PROGRAM_ID;
-use super::rpc::{DEFAULT_CU_LIMIT, fetch_confirmed_tx, fetch_tx_details, rpc_client};
+use super::rpc::{DEFAULT_CU_LIMIT, fetch_finalized_tx, fetch_tx_details, rpc_client};
 use crate::commands::load_test::metrics::TxMetrics;
 use crate::ui;
 
@@ -176,7 +176,7 @@ pub fn extract_gateway_call_contract_payload(
     let sig: Signature = signature_str
         .parse()
         .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
-    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
+    let tx = fetch_finalized_tx(&rpc_client, &sig)?
         .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
     let meta = tx
         .transaction
@@ -246,7 +246,7 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
         .parse()
         .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
 
-    let tx = fetch_confirmed_tx(&rpc_client, &sig)?
+    let tx = fetch_finalized_tx(&rpc_client, &sig)?
         .ok_or_else(|| eyre::eyre!("could not fetch transaction {signature_str}"))?;
 
     let meta = tx
