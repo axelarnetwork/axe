@@ -98,7 +98,7 @@ pub fn send_call_contract(
     payload: &[u8],
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
     let (event_authority_pda, _) =
@@ -233,7 +233,7 @@ pub fn send_its_deploy_interchain_token(
     initial_supply: u64,
     minter: Option<&Pubkey>,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -323,7 +323,7 @@ pub fn send_its_deploy_remote_interchain_token(
     destination_chain: &str,
     gas_value: u64,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -412,7 +412,7 @@ pub fn send_its_interchain_transfer(
     gas_value: u64,
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let fee_payer = keypair.pubkey();
 
     let (its_root_pda, _) = find_its_root_pda();
@@ -486,7 +486,36 @@ pub fn send_its_interchain_transfer(
     #[allow(clippy::cast_possible_truncation)]
     let submit_time_ms = submit_start.elapsed().as_millis() as u64;
 
-    let signature = rpc_client.send_and_confirm_transaction(&transaction)?;
+    let signature = match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(sig) => sig,
+        Err(send_err) => {
+            // Pre-flight rejected the tx — re-run simulate to capture the
+            // program logs the original error swallows. This makes
+            // diagnostics actionable instead of "Program failed to complete; N".
+            let log_dump = match rpc_client.simulate_transaction(&transaction) {
+                Ok(sim) => {
+                    let v = sim.value;
+                    let logs = v.logs.unwrap_or_default();
+                    let header = match v.err {
+                        Some(e) => format!("simulation error: {e:?}"),
+                        None => "simulation succeeded but submit failed".to_string(),
+                    };
+                    if logs.is_empty() {
+                        header
+                    } else {
+                        let body = logs
+                            .iter()
+                            .map(|l| format!("    {l}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!("{header}\n  program logs:\n{body}")
+                    }
+                }
+                Err(sim_err) => format!("simulate_transaction follow-up failed: {sim_err}"),
+            };
+            return Err(eyre::eyre!("{send_err}\n  ↳ {log_dump}"));
+        }
+    };
 
     #[allow(clippy::cast_possible_truncation)]
     let confirm_time_ms = submit_start.elapsed().as_millis() as u64;
@@ -535,20 +564,25 @@ fn fetch_tx_details(
 
 /// Fetch a confirmed transaction with retries.
 ///
-/// Keep retry count and backoff low to avoid blocking the tokio blocking thread
-/// pool for too long under sustained load. This is best-effort metadata; a
-/// missing result just means `compute_units`/`slot` will be `None`.
+/// Public Solana devnet RPC (api.devnet.solana.com) often takes 30+ seconds
+/// to index a freshly-confirmed transaction so it's queryable via
+/// getTransaction. Use a generous retry budget (~60s wall-clock) before
+/// giving up, since the alternative — guessing the message_id — costs the
+/// caller a full 5-minute pipeline timeout downstream.
 fn fetch_confirmed_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
 ) -> Result<Option<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta>> {
-    for i in 0..5 {
+    // Slight upfront delay — `send_and_confirm_transaction` only guarantees
+    // the tx is in `confirmed`, not that it's been backfilled into the
+    // history endpoint queried by `getTransaction`.
+    std::thread::sleep(std::time::Duration::from_millis(750));
+    for i in 0..15 {
         match rpc_client.get_transaction(signature, UiTransactionEncoding::Json) {
             Ok(tx) => return Ok(Some(tx)),
             Err(_) => {
-                // Testnet/stagenet RPCs can be slow to index transactions.
-                // Exponential backoff: 500ms, 1s, 2s, capped at 3s.
-                let delay = std::cmp::min(500 * (1 << i), 3000);
+                // Exponential backoff capped at 5s: 500ms, 1s, 2s, 4s, 5s, 5s, …
+                let delay = std::cmp::min(500u64 * (1 << i), 5000);
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
         }
@@ -571,7 +605,7 @@ fn fetch_confirmed_tx(
 /// inner_instructions array. We find the last gateway invoke, which is the
 /// `call_contract` that emits the `CallContractEvent`.
 pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let sig: Signature = signature_str
         .parse()
         .map_err(|e| eyre::eyre!("invalid signature: {e}"))?;
@@ -662,7 +696,7 @@ pub fn initialize_verification_session(
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -727,7 +761,7 @@ pub fn verify_signature(
     signing_verifier_set_merkle_root: [u8; 32],
     verifier_info: SigningVerifierSetInfo,
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -798,7 +832,7 @@ pub fn approve_message(
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let gateway_id = solana_axelar_gateway::id();
 
     let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
@@ -970,7 +1004,7 @@ pub fn execute_on_memo(
     message: solana_axelar_std::Message,
     payload: &[u8],
 ) -> Result<Signature> {
-    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let gateway_id = solana_axelar_gateway::id();
     let memo_id = solana_axelar_memo::id();
 

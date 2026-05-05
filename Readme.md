@@ -86,6 +86,25 @@ Deploys an interchain token locally, deploys it remotely to a destination chain 
 
 The `axe test load-test` command sends cross-chain transactions through the Axelar Amplifier pipeline and verifies them end-to-end. It supports two modes: **burst** (send N transactions as fast as possible) and **sustained** (send at a fixed TPS rate for a fixed duration).
 
+See [docs/load-test-coverage.md](docs/load-test-coverage.md) for the full source × destination × protocol matrix, per-environment chain availability, and required env vars / RPC overrides per chain.
+
+**Supported pairs** (verified end-to-end on testnet unless noted; mainnet works for any pair where both chains are deployed there):
+
+| Pair | GMP | ITS |
+|---|---|---|
+| EVM ↔ EVM | ✅ | (use evm-to-evm with token id) |
+| EVM ↔ Solana | ✅ both directions, sustained-mode supported | ✅ both directions, sustained-mode supported |
+| EVM ↔ XRPL | n/a (XRPL has no contracts) | ✅ canonical XRP, both directions |
+| EVM ↔ Stellar | ✅ both directions | ✅ both directions |
+| EVM ↔ Sui | ✅ EVM → Sui *(Sui → EVM works on source side; voter coverage upstream is sparse for `Example::gmp` messages today)* | (deferred — needs Sui ITS PTB type-tag resolution) |
+| Solana ↔ Stellar | ✅ both directions | ⚠️ Stellar testnet ITS doesn't list `solana` as trusted yet (Contract #7 = UntrustedChain). Wire-complete on our side. |
+| Solana ↔ Sui | ✅ Sol → Sui | (deferred) |
+| Solana ↔ Solana | ✅ | ✅ |
+| Stellar ↔ Sui | ✅ Stellar → Sui | (deferred) |
+| Stellar ↔ XRPL / Sui ↔ XRPL | (deferred) | (deferred) |
+
+**Build features pick the network**: pass exactly one of `--features mainnet | testnet | stagenet | devnet-amplifier` (with `--no-default-features`). The binary fails fast at startup if the config filename doesn't match the compiled feature.
+
 ## Modes
 
 ### Burst mode (default)
@@ -119,7 +138,7 @@ axe test load-test --tps 10 --duration-secs 300 ...
 - The final summary shows end-to-end latency (avg/min/max), throughput, per-phase step and cumulative timing, pipeline counts, and any stuck transactions.
 - A JSON report is written to `axe-load-test-logs/axe-load-test-<timestamp>.json` after each run for post-mortem analysis.
 
-**Protocols supported in sustained mode:** GMP and ITS, both directions (Sol → EVM and EVM → Sol).
+**Protocols supported in sustained mode:** GMP and ITS for EVM ↔ Solana (both directions). Other source chains (Stellar, XRPL, Sui) currently support burst-mode only — sustained mode delegates to the per-chain ephemeral-wallet machinery, which exists for EVM and Solana today; PRs welcome to extend it.
 
 **ITS note:** Token deployment happens once upfront (cached across runs). Each pool key is pre-funded with enough tokens for its share of the total transfers before the send phase begins.
 
@@ -210,13 +229,16 @@ axe test load-test \
 
 ## Stagenet / testnet / mainnet
 
-On stagenet/testnet/mainnet the relayer requires gas payment. Build with the appropriate feature flag:
+On stagenet/testnet/mainnet the relayer requires gas payment. Build with the appropriate feature flag — the binary's compiled feature must match the config:
 
 ```bash
-# Build (use cargo build, not cargo install — see note below)
-cargo build --no-default-features --features stagenet
-cp target/debug/axe ~/.cargo/bin/axe
+cargo build --release --no-default-features --features stagenet  # or testnet / mainnet / devnet-amplifier
+cp target/release/axe ~/.cargo/bin/axe
+```
 
+### Stagenet example
+
+```bash
 # Burst
 axe test load-test \
   --source-chain flow \
@@ -233,16 +255,37 @@ EVM_PRIVATE_KEY=0x... axe test load-test \
   --key-cycle 6 \
   --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
   --source-rpc https://your-flow-rpc-endpoint
-
-# ITS sustained
-axe test load-test \
-  --source-chain flow \
-  --destination-chain solana-stagenet-3 \
-  --protocol its \
-  --tps 3 \
-  --duration-secs 120 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json
 ```
+
+### Mainnet examples
+
+Mainnet works for every pair where both chains are deployed there: EVM, Solana, Stellar, Sui, XRPL, and XRPL-EVM. The `--features mainnet` build resolves all program IDs (Solana gateway/ITS/gas-service/memo) to mainnet automatically.
+
+```bash
+# Solana → EVM ITS (or any direction)
+axe test load-test \
+  --source-chain solana --destination-chain avalanche \
+  --num-txs 1 --protocol its \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+
+# EVM → Sui GMP (Sui destination verifier polls suix_queryEvents for MessageApproved/MessageExecuted)
+axe test load-test \
+  --source-chain xrpl-evm --destination-chain sui \
+  --num-txs 1 --protocol gmp \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+
+# XRPL → XRPL-EVM canonical XRP transfer
+axe test load-test \
+  --source-chain xrpl --destination-chain xrpl-evm \
+  --num-txs 1 --protocol its \
+  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+```
+
+**Solana commitment**: load-test paths use `CommitmentConfig::finalized` (not `confirmed`) so we don't return from `send_and_confirm_transaction` until the tx is finalized on-chain. This adds ~10–25 s per Solana source tx but eliminates the verifier vote-split race that produced "Failed" polls (5Y / 5N at expiry) on mainnet when verifiers query Solana at different commitments.
+
+**Mainnet vs testnet relay**:
+- `axe test load-test` is observe-only — sends source txs and watches the Axelar relayer process them. Works on every environment that has a live relayer (testnet, stagenet, mainnet).
+- `axe test gmp` (the legacy single-message mode) manually drives the entire pipeline (vote → end_poll → route → constructProof → approve → execute). Use it for debugging or running without a live relayer. Requires `MNEMONIC` set to a Cosmos wallet funded for Axelar fees.
 
 > **Note:** `cargo install --path .` does a clean compile which triggers a known borsh derive bug in `solana-axelar-std`. Use `cargo build` (incremental) + manual copy instead.
 
@@ -331,6 +374,29 @@ The `participation` map shows each verifier and whether they voted; the `tallies
 ## Configuration
 
 All config lives in `.env` — see [`.env.example`](.env.example) for the full template.
+
+### Per-chain signer keys (load-test)
+
+| Variable | Format | Used by |
+|---|---|---|
+| `EVM_PRIVATE_KEY` | 32-byte hex (`0x…`) | EVM source flows (signs source tx, derives ephemeral keypair pool, deploys destination `SenderReceiver` on first run) |
+| `SOLANA_PRIVATE_KEY` *(optional)* | path to a JSON keypair file (defaults to `~/.config/solana/id.json`) | Solana source flows. Same flag is `--keypair`. |
+| `STELLAR_PRIVATE_KEY` | `S…` secret key or 32-byte hex seed | Stellar source flows. Also used as the AXE-receive G-address for `*-to-stellar` ITS. |
+| `XRPL_PRIVATE_KEY` *(optional)* | s-prefix family seed (`snr…`, `sh…`) **or** 64-char hex | XRPL source flows. Falls back to `EVM_PRIVATE_KEY` bytes if unset. |
+| `SUI_PRIVATE_KEY` | `suiprivkey1…` bech32 (Sui CLI export) — auto-detects ed25519 (flag 0x00) or secp256k1 (flag 0x01) — **or** 32-byte hex (treated as ed25519) | Sui source flows. Get testnet SUI from https://faucet.sui.io |
+
+### RPC overrides (load-test)
+
+| Variable / flag | Effect | Default |
+|---|---|---|
+| `--source-rpc` / `SOURCE_RPC` | source chain RPC URL | from chain config |
+| `--destination-rpc` / `DESTINATION_RPC` | destination chain RPC URL | from chain config |
+| `AXELAR_LCD_URL` | Axelar Cosmos REST endpoint (verifier polling) | from chain config; auto-fallback to `lavenderfive` and `publicnode` on 5xx |
+| `AXELAR_RPC_URL` | Axelar Tendermint RPC endpoint (`tx_search` for second-leg discovery) | from chain config; auto-fallback to `axelar-rpc.publicnode.com` and `rpc.cosmos.directory/axelar` on 5xx |
+
+The `axe` binary reads `.env` automatically via `dotenvy`, so any of these can be set there or exported in your shell.
+
+### Other variables
 
 | Variable                                                     | Used by                                    |
 | ------------------------------------------------------------ | ------------------------------------------ |

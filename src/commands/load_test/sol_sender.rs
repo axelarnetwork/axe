@@ -22,6 +22,17 @@ use super::sustained;
 use crate::solana;
 use crate::ui;
 
+/// Per-network funding hint for an empty Solana wallet. `solana airdrop`
+/// only works on devnet/testnet; on mainnet users have to source SOL
+/// elsewhere.
+fn fund_hint(pubkey: &solana_sdk::pubkey::Pubkey) -> String {
+    if cfg!(feature = "mainnet") {
+        format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
+    } else {
+        format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+    }
+}
+
 /// Generate a unique ABI-encoded payload compatible with `SenderReceiver._execute`.
 /// The contract does `abi.decode(payload_, (string))`, so we must ABI-encode the string.
 pub fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
@@ -89,7 +100,7 @@ pub async fn run_load_test_with_metrics(
     // Check main wallet balance
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
@@ -98,7 +109,8 @@ pub async fn run_load_test_with_metrics(
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
         return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
         ));
     }
 
@@ -286,7 +298,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
@@ -295,7 +307,8 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
         return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
         ));
     }
 

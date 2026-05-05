@@ -76,7 +76,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         &args.source_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
@@ -85,7 +85,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
         return Err(eyre!(
-            "wallet ({pubkey}) has no SOL. Fund it first:\n  solana airdrop 2 {pubkey}"
+            "wallet ({pubkey}) has no SOL. {}",
+            if cfg!(feature = "mainnet") {
+                format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
+            } else {
+                format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+            }
         ));
     }
 
@@ -165,9 +170,30 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let duration_secs = args.duration_secs.unwrap();
         let key_cycle = args.key_cycle as usize;
 
+        // Streaming verification: run concurrently with sends.
+        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+
+        let vconfig = args.config.clone();
+        let vsource = args.source_axelar_id.clone();
+        let vdest = args.destination_axelar_id.clone();
+        let vdest_rpc = evm_rpc_url.clone();
+        let vdone = std::sync::Arc::clone(&send_done);
+        let vgw = evm_gateway_addr;
+        let verify_handle = tokio::spawn(async move {
+            let spinner = spinner_rx.await.expect("spinner channel dropped");
+            super::verify::verify_onchain_evm_its_streaming(
+                &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
+            )
+            .await
+        });
+
         let spinner = ui::wait_spinner(&format!(
             "[0/{duration_secs}s] starting sustained ITS send..."
         ));
+        let _ = spinner_tx.send(spinner.clone());
+
         let test_start = Instant::now();
 
         let dest_chain_s = dest.to_string();
@@ -191,6 +217,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 let m = mint;
                 let gv = gas_value;
                 let gmp_dest = axelarnet_gw_s.clone();
+                let vtx = verify_tx.clone();
 
                 Box::pin(async move {
                     let submit_start = Instant::now();
@@ -221,6 +248,11 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                             metrics.send_instant = Some(submit_start);
                             metrics.gmp_destination_chain = "axelar".to_string();
                             metrics.gmp_destination_address = gmp_dest;
+                            // Stream to concurrent verification
+                            if metrics.success {
+                                let pending = super::verify::tx_to_pending_its(&metrics, false);
+                                let _ = vtx.send(pending);
+                            }
                             metrics
                         }
                         Err(e) => {
@@ -254,7 +286,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             key_cycle,
             None,
             make_task,
-            None,
+            Some(send_done),
             spinner,
         )
         .await;
@@ -268,16 +300,16 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             num_keys,
         );
 
-        let verification = super::verify::verify_onchain_evm_its(
-            &args.config,
-            &args.source_chain,
-            &args.destination_chain,
-            &format!("{its_proxy_addr}"),
-            evm_gateway_addr,
-            &evm_rpc_url,
-            &mut report.transactions,
-        )
-        .await?;
+        let (verification, timings) = verify_handle.await??;
+        for (msg_id, timing) in timings {
+            if let Some(tx) = report
+                .transactions
+                .iter_mut()
+                .find(|t| t.signature == msg_id)
+            {
+                tx.amplifier_timing = Some(timing);
+            }
+        }
         report.verification = Some(verification);
 
         return finish_report(&args, &mut report, test_start);
@@ -389,20 +421,18 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
 
     if total_failed > 0 {
-        let mut error_counts: std::collections::HashMap<String, u64> =
+        let mut error_counts: std::collections::HashMap<String, (u64, String)> =
             std::collections::HashMap::new();
         for m in metrics.iter().filter(|m| !m.success) {
-            let reason = m
-                .error
-                .as_deref()
-                .unwrap_or("unknown")
-                .chars()
-                .take(120)
-                .collect::<String>();
-            *error_counts.entry(reason).or_default() += 1;
+            // Group by a short key (deduplicates identical failures) but
+            // print the full error message — Solana program-log dumps are
+            // multi-line and a 120-char cap drops the actionable part.
+            let full = m.error.as_deref().unwrap_or("unknown").to_string();
+            let key: String = full.chars().take(80).collect();
+            error_counts.entry(key).or_insert((0u64, full)).0 += 1;
         }
-        for (reason, count) in &error_counts {
-            ui::warn(&format!("{count} txs failed: {reason}"));
+        for (count, full) in error_counts.values() {
+            ui::warn(&format!("{count} txs failed:\n{full}"));
         }
     }
 
@@ -459,8 +489,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // --- Verify ---
     let verification = super::verify::verify_onchain_evm_its(
         &args.config,
-        &args.source_chain,
-        &args.destination_chain,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
         &format!("{its_proxy_addr}"),
         evm_gateway_addr,
         &evm_rpc_url,
@@ -602,14 +632,19 @@ async fn setup_its_token(
     ui::success("remote deploy tx confirmed on Solana");
 
     // Wait for the remote deploy to propagate through the hub and execute on EVM.
-    // The deploy message ID is {signature}-1.3 (empirically determined).
+    // The deploy message ID is {signature}-{top_ix}.{inner_ix} where the inner
+    // index varies by program version. We MUST extract it from the tx logs —
+    // a wrong fallback ID would silently send the verifier into a 5-minute
+    // pipeline timeout waiting for a message that does not exist.
     let deploy_message_id =
-        solana::extract_its_message_id(solana_rpc, &remote_sig).unwrap_or_else(|e| {
-            ui::warn(&format!(
-                "could not extract message ID from tx logs: {e}, falling back to -1.3"
-            ));
-            format!("{remote_sig}-1.3")
-        });
+        solana::extract_its_message_id(solana_rpc, &remote_sig).map_err(|e| {
+            eyre!(
+                "could not extract remote-deploy message ID from tx logs: {e}\n\
+                 Tip: the public Solana devnet RPC is rate-limited and slow to index. \
+                 Pass --source-rpc <faster-rpc-url> (e.g. a QuickNode/Helius endpoint) \
+                 to fix this."
+            )
+        })?;
     super::verify::wait_for_its_remote_deploy(
         config,
         src,
@@ -686,7 +721,7 @@ fn distribute_its_tokens(
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::confirmed(),
+        solana_commitment_config::CommitmentConfig::finalized(),
     );
 
     let token_program =
