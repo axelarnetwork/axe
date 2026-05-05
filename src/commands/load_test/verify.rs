@@ -320,7 +320,9 @@ impl<P: Provider> DestinationChecker<'_, P> {
                 }
             }
             Self::Sui {
-                client, gateway_pkg, ..
+                client,
+                gateway_pkg,
+                ..
             } => {
                 // Sui events are immutable; check Executed first (it
                 // implies Approved). Two queries; both are idempotent.
@@ -396,7 +398,9 @@ impl<P: Provider> DestinationChecker<'_, P> {
                 Ok(matches!(executed, Some(true)))
             }
             Self::Sui {
-                client, gateway_pkg, ..
+                client,
+                gateway_pkg,
+                ..
             } => {
                 let event_type = format!("{gateway_pkg}::events::MessageExecuted");
                 let executed = client
@@ -813,12 +817,12 @@ async fn poll_pipeline<P: Provider>(
                     }
                 }
                 DestinationChecker::Sui {
-                    client, gateway_pkg, ..
+                    client,
+                    gateway_pkg,
+                    ..
                 } => {
-                    let approved_event_type =
-                        format!("{gateway_pkg}::events::MessageApproved");
-                    let executed_event_type =
-                        format!("{gateway_pkg}::events::MessageExecuted");
+                    let approved_event_type = format!("{gateway_pkg}::events::MessageApproved");
+                    let executed_event_type = format!("{gateway_pkg}::events::MessageExecuted");
                     for &i in &dest_indices {
                         let phase = txs[i].phase;
                         let approved = client
@@ -1652,9 +1656,10 @@ pub async fn verify_onchain<P: Provider>(
             PendingTx {
                 idx,
                 message_id: match source_type {
-                    SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-                        tx.signature.clone()
-                    }
+                    SourceChainType::Evm
+                    | SourceChainType::Xrpl
+                    | SourceChainType::Stellar
+                    | SourceChainType::Sui => tx.signature.clone(),
                     SourceChainType::Svm => {
                         format!("{}-{}.1", tx.signature, solana_call_contract_index())
                     }
@@ -1814,9 +1819,10 @@ pub async fn verify_onchain_stellar_gmp(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-                    tx.signature.clone()
-                }
+                SourceChainType::Evm
+                | SourceChainType::Xrpl
+                | SourceChainType::Stellar
+                | SourceChainType::Sui => tx.signature.clone(),
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -1949,9 +1955,10 @@ pub(super) fn tx_to_pending_stellar_gmp(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-            tx.signature.clone()
-        }
+        SourceChainType::Evm
+        | SourceChainType::Xrpl
+        | SourceChainType::Stellar
+        | SourceChainType::Sui => tx.signature.clone(),
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1992,9 +1999,10 @@ pub(super) fn tx_to_pending_solana(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-            tx.signature.clone()
-        }
+        SourceChainType::Evm
+        | SourceChainType::Xrpl
+        | SourceChainType::Stellar
+        | SourceChainType::Sui => tx.signature.clone(),
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -2037,9 +2045,10 @@ pub(super) fn tx_to_pending_evm(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-            tx.signature.clone()
-        }
+        SourceChainType::Evm
+        | SourceChainType::Xrpl
+        | SourceChainType::Stellar
+        | SourceChainType::Sui => tx.signature.clone(),
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -2169,11 +2178,6 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
     }
 }
 
-/// Streaming verification for EVM→Solana in sustained mode.
-///
-/// Runs verification concurrently with the send phase. Receives confirmed
-/// transactions via the channel and starts polling them immediately.
-#[allow(clippy::too_many_arguments)]
 // ---------------------------------------------------------------------------
 // Sui destination verifier (GMP)
 // ---------------------------------------------------------------------------
@@ -2208,12 +2212,11 @@ pub async fn verify_onchain_sui_gmp_streaming(
     let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
     let sui_client = crate::sui::SuiClient::new(sui_rpc);
 
-    let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
-        DestinationChecker::Sui {
-            client: sui_client,
-            gateway_pkg,
-            _phantom: std::marker::PhantomData,
-        };
+    let checker: DestinationChecker<'_, alloy::providers::RootProvider> = DestinationChecker::Sui {
+        client: sui_client,
+        gateway_pkg,
+        _phantom: std::marker::PhantomData,
+    };
 
     let mut txs: Vec<PendingTx> = Vec::new();
 
@@ -2322,12 +2325,11 @@ pub async fn verify_onchain_sui_gmp(
         })
         .collect();
 
-    let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
-        DestinationChecker::Sui {
-            client: sui_client,
-            gateway_pkg,
-            _phantom: std::marker::PhantomData,
-        };
+    let checker: DestinationChecker<'_, alloy::providers::RootProvider> = DestinationChecker::Sui {
+        client: sui_client,
+        gateway_pkg,
+        _phantom: std::marker::PhantomData,
+    };
 
     let peaks = poll_pipeline(
         &mut txs,
@@ -2349,6 +2351,11 @@ pub async fn verify_onchain_sui_gmp(
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
+/// Streaming verification for EVM→Solana in sustained mode.
+///
+/// Runs verification concurrently with the send phase. Receives confirmed
+/// transactions via the channel and starts polling them immediately.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_streaming(
     config: &Path,
     source_chain: &str,
@@ -2463,9 +2470,10 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Xrpl | SourceChainType::Stellar | SourceChainType::Sui => {
-                    tx.signature.clone()
-                }
+                SourceChainType::Evm
+                | SourceChainType::Xrpl
+                | SourceChainType::Stellar
+                | SourceChainType::Sui => tx.signature.clone(),
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -4480,11 +4488,18 @@ fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
         if times.len() < 2 {
             return None;
         }
-        let min = times.iter().cloned().reduce(f64::min)?;
+        // `times[i]` is already relative to the first-tx submission instant
+        // (the `epoch` in `compute_peak_throughput`). The honest rate is
+        // "how many tx finished this phase in the elapsed time since we
+        // started sending" — i.e. count / latest_completion_offset.
+        //
+        // Earlier we used `(max - min)` of the phase-completion times, but
+        // burst-mode runs collapse that span to ~0 when all 5 txs cross a
+        // phase in the same verifier poll iteration, producing meaningless
+        // millions of tx/s.
         let max = times.iter().cloned().reduce(f64::max)?;
-        let span = max - min;
-        if span > 0.0 {
-            Some(times.len() as f64 / span)
+        if max > 0.0 {
+            Some(times.len() as f64 / max)
         } else {
             None
         }

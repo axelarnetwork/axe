@@ -120,10 +120,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let sol_recipient = sol_keypair.pubkey();
     let dest_address_bytes = sol_recipient.to_bytes().to_vec();
     ui::kv("Solana recipient", &sol_recipient.to_string());
-    ui::address(
-        "Solana ITS program",
-        &solana_axelar_its::id().to_string(),
-    );
+    ui::address("Solana ITS program", &solana_axelar_its::id().to_string());
 
     // --- Gas (XLM stroops) ---
     let gas_stroops: u64 = match &args.gas_value {

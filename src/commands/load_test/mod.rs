@@ -1377,8 +1377,12 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     // Bail loudly if the configured gateway has no bytecode — otherwise the
     // verifier silently reports false-positive 30/30 executed.
-    ensure_evm_contract_deployed(&dest_rpc_url, "destination AxelarGateway", dest_gateway_addr)
-        .await?;
+    ensure_evm_contract_deployed(
+        &dest_rpc_url,
+        "destination AxelarGateway",
+        dest_gateway_addr,
+    )
+    .await?;
 
     let dest_read_provider = ProviderBuilder::new().connect_http(dest_rpc_url.parse()?);
     let dest_write_provider = ProviderBuilder::new()
@@ -1754,8 +1758,8 @@ pub async fn ensure_evm_contract_deployed(
     contract_label: &str,
     addr: alloy::primitives::Address,
 ) -> Result<()> {
-    let provider = ProviderBuilder::new()
-        .connect_http(rpc_url.parse().map_err(|e| eyre::eyre!("{e}"))?);
+    let provider =
+        ProviderBuilder::new().connect_http(rpc_url.parse().map_err(|e| eyre::eyre!("{e}"))?);
     let code = provider
         .get_code_at(addr)
         .await
@@ -2703,7 +2707,11 @@ async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("protocol", "GMP (Example.gmp.send_call)");
 
     let (sui_rpc, sui_contracts) = crate::sui::read_sui_chain_config(&args.config, src)?;
-    let sui_rpc = if args.source_rpc.is_empty() { sui_rpc } else { args.source_rpc.clone() };
+    let sui_rpc = if args.source_rpc.is_empty() {
+        sui_rpc
+    } else {
+        args.source_rpc.clone()
+    };
     ui::kv("Sui RPC", &sui_rpc);
     let sui_client = crate::sui::SuiClient::new(&sui_rpc);
     let chain_id = sui_client
@@ -2740,9 +2748,7 @@ async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let cache = read_cache(dest);
     let cached_sr = cache.get("senderReceiverAddress").and_then(|v| v.as_str());
     if cached_sr.is_none() && evm_private_key.is_none() {
-        eyre::bail!(
-            "no SenderReceiver cached for '{dest}' and no EVM private key available."
-        );
+        eyre::bail!("no SenderReceiver cached for '{dest}' and no EVM private key available.");
     }
     let (sender_receiver_addr, provider) = ensure_sender_receiver(
         &args,
@@ -2757,7 +2763,9 @@ async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let destination_address = format!("{sender_receiver_addr}");
 
     let gas_value_mist: u64 = match &args.gas_value {
-        Some(v) => v.parse().map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
+        Some(v) => v
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
         None => SUI_DEFAULT_GAS_VALUE_MIST,
     };
     ui::kv(
@@ -2874,7 +2882,9 @@ async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let total_submitted = metrics.len() as u64;
     let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
     let total_failed = total_submitted - total_confirmed;
-    ui::success(&format!("sent {total_confirmed}/{total_submitted} confirmed"));
+    ui::success(&format!(
+        "sent {total_confirmed}/{total_submitted} confirmed"
+    ));
 
     let test_duration = test_start.elapsed().as_secs_f64();
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
@@ -3035,7 +3045,11 @@ pub(super) fn sui_dest_lookup(
     sui_chain_id: &str,
     rpc_override: Option<&str>,
 ) -> Result<(String, String)> {
-    let channel = sui_object_id(config, sui_chain_id, "/contracts/Example/objects/GmpChannelId")?;
+    let channel = sui_object_id(
+        config,
+        sui_chain_id,
+        "/contracts/Example/objects/GmpChannelId",
+    )?;
     let (config_rpc, _contracts) = crate::sui::read_sui_chain_config(config, sui_chain_id)?;
     let rpc = match rpc_override {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -3091,8 +3105,7 @@ async fn run_sol_to_sui(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     // ephemeral key derivation, sustained vs burst from args.tps. Pass
     // evm_destination=true so the payload is ABI-string-encoded — Sui's
     // memo example accepts that the same way EVM SenderReceiver does.
-    let mut report =
-        sol_sender::run_load_test_with_metrics(&args, &sui_channel, true).await?;
+    let mut report = sol_sender::run_load_test_with_metrics(&args, &sui_channel, true).await?;
     report.destination_address = sui_channel.clone();
 
     finalize_sui_dest_run(

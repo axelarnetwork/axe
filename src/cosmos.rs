@@ -289,13 +289,12 @@ pub async fn lcd_cosmwasm_smart_query(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| eyre::eyre!("LCD query exhausted all endpoints")))
-        .map_err(|e| {
-            eyre::eyre!(
-                "{e}\nTip: set AXELAR_LCD_URL to a working endpoint (e.g. \
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("LCD query exhausted all endpoints"))).map_err(|e| {
+        eyre::eyre!(
+            "{e}\nTip: set AXELAR_LCD_URL to a working endpoint (e.g. \
                  `https://rest.lavenderfive.com/axelar` for mainnet)."
-            )
-        })
+        )
+    })
 }
 
 /// Fetch code IDs by matching storeCodeProposalCodeHash against on-chain checksums.

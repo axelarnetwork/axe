@@ -126,7 +126,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 ui::warn(&format!(
                     "XrplGateway lookup failed ({e}); falling back to canonical XRP token id 0x{canonical_hex}"
                 ));
-                ui::kv("token ID (canonical fallback)", &format!("0x{canonical_hex}"));
+                ui::kv(
+                    "token ID (canonical fallback)",
+                    &format!("0x{canonical_hex}"),
+                );
                 canonical
             }
         }

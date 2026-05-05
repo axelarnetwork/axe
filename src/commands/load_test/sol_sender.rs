@@ -108,7 +108,10 @@ pub async fn run_load_test_with_metrics(
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
-        return Err(eyre!("wallet ({pubkey}) has no SOL. {}", fund_hint(&pubkey)));
+        return Err(eyre!(
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
+        ));
     }
 
     // Derive and fund keypairs (1 key per tx to avoid nonce contention)
@@ -303,7 +306,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
-        return Err(eyre!("wallet ({pubkey}) has no SOL. {}", fund_hint(&pubkey)));
+        return Err(eyre!(
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
+        ));
     }
 
     let payload: Option<Vec<u8>> = match &args.payload {

@@ -431,7 +431,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             let key: String = full.chars().take(80).collect();
             error_counts.entry(key).or_insert((0u64, full)).0 += 1;
         }
-        for (_key, (count, full)) in &error_counts {
+        for (count, full) in error_counts.values() {
             ui::warn(&format!("{count} txs failed:\n{full}"));
         }
     }

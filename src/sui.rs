@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use blake2::{Blake2b, Digest as Blake2Digest, digest::consts::U32};
-use ed25519_dalek::{Signer as EdSigner, SigningKey as EdSigningKey, VerifyingKey as EdVerifyingKey};
+use ed25519_dalek::{
+    Signer as EdSigner, SigningKey as EdSigningKey, VerifyingKey as EdVerifyingKey,
+};
 use eyre::{Result, eyre};
 use libsecp256k1::{Message as SecpMessage, PublicKey as SecpPub, SecretKey as SecpSecret};
 use serde_json::{Value, json};
@@ -66,7 +68,13 @@ const MAINNET_FALLBACKS: &[&str] = &[
 
 /// Sui supports several signature schemes. We support the two the Sui CLI
 /// emits for fresh keypairs: ed25519 (flag 0x00) and secp256k1 (flag 0x01).
+///
+/// The variants are different sizes (ed25519 keypair ≈ 64 B vs secp256k1 ≈
+/// 128 B with uncompressed pubkey internals); a load-test holds at most a
+/// handful of these per run, so the indirection of `Box`-ing the larger
+/// variant isn't worth it.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SuiKeypair {
     Ed25519 {
         signing_key: EdSigningKey,
@@ -123,8 +131,8 @@ impl SuiWallet {
     /// detects the signature scheme from the flag byte (0x00 = ed25519,
     /// 0x01 = secp256k1).
     pub fn from_suiprivkey(s: &str) -> Result<Self> {
-        let (hrp, data) = bech32::decode(s.trim())
-            .map_err(|e| eyre!("invalid suiprivkey bech32: {e}"))?;
+        let (hrp, data) =
+            bech32::decode(s.trim()).map_err(|e| eyre!("invalid suiprivkey bech32: {e}"))?;
         if hrp.as_str() != HRP_SUIPRIVKEY {
             return Err(eyre!(
                 "expected suiprivkey hrp, got '{}': not a Sui CLI key",
@@ -305,29 +313,22 @@ impl SuiClient {
                             match serde_json::from_str::<Value>(&text) {
                                 Ok(v) => {
                                     if let Some(err) = v.get("error") {
-                                        last_err = Some(eyre!(
-                                            "Sui RPC {endpoint} {method}: {err}"
-                                        ));
+                                        last_err =
+                                            Some(eyre!("Sui RPC {endpoint} {method}: {err}"));
                                         // RPC-level error usually applies on every endpoint.
                                         // But still try fallbacks for transient issues.
                                         continue;
                                     }
-                                    return Ok(v
-                                        .get("result")
-                                        .cloned()
-                                        .unwrap_or(Value::Null));
+                                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
                                 }
                                 Err(e) => {
-                                    last_err = Some(eyre!(
-                                        "Sui RPC {endpoint} non-JSON: {e}"
-                                    ));
+                                    last_err = Some(eyre!("Sui RPC {endpoint} non-JSON: {e}"));
                                     continue;
                                 }
                             }
                         }
                         Err(e) => {
-                            last_err =
-                                Some(eyre!("Sui RPC {endpoint} body read failed: {e}"));
+                            last_err = Some(eyre!("Sui RPC {endpoint} body read failed: {e}"));
                             continue;
                         }
                     }
@@ -403,10 +404,7 @@ impl SuiClient {
     /// Fetch `(initial_shared_version, latest_version, digest)` for a shared
     /// object. The first is what PTB inputs need; the latter two are useful
     /// for owned-object inputs.
-    pub async fn get_shared_object_initial_version(
-        &self,
-        object_id: &SuiAddress,
-    ) -> Result<u64> {
+    pub async fn get_shared_object_initial_version(&self, object_id: &SuiAddress) -> Result<u64> {
         let r = self
             .call(
                 "sui_getObject",
@@ -786,12 +784,11 @@ impl PtbBuilder {
         mutable: bool,
     ) -> Argument {
         let idx = self.inputs.len() as u16;
-        self.inputs
-            .push(Input::Shared(SharedInput::new(
-                object_id,
-                initial_shared_version,
-                mutable,
-            )));
+        self.inputs.push(Input::Shared(SharedInput::new(
+            object_id,
+            initial_shared_version,
+            mutable,
+        )));
         Argument::Input(idx)
     }
 
