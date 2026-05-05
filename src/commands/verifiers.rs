@@ -108,9 +108,10 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
         "Node.monster",
     ),
     ("axelar1kr5f2wrq9l2denmvfqfky7f8rd07wk9kygxjak", "Redbooker"),
+    ("axelar1lkg5zs5zgywc0ua9mpd9d63gdnl3ka9n07r5fg", "DSRV"),
     (
-        "axelar1lkg5zs5zgywc0ua9mpd9d63gdnl3ka9n07r5fg",
-        "DSRV / Encapsulate",
+        "axelar1nppclnu328tgvxyvu0fmd6yder3r9mrrgusrj3",
+        "Encapsulate",
     ),
     ("axelar1p0z7ff4wru5yq0v2ny5h6vx5e6ceg06kqnhfpg", "axelar1"),
     ("axelar1qgwu4jjgeapqm82w4nslhwlzxa3mjd8fvn4xdx", "AlexZ"),
