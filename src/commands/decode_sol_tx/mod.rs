@@ -79,7 +79,7 @@ fn try_fetch_transaction_from_any_network(
             sig,
             solana_client::rpc_config::RpcTransactionConfig {
                 encoding: Some(UiTransactionEncoding::Json),
-                commitment: Some(CommitmentConfig::finalized()),
+                commitment: Some(CommitmentConfig::confirmed()),
                 max_supported_transaction_version: Some(0),
             },
         ) {

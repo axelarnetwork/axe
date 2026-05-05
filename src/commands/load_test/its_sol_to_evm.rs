@@ -721,7 +721,7 @@ fn distribute_its_tokens(
 
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
-        solana_commitment_config::CommitmentConfig::finalized(),
+        solana_commitment_config::CommitmentConfig::confirmed(),
     );
 
     let token_program =

@@ -8,7 +8,9 @@ use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
 use crate::commands::load_test::evm_sender::{make_executable_payload, memo_program_id};
 use crate::evm::{ContractCall, SenderReceiver};
-use crate::solana::{extract_its_message_id, load_keypair, send_call_contract};
+use crate::solana::{
+    extract_its_message_id, load_keypair, send_call_contract, wait_for_signature_finalized,
+};
 use crate::ui;
 
 /// The bits of a freshly sent GMP `callContract` that downstream Amplifier
@@ -146,6 +148,18 @@ pub fn send_svm_call_contract(
         "confirmed ({}ms)",
         metrics.latency_ms.unwrap_or(0)
     ));
+
+    // The Axelar verifier set reads Solana state at finalized commitment;
+    // shipping `message_id` to the cosmos hub before the source tx is
+    // finalized risks a split poll (some verifiers see the tx, some don't).
+    let spinner = ui::wait_spinner("Waiting for source tx to finalize on Solana...");
+    let parsed_sig = raw_sig
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid Solana signature '{raw_sig}': {e}"))?;
+    let finalize_result = wait_for_signature_finalized(src_rpc, &parsed_sig);
+    spinner.finish_and_clear();
+    finalize_result?;
+    ui::success("source tx finalized");
 
     Ok(SentGmp {
         destination_chain: destination_chain.to_string(),

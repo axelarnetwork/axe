@@ -33,7 +33,7 @@ pub use its::{
     send_its_deploy_interchain_token, send_its_deploy_remote_interchain_token,
     send_its_interchain_transfer,
 };
-pub use rpc::rpc_client;
+pub use rpc::{rpc_client, wait_for_signature_finalized};
 
 #[cfg(test)]
 mod tests {
