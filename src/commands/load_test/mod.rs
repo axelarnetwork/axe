@@ -1161,8 +1161,7 @@ async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("destination", dest);
 
     let gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let gas_service_addr =
-        read_contract_address(&args.config, src, "AxelarGasService").unwrap_or(Address::ZERO);
+    let gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
     // --- Set up EVM signer ---
@@ -1358,8 +1357,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     // --- Source chain: deploy/reuse SenderReceiver (for sending) ---
     let src_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let src_gas_service_addr =
-        read_contract_address(&args.config, src, "AxelarGasService").unwrap_or(Address::ZERO);
+    let src_gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
     ui::address("source gateway", &format!("{src_gateway_addr}"));
 
     let src_cache_key = &format!("{src}-evm-to-evm");
@@ -1381,8 +1379,7 @@ async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     // --- Destination chain: deploy/reuse SenderReceiver (as receive target) ---
     let dest_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
-    let dest_gas_service_addr =
-        read_contract_address(&args.config, dest, "AxelarGasService").unwrap_or(Address::ZERO);
+    let dest_gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
     ui::address("destination gateway", &format!("{dest_gateway_addr}"));
 
     // Bail loudly if the configured gateway has no bytecode — otherwise the
