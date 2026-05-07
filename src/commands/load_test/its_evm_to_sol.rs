@@ -641,6 +641,84 @@ pub(super) async fn deploy_its_token<P: Provider>(
 }
 
 /// Distribute ITS tokens from deployer to all derived wallets.
+/// Pre-approve the ITS proxy on each derived key's token balance so
+/// `interchainTransfer` doesn't revert with `TakeTokenFailed` when the
+/// underlying token manager is lock/unlock (e.g. canonical XRP wrapped on EVM).
+///
+/// Mint/burn-managed tokens (the AXE we deploy via `deployInterchainToken`)
+/// don't need this — ITS is the minter and the InterchainToken's `burn(from,
+/// amount)` skips the allowance check. But canonical tokens registered against
+/// the ITS hub use `transferFrom(sender, token_manager, amount)` which
+/// strictly requires `allowance >= amount`.
+///
+/// Calls are issued sequentially (cheap relative to the test itself) and
+/// skipped per-key when the existing allowance already exceeds
+/// `amount_per_key * 2`, so re-runs against the same derived keys reuse the
+/// prior approval.
+pub async fn approve_its_for_keys(
+    rpc_url: &str,
+    token_addr: Address,
+    its_proxy: Address,
+    derived: &[PrivateKeySigner],
+    amount_per_key: U256,
+) -> eyre::Result<()> {
+    use alloy::providers::ProviderBuilder;
+
+    let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let read_token = ERC20::new(token_addr, &read_provider);
+    let approve_threshold = amount_per_key.saturating_mul(U256::from(2));
+
+    let spinner = ui::wait_spinner(&format!(
+        "approving ITS for {} keys (lock/unlock token)...",
+        derived.len()
+    ));
+
+    let mut approved = 0usize;
+    for (i, signer) in derived.iter().enumerate() {
+        let allowance = read_token
+            .allowance(signer.address(), its_proxy)
+            .call()
+            .await
+            .unwrap_or_default();
+        if allowance >= approve_threshold {
+            continue;
+        }
+        let write_provider = ProviderBuilder::new()
+            .wallet(signer.clone())
+            .connect_http(rpc_url.parse()?);
+        let token = ERC20::new(token_addr, &write_provider);
+        let pending = token
+            .approve(its_proxy, U256::MAX)
+            .send()
+            .await
+            .map_err(|e| eyre!("failed to approve ITS for key {i}: {e}"))?;
+        pending
+            .get_receipt()
+            .await
+            .map_err(|e| eyre!("approve receipt for key {i} failed: {e}"))?;
+        approved += 1;
+        spinner.set_message(format!(
+            "approving ITS ({}/{} new approvals)...",
+            approved,
+            derived.len()
+        ));
+    }
+
+    spinner.finish_and_clear();
+    if approved == 0 {
+        ui::info(&format!(
+            "ITS already approved for all {} keys (reused from prior run)",
+            derived.len()
+        ));
+    } else {
+        ui::success(&format!(
+            "approved ITS for {approved}/{} keys",
+            derived.len()
+        ));
+    }
+    Ok(())
+}
+
 pub async fn distribute_tokens<P: Provider>(
     provider: &P,
     token_addr: Address,

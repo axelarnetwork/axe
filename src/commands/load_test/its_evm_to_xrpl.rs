@@ -283,6 +283,20 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, &derived, amount_per_key)
         .await?;
 
+    // XRPL canonical XRP wraps to a lock/unlock-managed ERC20 on the EVM
+    // side, so ITS does `transferFrom(sender, token_manager, amount)` which
+    // requires an allowance. Pre-approve the ITS proxy from each derived key
+    // before the burst — without this the ITS reverts with
+    // `TakeTokenFailed(bytes)` (selector 0x1a59c9bd).
+    super::its_evm_to_sol::approve_its_for_keys(
+        &evm_rpc_url,
+        token_addr,
+        its_proxy_addr,
+        &derived,
+        amount_per_key,
+    )
+    .await?;
+
     // --- destination_address bytes for `interchainTransfer` ---
     // For XRPL destinations, ITS expects `asciiToBytes(r-address)` in the
     // destination_address arg. The relayer parses the bytes back to a
