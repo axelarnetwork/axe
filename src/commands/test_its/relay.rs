@@ -129,14 +129,12 @@ pub(super) async fn relay_to_hub(
 /// Drive the second leg actively: wait for hub-routed message → discover its
 /// cc_id → wait for the destination cosm gateway to have it → construct_proof
 /// on the destination MultisigProver → submit to the EVM gateway →
-/// `ITS.execute(...)` on the destination ITS proxy. Returns the commandId.
+/// `ITS.execute(...)` on the destination ITS proxy.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn relay_to_destination<P: Provider>(
     first_leg_message_id: &str,
     src_axelar_id: &crate::types::ChainAxelarId,
     dest_payload: &[u8],
-    _dst_axelar_id: &crate::types::ChainAxelarId,
-    _dst_chain_key: &str,
     dst_its_proxy: Address,
     dst_evm_gateway: Address,
     dst_provider: &P,
@@ -152,7 +150,7 @@ pub(super) async fn relay_to_destination<P: Provider>(
     axelar_rpc: &str,
     step_base: usize,
     step_total: usize,
-) -> Result<FixedBytes<32>> {
+) -> Result<()> {
     // Wait until the AxelarnetGateway hub has approved the first-leg message.
     // executable_messages is keyed by the *source* chain of the message.
     ui::step_header(step_base, step_total, "Wait for hub approval");
@@ -349,7 +347,7 @@ pub(super) async fn relay_to_destination<P: Provider>(
     let pending_exec = exec_call.send().await?;
     let _exec_receipt = crate::evm::broadcast_and_log(pending_exec, "its execute tx").await?;
 
-    Ok(command_id)
+    Ok(())
 }
 
 /// Poll `discover_second_leg` until it returns Some, with a spinner.

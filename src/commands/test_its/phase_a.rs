@@ -181,12 +181,10 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
     let deploy_inner = encode_inner_deploy(&token_id, spec.name, spec.symbol, spec.decimals, &[]);
     let dest_payload_deploy = encode_receive_from_hub(src_axelar_id, &deploy_inner);
 
-    let _command_id = relay_to_destination(
+    relay_to_destination(
         &first_leg_id,
         src_axelar_id,
         &dest_payload_deploy,
-        dst_axelar_id,
-        dst,
         dst_its_proxy,
         dst_evm_gateway,
         dst_provider,

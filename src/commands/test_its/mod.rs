@@ -747,12 +747,10 @@ pub async fn run_config(
     );
     let xfer_dest_payload = encode_receive_from_hub(&src_axelar_id, &xfer_inner);
 
-    let _xfer_command_id = relay_to_destination(
+    relay_to_destination(
         &xfer_first_leg_id,
         &src_axelar_id,
         &xfer_dest_payload,
-        &dst_axelar_id,
-        &dst,
         dst_its_proxy,
         dst_evm_gateway,
         &dst_provider,
