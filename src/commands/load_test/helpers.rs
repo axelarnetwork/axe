@@ -1,6 +1,9 @@
-//! Shared helpers used by every per-pair orchestrator: SenderReceiver
-//! deploy/reuse, the report finaliser, RPC validation, and the formatted
-//! summary block printed at the end of a run.
+//! Shared helpers used by every per-pair load-test orchestrator:
+//! SenderReceiver deploy/reuse, RPC validation, the report finalizer, and the
+//! per-chain config readers (Stellar/Sui wallet loaders, JSON-pointer
+//! contract-address lookups). Most of this module is `pub(super)` — only
+//! `ensure_sender_receiver_on_evm_chain` is `pub(crate)` because
+//! `commands::test_gmp` calls into it for the `--config` sol→evm flow.
 
 use std::time::Instant;
 
@@ -9,24 +12,19 @@ use alloy::{
     primitives::{Address, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
+    signers::local::PrivateKeySigner,
     sol_types::SolValue,
 };
 use eyre::Result;
 use owo_colors::OwoColorize;
 use serde_json::json;
 
-use super::LoadTestArgs;
 use super::metrics::LoadTestReport;
-use super::resolve::save_cache;
-use crate::evm::{broadcast_and_log, read_artifact_bytecode};
+use super::verify;
+use super::{LoadTestArgs, read_cache, save_cache};
+use crate::evm::read_artifact_bytecode;
 use crate::ui;
 
-/// One-stop wrapper around the cache → deploy/reuse → cache flow for an
-/// EVM destination. Reads the on-disk cache for `chain`, checks the cached
-/// SenderReceiver still has matching code on chain, redeploys if not, and
-/// updates the cache. Used by `test_gmp::run_config` to auto-resolve the
-/// destination address for sol→evm runs without forcing the user to deploy
-/// a SenderReceiver themselves.
 pub(crate) async fn ensure_sender_receiver_on_evm_chain(
     chain: &str,
     rpc_url: &str,
@@ -40,7 +38,7 @@ pub(crate) async fn ensure_sender_receiver_on_evm_chain(
     let write_provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
-    let cache = super::resolve::read_cache(chain);
+    let cache = read_cache(chain);
     deploy_or_reuse_sender_receiver(
         &cache,
         chain,
@@ -54,7 +52,7 @@ pub(crate) async fn ensure_sender_receiver_on_evm_chain(
 }
 
 /// Deploy or reuse a cached SenderReceiver contract.
-pub(super) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
+pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     cache: &serde_json::Value,
     cache_key: &str,
     read_provider: &R,
@@ -114,7 +112,7 @@ pub(super) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     }
 }
 
-pub(super) fn finish_report(
+pub(crate) fn finish_report(
     args: &LoadTestArgs,
     report: &mut LoadTestReport,
     run_start: Instant,
@@ -156,20 +154,12 @@ pub(super) fn finish_report(
 }
 
 /// List chain names that have a Cosmos Gateway address in the config.
-/// Returns an empty vec if the config can't be loaded or has no Gateway
-/// section — callers use this only to print a remediation hint, so a quiet
-/// fallback is fine here.
-pub(super) fn list_gateway_chains(config_path: &std::path::Path) -> Vec<String> {
-    let Ok(cfg) = crate::config::ChainsConfig::load(config_path) else {
-        return Vec::new();
-    };
-    cfg.axelar
-        .contracts
-        .as_ref()
-        .and_then(|c| c.get("Gateway"))
-        .map(|gateway_map| {
-            gateway_map
-                .iter()
+pub(crate) fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
+    config_root
+        .pointer("/axelar/contracts/Gateway")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
                 .filter(|(_, v)| v.get("address").and_then(|a| a.as_str()).is_some())
                 .map(|(k, _)| k.clone())
                 .collect()
@@ -178,7 +168,7 @@ pub(super) fn list_gateway_chains(config_path: &std::path::Path) -> Vec<String> 
 }
 
 /// Validate that an RPC endpoint speaks EVM JSON-RPC (eth_chainId).
-pub(super) async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
+pub(crate) async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     let provider = ProviderBuilder::new().connect_http(
         rpc_url
             .parse()
@@ -193,8 +183,36 @@ pub(super) async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pre-flight check that a contract address actually has bytecode at the
+/// given EVM RPC. Without this, the EVM destination verifier silently reports
+/// false-positive 30/30 executed — `eth_call` against an EOA returns `0x`,
+/// which alloy decodes as `false`, which our pipeline interprets as
+/// "approval consumed by execution = success." See verify.rs:266 for the
+/// dependent decode logic.
+pub(crate) async fn ensure_evm_contract_deployed(
+    rpc_url: &str,
+    contract_label: &str,
+    addr: alloy::primitives::Address,
+) -> Result<()> {
+    let provider =
+        ProviderBuilder::new().connect_http(rpc_url.parse().map_err(|e| eyre::eyre!("{e}"))?);
+    let code = provider
+        .get_code_at(addr)
+        .await
+        .map_err(|e| eyre::eyre!("eth_getCode for {contract_label} ({addr}) failed: {e}"))?;
+    if code.is_empty() {
+        eyre::bail!(
+            "{contract_label} at {addr} on {rpc_url} has no bytecode. \
+             The chain config likely points at an undeployed/stale address — \
+             this environment cannot relay messages to that contract. \
+             Pick a different chain pair or update the chain config to a deployed address."
+        );
+    }
+    Ok(())
+}
+
 /// Validate that an RPC endpoint speaks Solana JSON-RPC (getVersion).
-pub(super) async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
+pub(crate) async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     let client = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
     client.get_version().await.map_err(|_| {
         eyre::eyre!(
@@ -205,7 +223,10 @@ pub(super) async fn validate_solana_rpc(rpc_url: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn check_evm_balance<P: Provider>(provider: &P, address: Address) -> Result<()> {
+pub(crate) async fn check_evm_balance<P: alloy::providers::Provider>(
+    provider: &P,
+    address: alloy::primitives::Address,
+) -> Result<()> {
     let balance = provider.get_balance(address).await?;
     if balance.is_zero() {
         eyre::bail!(
@@ -216,25 +237,38 @@ pub async fn check_evm_balance<P: Provider>(provider: &P, address: Address) -> R
     Ok(())
 }
 
-pub(super) async fn deploy_sender_receiver<P: Provider>(
+pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     provider: &P,
-    gateway: Address,
-    gas_service: Address,
-) -> Result<Address> {
+    gateway: alloy::primitives::Address,
+    gas_service: alloy::primitives::Address,
+) -> Result<alloy::primitives::Address> {
     let bytecode = read_artifact_bytecode("artifacts/SenderReceiver.json")?;
     let mut deploy_code = bytecode;
     deploy_code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
 
     let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
     let pending = provider.send_transaction(tx).await?;
-    let receipt = broadcast_and_log(pending, "deploy tx").await?;
-    receipt
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash("deploy tx", &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
+
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("deploy tx timed out after 120s"))??;
+
+    let addr = receipt
         .contract_address
-        .ok_or_else(|| eyre::eyre!("no contract address in receipt"))
+        .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
+
+    ui::success(&format!(
+        "deployed in block {}",
+        receipt.block_number.unwrap_or(0)
+    ));
+    Ok(addr)
 }
 
 #[allow(clippy::float_arithmetic)]
-fn print_final_report(report: &LoadTestReport) {
+pub(crate) fn print_final_report(report: &LoadTestReport) {
     println!();
     println!(
         "\u{2550}\u{2550}\u{2550} SUMMARY \u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}\u{2550}"
@@ -462,4 +496,198 @@ fn print_final_report(report: &LoadTestReport) {
         }
     }
     println!();
+}
+pub(crate) fn axelar_id_for_chain(config: &std::path::Path, chain_id: &str) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(root
+        .pointer(&format!("/chains/{chain_id}/axelarId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(chain_id)
+        .to_string())
+}
+
+pub(crate) fn read_stellar_network_type(
+    config: &std::path::Path,
+    chain_id: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(root
+        .pointer(&format!("/chains/{chain_id}/networkType"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("testnet")
+        .to_string())
+}
+
+pub(crate) fn read_stellar_token_address(
+    config: &std::path::Path,
+    chain_id: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    root.pointer(&format!("/chains/{chain_id}/tokenAddress"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| {
+            eyre::eyre!("no tokenAddress (XLM Soroban contract) for Stellar chain {chain_id}")
+        })
+}
+
+pub(crate) fn read_stellar_contract_address(
+    config: &std::path::Path,
+    chain_id: &str,
+    contract: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    root.pointer(&format!("/chains/{chain_id}/contracts/{contract}/address"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| eyre::eyre!("no Stellar contract {contract} for chain {chain_id}"))
+}
+
+pub(crate) fn load_stellar_main_wallet(
+    private_key: Option<&str>,
+) -> Result<crate::stellar::StellarWallet> {
+    let key = private_key
+        .map(String::from)
+        .or_else(|| std::env::var("STELLAR_PRIVATE_KEY").ok())
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "Stellar main wallet required. Set STELLAR_PRIVATE_KEY to either an S... secret key \
+                 or a 32-byte hex seed."
+            )
+        })?;
+    if key.starts_with('S') && key.len() > 50 {
+        crate::stellar::StellarWallet::from_secret_str(&key)
+    } else {
+        crate::stellar::StellarWallet::from_hex_seed(&key)
+    }
+}
+pub(crate) async fn ensure_sender_receiver(
+    args: &LoadTestArgs,
+    rpc_url: &str,
+    gateway_addr: Address,
+    gas_service_addr: Address,
+    cache: serde_json::Value,
+    evm_private_key: Option<&str>,
+) -> Result<(Address, impl Provider)> {
+    if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
+        let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        let addr: Address = addr_str.parse()?;
+        let code = read_provider.get_code_at(addr).await?;
+        let needs_redeploy = if code.is_empty() {
+            true
+        } else {
+            let sr = crate::evm::SenderReceiver::new(addr, &read_provider);
+            !matches!(sr.gateway().call().await, Ok(onchain_gw) if onchain_gw == gateway_addr)
+        };
+        if !needs_redeploy {
+            // Wallet provider — caller may submit txs through it. Fail loud
+            // when no key is configured rather than substitute the historic
+            // `0x0…01` placeholder, which was a sweepable-funds footgun.
+            let pk = args
+                .private_key
+                .as_deref()
+                .or(evm_private_key)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "EVM private key required to reuse the cached SenderReceiver. \
+                     Set EVM_PRIVATE_KEY env var or use --private-key"
+                    )
+                })?;
+            let signer: PrivateKeySigner = pk.parse()?;
+            let provider = ProviderBuilder::new()
+                .wallet(signer)
+                .connect_http(rpc_url.parse()?);
+            return Ok((addr, provider));
+        }
+    }
+
+    let pk = args.private_key.as_deref().or(evm_private_key).ok_or_else(|| {
+        eyre::eyre!(
+            "EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
+        )
+    })?;
+    let signer: PrivateKeySigner = pk.parse()?;
+    let write_provider = ProviderBuilder::new()
+        .wallet(signer)
+        .connect_http(rpc_url.parse()?);
+    let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
+    let mut cache = cache;
+    cache["senderReceiverAddress"] = json!(format!("{addr}"));
+    save_cache(&args.destination_chain, &cache)?;
+    Ok((addr, write_provider))
+}
+pub(crate) fn load_sui_main_wallet() -> Result<crate::sui::SuiWallet> {
+    let key = std::env::var("SUI_PRIVATE_KEY").map_err(|_| {
+        eyre::eyre!(
+            "SUI_PRIVATE_KEY required (a `suiprivkey1...` bech32 secret from `sui keytool` or 64-char hex). Add it to .env."
+        )
+    })?;
+    crate::sui::SuiWallet::from_secret_str(&key)
+}
+pub(crate) fn sui_object_id(
+    config: &std::path::Path,
+    chain_id: &str,
+    pointer_within_chain: &str,
+) -> Result<String> {
+    let content =
+        std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    root.pointer(&format!("/chains/{chain_id}{pointer_within_chain}"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| eyre::eyre!("no Sui object {pointer_within_chain} for chain {chain_id}"))
+}
+
+/// Read `(sui_channel_id, sui_rpc)` from the chains config. `rpc_override`
+/// lets the caller honor `--destination-rpc` / `DESTINATION_RPC` from
+/// `LoadTestArgs::destination_rpc`. An empty/None override falls back to
+/// the chain config's `rpc` field.
+pub(crate) fn sui_dest_lookup(
+    config: &std::path::Path,
+    sui_chain_id: &str,
+    rpc_override: Option<&str>,
+) -> Result<(String, String)> {
+    let channel = sui_object_id(
+        config,
+        sui_chain_id,
+        "/contracts/Example/objects/GmpChannelId",
+    )?;
+    let (config_rpc, _contracts) = crate::sui::read_sui_chain_config(config, sui_chain_id)?;
+    let rpc = match rpc_override {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => config_rpc,
+    };
+    Ok((channel, rpc))
+}
+
+/// Run the Sui destination verifier and stamp the report. Shared between
+/// `run_evm_to_sui`, `run_sol_to_sui`, `run_stellar_to_sui`.
+pub(crate) async fn finalize_sui_dest_run(
+    args: &LoadTestArgs,
+    report: &mut crate::commands::load_test::metrics::LoadTestReport,
+    sui_channel: &str,
+    sui_rpc: &str,
+    source_type: verify::SourceChainType,
+    test_start: Instant,
+) -> Result<()> {
+    let verification = verify::verify_onchain_sui_gmp(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        sui_channel,
+        sui_rpc,
+        &mut report.transactions,
+        source_type,
+    )
+    .await?;
+    report.verification = Some(verification);
+    finish_report(args, report, test_start)
 }
