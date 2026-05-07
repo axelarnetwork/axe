@@ -35,10 +35,14 @@ pub fn extract_token_deployed_event(
 
             // tokenAddress is the first ABI-encoded field in data (bytes 12..32)
             let data = log.data().data.as_ref();
-            if data.len() >= 32 {
-                return Ok((token_id, Address::from_slice(&data[12..32])));
+            if data.len() < 32 {
+                return Err(eyre::eyre!(
+                    "InterchainTokenDeployed has truncated data: {} bytes, expected ≥ 32 \
+                     (token address occupies bytes 12..32)",
+                    data.len()
+                ));
             }
-            return Ok((token_id, Address::ZERO));
+            return Ok((token_id, Address::from_slice(&data[12..32])));
         }
     }
     Err(eyre::eyre!(
