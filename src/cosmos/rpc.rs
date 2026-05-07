@@ -183,6 +183,34 @@ const LCD_FALLBACKS_MAINNET: &[&str] = &[
     "https://axelar-rest.publicnode.com",
 ];
 
+/// `OnceLock` flag for the LCD fallback warning. We emit one ui::warn the
+/// first time the primary LCD goes unhealthy in a process, then stay quiet
+/// — repeating per-call would flood the load-test report log with the same
+/// message hundreds of times.
+static LCD_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Print a one-time warning when an LCD response came from a fallback
+/// endpoint instead of the user-configured primary. `idx` is the position
+/// in the candidate list — `0` is the primary (no warning), anything ≥ 1 is
+/// a fallback.
+fn note_lcd_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+    if idx == 0 {
+        return;
+    }
+    if LCD_FALLBACK_WARNED.set(()).is_err() {
+        return;
+    }
+    let cause = last_err
+        .map(|e| {
+            let s = e.to_string();
+            s.lines().next().unwrap_or("").to_string()
+        })
+        .unwrap_or_else(|| "primary unreachable".to_string());
+    ui::warn(&format!(
+        "Axelar LCD primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+    ));
+}
+
 pub async fn lcd_cosmwasm_smart_query(
     lcd: &str,
     contract: &str,
@@ -212,7 +240,7 @@ pub async fn lcd_cosmwasm_smart_query(
     let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_json.as_bytes());
     let mut last_err: Option<eyre::Report> = None;
 
-    for endpoint in &candidates {
+    for (idx, endpoint) in candidates.iter().enumerate() {
         let url = format!("{endpoint}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
         match reqwest::get(&url).await {
             Ok(response) => {
@@ -228,7 +256,10 @@ pub async fn lcd_cosmwasm_smart_query(
                             continue;
                         }
                         match serde_json::from_str::<Value>(&body) {
-                            Ok(resp) => return Ok(resp["data"].clone()),
+                            Ok(resp) => {
+                                note_lcd_fallback_use(idx, endpoint, last_err.as_ref());
+                                return Ok(resp["data"].clone());
+                            }
                             Err(e) => {
                                 last_err = Some(eyre::eyre!(
                                     "LCD {endpoint} returned non-JSON body. \
@@ -334,6 +365,29 @@ const RPC_FALLBACKS_MAINNET: &[&str] = &[
     "https://rpc.cosmos.directory/axelar",
 ];
 
+/// `OnceLock` flag matching `LCD_FALLBACK_WARNED` for the Tendermint RPC
+/// side — same once-per-process semantics so a flapping primary doesn't
+/// flood the report log.
+static RPC_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn note_rpc_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+    if idx == 0 {
+        return;
+    }
+    if RPC_FALLBACK_WARNED.set(()).is_err() {
+        return;
+    }
+    let cause = last_err
+        .map(|e| {
+            let s = e.to_string();
+            s.lines().next().unwrap_or("").to_string()
+        })
+        .unwrap_or_else(|| "primary unreachable".to_string());
+    ui::warn(&format!(
+        "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+    ));
+}
+
 /// Query Tendermint RPC `tx_search` for a single event key/value pair.
 /// Returns the parsed JSON response. Silently falls back to public RPCs if
 /// the primary endpoint errors and `AXELAR_RPC_URL` is not explicitly set.
@@ -358,7 +412,7 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
     let encoded = url_encode_query(&query);
     let mut last_err: Option<eyre::Report> = None;
 
-    for endpoint in &candidates {
+    for (idx, endpoint) in candidates.iter().enumerate() {
         let url = format!("{endpoint}/tx_search?query={encoded}&per_page=1");
         match reqwest::get(&url).await {
             Ok(response) => {
@@ -370,7 +424,10 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
                     continue;
                 }
                 match response.json::<Value>().await {
-                    Ok(v) => return Ok(v),
+                    Ok(v) => {
+                        note_rpc_fallback_use(idx, endpoint, last_err.as_ref());
+                        return Ok(v);
+                    }
                     Err(e) => {
                         last_err = Some(eyre::eyre!("RPC {endpoint} JSON decode failed: {e}"));
                         continue;
