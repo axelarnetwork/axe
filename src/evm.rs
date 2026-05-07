@@ -152,12 +152,18 @@ sol! {
         /// lock/unlock-managed tokens, so canonical-token transfers must
         /// approve THIS address (not the ITS proxy).
         function tokenManagerAddress(bytes32 tokenId) external view returns (address);
-        /// Token-manager type for the given token id. 0 = native interchain
-        /// (mint/burn via the Axelar InterchainToken's owner-only `mint/burn`,
-        /// no allowance required), 2 = lock/unlock (`safeTransferFrom` via the
-        /// token manager, allowance from sender → token manager required),
-        /// 4 = mint-burn-from (`burnFrom` via the token, allowance from
-        /// sender → token manager required).
+        /// Token-manager type for the given token id. The values match the
+        /// `TokenManagerType` enum in axelar-its:
+        ///   0 = NATIVE_INTERCHAIN_TOKEN — mint/burn via the Axelar
+        ///       `InterchainToken`'s owner-only `mint/burn`, no allowance
+        ///       required.
+        ///   1 = MINT_BURN_FROM — `burnFrom` via the token, requires
+        ///       allowance from sender → token manager.
+        ///   2 = LOCK_UNLOCK — `safeTransferFrom` via the token manager,
+        ///       requires allowance from sender → token manager.
+        ///   3 = LOCK_UNLOCK_FEE — same as LOCK_UNLOCK with a fee hook.
+        ///   4 = MINT_BURN — mint/burn via a custom token whose minter is
+        ///       the token manager; no allowance required.
         ///
         /// Reverts on older ITS deployments for token ids that have no
         /// `TokenManager` deployed locally — that revert is itself
