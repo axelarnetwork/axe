@@ -27,10 +27,10 @@ use tokio::sync::{Mutex, Semaphore};
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::{LoadTestArgs, check_evm_balance, finish_report, validate_evm_rpc};
-use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
+use crate::config::ChainsConfig;
+use crate::cosmos::lcd_cosmwasm_smart_query;
 use crate::evm::InterchainTokenService;
 use crate::ui;
-use crate::utils::read_contract_address;
 use crate::xrpl::{XrplClient, faucet_url_for_network, parse_address};
 
 /// Hard-coded default XRPL recipient.
@@ -74,27 +74,23 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let evm_rpc_url = args.source_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
+    let cfg = ChainsConfig::load(&args.config)?;
+
     // XRPL uses `XrplGateway/{xrpl_axelar_id}` instead of the standard
     // `Gateway/{chain}` — accept either.
-    let has_dest_gateway = read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_ok()
-        || read_axelar_contract_field(
-            &args.config,
-            &format!(
-                "/axelar/contracts/XrplGateway/{}/address",
-                args.destination_axelar_id
-            ),
-        )
-        .is_ok();
+    let has_dest_gateway = cfg.axelar.contract_address("Gateway", dest).is_ok()
+        || cfg
+            .axelar
+            .contract_address("XrplGateway", &args.destination_axelar_id)
+            .is_ok();
     if !has_dest_gateway {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway (or XrplGateway) in the config — verification would fail."
         );
     }
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
         .is_err()
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
@@ -112,7 +108,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         parsed
     } else {
         ui::info("looking up canonical XRP token id on XrplGateway...");
-        match fetch_xrp_token_id(&args.config, &args.destination_axelar_id).await {
+        match fetch_xrp_token_id(&cfg, &args.destination_axelar_id).await {
             Ok(id) => {
                 ui::kv(
                     "token ID (XrplGateway → XRP)",
@@ -146,7 +142,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     check_evm_balance(&read_provider, deployer_address).await?;
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    let its_proxy_addr = read_contract_address(&args.config, src, "InterchainTokenService")?;
+    let its_proxy_addr: alloy::primitives::Address = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre!("source chain '{src}' not found in config"))?
+        .contract_address("InterchainTokenService", src)?
+        .parse()?;
     ui::address("ITS service", &format!("{its_proxy_addr}"));
 
     let write_provider = ProviderBuilder::new()
@@ -306,14 +307,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
-        let has_voting_verifier = read_axelar_contract_field(
-            &args.config,
-            &format!(
-                "/axelar/contracts/VotingVerifier/{}/address",
-                args.source_axelar_id
-            ),
-        )
-        .is_ok();
+        let has_voting_verifier = cfg
+            .axelar
+            .contract_address("VotingVerifier", &args.source_axelar_id)
+            .is_ok();
 
         let vconfig = args.config.clone();
         let vsource = args.source_axelar_id.clone();
@@ -538,27 +535,23 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 /// Query the `XrplGateway/{xrpl_axelar_id}` contract for the canonical XRP
 /// token id via the `XrpTokenId` view. Matches the TS `xrpl-token-id.js`
 /// reference. Returns the raw 32 bytes.
-async fn fetch_xrp_token_id(
-    config: &std::path::Path,
-    xrpl_axelar_id: &str,
-) -> eyre::Result<[u8; 32]> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let xrpl_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/XrplGateway/{xrpl_axelar_id}/address"),
-    )
-    .map_err(|e| {
-        eyre!(
-            "no XrplGateway/{xrpl_axelar_id} address in config — required to auto-discover \
-             the canonical XRP token id. Pass --token-id <hex> explicitly to skip this lookup. \
-             ({e})"
-        )
-    })?;
+async fn fetch_xrp_token_id(cfg: &ChainsConfig, xrpl_axelar_id: &str) -> eyre::Result<[u8; 32]> {
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let xrpl_gateway = cfg
+        .axelar
+        .contract_address("XrplGateway", xrpl_axelar_id)
+        .map_err(|e| {
+            eyre!(
+                "no XrplGateway/{xrpl_axelar_id} address in config — required to auto-discover \
+                 the canonical XRP token id. Pass --token-id <hex> explicitly to skip this lookup. \
+                 ({e})"
+            )
+        })?;
     // `cw_serde` serializes unit enum variants as a plain JSON string (NOT
     // `{"variant": {}}`), so the smart-query body for `XrpTokenId` is just
     // the JSON string `"xrp_token_id"`.
     let q = serde_json::Value::String("xrp_token_id".to_string());
-    let resp = lcd_cosmwasm_smart_query(&lcd, &xrpl_gateway, &q).await?;
+    let resp = lcd_cosmwasm_smart_query(&lcd, xrpl_gateway, &q).await?;
     let s = resp
         .as_str()
         .ok_or_else(|| eyre!("XrpTokenId response was not a string: {resp}"))?;

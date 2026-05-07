@@ -25,10 +25,9 @@ use super::{
 use crate::commands::test_its::{
     extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
-use crate::utils::read_contract_address;
 
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
@@ -116,18 +115,17 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     validate_evm_rpc(&evm_rpc_url).await?;
     validate_solana_rpc(&args.destination_rpc).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    let cfg = ChainsConfig::load(&args.config)?;
+
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
     }
 
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
         .is_err()
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
@@ -159,8 +157,16 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     }
 
     // --- ITS contract addresses ---
-    let its_factory_addr = read_contract_address(&args.config, src, "InterchainTokenFactory")?;
-    let its_proxy_addr = read_contract_address(&args.config, src, "InterchainTokenService")?;
+    let src_cfg = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre!("source chain '{src}' not found in config"))?;
+    let its_factory_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenFactory", src)?
+        .parse()?;
+    let its_proxy_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenService", src)?
+        .parse()?;
 
     ui::address("ITS factory", &format!("{its_factory_addr}"));
     ui::address("ITS service", &format!("{its_proxy_addr}"));
@@ -406,14 +412,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
         // Check if source chain has a voting verifier.
-        let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
-            &args.config,
-            &format!(
-                "/axelar/contracts/VotingVerifier/{}/address",
-                args.source_chain
-            ),
-        )
-        .is_ok();
+        let has_voting_verifier = cfg
+            .axelar
+            .contract_address("VotingVerifier", &args.source_chain)
+            .is_ok();
 
         let vconfig = args.config.clone();
         let vsource = args.source_axelar_id.clone();

@@ -20,10 +20,9 @@ use tokio::sync::Mutex;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use super::{LoadTestArgs, finish_report, read_its_cache, save_its_cache, validate_evm_rpc};
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::stellar::{StellarClient, StellarWallet};
 use crate::ui;
-use crate::utils::read_contract_address;
 
 /// AXE token parameters on Stellar — match the EVM/Solana siblings so the
 /// human-facing name is consistent across runs.
@@ -52,17 +51,16 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    let cfg = ChainsConfig::load(&args.config)?;
+
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
     }
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
         .is_err()
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
@@ -113,11 +111,18 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     }
 
     // --- EVM destination ITS + gateway ---
-    let evm_its_addr = read_contract_address(&args.config, dest, "InterchainTokenService")?;
+    let dest_cfg = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre!("destination chain '{dest}' not found in config"))?;
+    let evm_its_addr: alloy::primitives::Address = dest_cfg
+        .contract_address("InterchainTokenService", dest)?
+        .parse()?;
     ui::address("destination ITS", &format!("{evm_its_addr}"));
     let dest_address_bytes = evm_its_addr.as_slice().to_vec();
 
-    let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let evm_gateway_addr: alloy::primitives::Address =
+        dest_cfg.contract_address("AxelarGateway", dest)?.parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
     // --- Gas (XLM stroops) ---
@@ -190,8 +195,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     // --- ITS hub routing info (used in TxMetrics so the verifier can find
     //     the second-leg message via the hub's outgoing_messages) ---
-    let axelarnet_gw_addr =
-        read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gw_addr = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     // --- Sustained mode ---
     if !burst_mode {
