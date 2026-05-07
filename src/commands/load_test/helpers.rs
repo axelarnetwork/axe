@@ -22,6 +22,7 @@ use serde_json::json;
 use super::metrics::LoadTestReport;
 use super::verify;
 use super::{LoadTestArgs, read_cache, save_cache};
+use crate::config::ChainsConfig;
 use crate::evm::read_artifact_bytecode;
 use crate::ui;
 
@@ -154,12 +155,16 @@ pub(crate) fn finish_report(
 }
 
 /// List chain names that have a Cosmos Gateway address in the config.
-pub(crate) fn list_gateway_chains(config_root: &serde_json::Value) -> Vec<String> {
-    config_root
-        .pointer("/axelar/contracts/Gateway")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
+/// Used by the load-test runners to print a remediation hint when the user
+/// supplies a destination chain whose Gateway has not been deployed yet.
+pub(crate) fn list_gateway_chains(cfg: &ChainsConfig) -> Vec<String> {
+    cfg.axelar
+        .contracts
+        .as_ref()
+        .and_then(|c| c.get("Gateway"))
+        .map(|gateway_map| {
+            gateway_map
+                .iter()
                 .filter(|(_, v)| v.get("address").and_then(|a| a.as_str()).is_some())
                 .map(|(k, _)| k.clone())
                 .collect()

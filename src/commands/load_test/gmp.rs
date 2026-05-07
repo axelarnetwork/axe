@@ -33,17 +33,14 @@ use super::{
     read_stellar_network_type, read_stellar_token_address, save_cache, sui_dest_lookup,
     validate_evm_rpc, validate_solana_rpc,
 };
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::ui;
-use crate::utils::read_contract_address;
 
 pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let dest = &args.destination_chain;
     let src = &args.source_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let rpc_url = &args.destination_rpc;
 
@@ -52,24 +49,29 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     validate_evm_rpc(rpc_url).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&cfg).join(", ")
         );
     }
 
     ui::kv("source", src);
     ui::kv("destination", dest);
 
-    let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
+    let gateway_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGateway", dest)?
+        .parse()?;
+    let gas_service_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGasService", dest)?
+        .parse()?;
 
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
@@ -250,9 +252,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let evm_rpc_url = args.source_rpc.clone();
 
@@ -261,24 +261,29 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     validate_solana_rpc(&args.destination_rpc).await?;
 
     // Check that verification contracts exist for this chain pair before doing any work
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&cfg).join(", ")
         );
     }
 
     ui::kv("source", src);
     ui::kv("destination", dest);
 
-    let gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
+    let gateway_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGateway", src)?
+        .parse()?;
+    let gas_service_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGasService", src)?
+        .parse()?;
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
     // --- Set up EVM signer ---
@@ -422,9 +427,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let source_rpc_url = args.source_rpc.clone();
     let dest_rpc_url = args.destination_rpc.clone();
@@ -434,16 +437,11 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     validate_evm_rpc(&dest_rpc_url).await?;
 
     // Check that verification contracts exist
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&cfg).join(", ")
         );
     }
 
@@ -473,8 +471,18 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     }
 
     // --- Source chain: deploy/reuse SenderReceiver (for sending) ---
-    let src_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let src_gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
+    let src_gateway_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGateway", src)?
+        .parse()?;
+    let src_gas_service_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGasService", src)?
+        .parse()?;
     ui::address("source gateway", &format!("{src_gateway_addr}"));
 
     let src_cache_key = &format!("{src}-evm-to-evm");
@@ -495,8 +503,18 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     );
 
     // --- Destination chain: deploy/reuse SenderReceiver (as receive target) ---
-    let dest_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
-    let dest_gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
+    let dest_gateway_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGateway", dest)?
+        .parse()?;
+    let dest_gas_service_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGasService", dest)?
+        .parse()?;
     ui::address("destination gateway", &format!("{dest_gateway_addr}"));
 
     // Bail loudly if the configured gateway has no bytecode — otherwise the
@@ -635,21 +653,14 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     validate_solana_rpc(&args.source_rpc).await?;
     validate_solana_rpc(&args.destination_rpc).await?;
 
-    let config_content = std::fs::read_to_string(&args.config)
-        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", args.config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     // Check that verification contracts exist
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
-            list_gateway_chains(&config_root).join(", ")
+            list_gateway_chains(&cfg).join(", ")
         );
     }
 
@@ -746,16 +757,12 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
 pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
@@ -803,8 +810,18 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     let main_seed = main_wallet.signing_key.to_bytes();
 
     // --- EVM SenderReceiver deploy/reuse (same pattern as run_sol_to_evm) ---
-    let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
+    let gateway_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGateway", dest)?
+        .parse()?;
+    let gas_service_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGasService", dest)?
+        .parse()?;
     ui::address("EVM gateway", &format!("{gateway_addr}"));
 
     // Pre-flight: bail if the destination gateway has no bytecode.
@@ -891,14 +908,10 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
         ));
         let _ = spinner_tx.send(spinner.clone());
 
-        let has_voting_verifier = read_axelar_contract_field(
-            &args.config,
-            &format!(
-                "/axelar/contracts/VotingVerifier/{}/address",
-                args.source_chain
-            ),
-        )
-        .is_ok();
+        let has_voting_verifier = cfg
+            .axelar
+            .contract_address("VotingVerifier", &args.source_chain)
+            .is_ok();
 
         let result = crate::commands::load_test::stellar_sender::run_sustained(
             &stellar_client,
@@ -985,6 +998,7 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
 pub(super) async fn run_evm_to_stellar(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
     let evm_rpc_url = args.source_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
@@ -1010,8 +1024,18 @@ pub(super) async fn run_evm_to_stellar(args: LoadTestArgs, _run_start: Instant) 
     // Reuse the EVM-source GMP runner (sol_sender for sol-to-X has its
     // EVM analogue in evm_sender). For sustained, we'd add streaming;
     // burst-only here.
-    let evm_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let evm_gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
+    let evm_gateway_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGateway", src)?
+        .parse()?;
+    let evm_gas_service_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGasService", src)?
+        .parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
     // Deploy/reuse SenderReceiver as the EVM-side caller (existing pattern).
@@ -1231,16 +1255,12 @@ const SUI_DEFAULT_GAS_BUDGET_MIST: u64 = 50_000_000;
 pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
@@ -1280,8 +1300,18 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         );
     }
 
-    let gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&args.config, dest, "AxelarGasService")?;
+    let gateway_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGateway", dest)?
+        .parse()?;
+    let gas_service_addr = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", dest))?
+        .contract_address("AxelarGasService", dest)?
+        .parse()?;
     ui::address("EVM gateway", &format!("{gateway_addr}"));
     ensure_evm_contract_deployed(&evm_rpc_url, "destination AxelarGateway", gateway_addr).await?;
 
@@ -1501,6 +1531,7 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 pub(super) async fn run_evm_to_sui(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     ui::kv("source", src);
     ui::kv("destination", dest);
@@ -1526,8 +1557,18 @@ pub(super) async fn run_evm_to_sui(args: LoadTestArgs, _run_start: Instant) -> R
     let (sui_channel, sui_rpc) = sui_dest_lookup(&args.config, dest, Some(&args.destination_rpc))?;
     ui::address("Sui GmpChannel (destination)", &sui_channel);
 
-    let evm_gateway_addr = read_contract_address(&args.config, src, "AxelarGateway")?;
-    let evm_gas_service_addr = read_contract_address(&args.config, src, "AxelarGasService")?;
+    let evm_gateway_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGateway", src)?
+        .parse()?;
+    let evm_gas_service_addr = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre::eyre!("chain '{}' not found in config", src))?
+        .contract_address("AxelarGasService", src)?
+        .parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
     let cache = read_cache(src);

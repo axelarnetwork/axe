@@ -12,10 +12,8 @@ use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
 use super::metrics::{AmplifierTiming, PeakThroughput, TxMetrics, VerificationReport};
-use crate::cosmos::{
-    lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
-    rpc_tx_search_event,
-};
+use crate::config::ChainsConfig;
+use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_rpc, rpc_tx_search_event};
 use crate::evm::AxelarAmplifierGateway;
 use crate::solana::solana_call_contract_index;
 use crate::ui;
@@ -1431,17 +1429,18 @@ pub async fn verify_onchain<P: Provider>(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, provider);
     let contract_addr: Address = destination_address.parse()?;
@@ -1527,17 +1526,18 @@ pub async fn verify_onchain_evm_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
@@ -1601,16 +1601,17 @@ pub async fn verify_onchain_stellar_gmp(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
     } else {
@@ -1700,16 +1701,17 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
     let checker: DestinationChecker<alloy::providers::RootProvider> = DestinationChecker::Stellar {
@@ -2001,17 +2003,18 @@ pub async fn verify_onchain_sui_gmp_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
     let sui_client = crate::sui::SuiClient::new(sui_rpc);
@@ -2073,16 +2076,17 @@ pub async fn verify_onchain_sui_gmp(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
     let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
     let sui_client = crate::sui::SuiClient::new(sui_rpc);
 
@@ -2170,17 +2174,18 @@ pub async fn verify_onchain_solana_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -2250,17 +2255,18 @@ pub async fn verify_onchain_solana(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let cosm_gateway = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -2373,16 +2379,19 @@ pub async fn verify_onchain_solana_its(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -2419,10 +2428,10 @@ pub async fn verify_onchain_solana_its(
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let peaks = poll_pipeline_its_hub(
         &mut txs,
@@ -2457,22 +2466,25 @@ pub async fn verify_onchain_solana_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
@@ -2530,14 +2542,17 @@ pub async fn verify_onchain_stellar_its(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -2574,10 +2589,10 @@ pub async fn verify_onchain_stellar_its(
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let peaks = poll_pipeline_its_hub(
         &mut txs,
@@ -2617,19 +2632,22 @@ pub async fn verify_onchain_stellar_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
@@ -2685,14 +2703,17 @@ pub async fn verify_onchain_xrpl_its(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -2732,16 +2753,14 @@ pub async fn verify_onchain_xrpl_its(
     // XRPL's destination cosmos gateway is `XrplGateway/{chain}`, not the
     // standard `Gateway/{chain}`. Try both so the same verifier works
     // regardless of which contract name the deployment uses.
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )
-    .or_else(|_| {
-        read_axelar_contract_field(
-            config,
-            &format!("/axelar/contracts/XrplGateway/{destination_chain}/address"),
-        )
-    })?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)
+        .or_else(|_| {
+            cfg.axelar
+                .contract_address("XrplGateway", destination_chain)
+        })?
+        .to_string();
 
     let peaks = poll_pipeline_its_hub(
         &mut txs,
@@ -2777,25 +2796,26 @@ pub async fn verify_onchain_xrpl_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )
-    .or_else(|_| {
-        read_axelar_contract_field(
-            config,
-            &format!("/axelar/contracts/XrplGateway/{destination_chain}/address"),
-        )
-    })?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)
+        .or_else(|_| {
+            cfg.axelar
+                .contract_address("XrplGateway", destination_chain)
+        })?
+        .to_string();
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
@@ -2860,10 +2880,13 @@ pub async fn verify_onchain_evm_its(
         return Ok(VerificationReport::default());
     }
 
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     // For Solana ITS, we don't have the payload_hash (the ITS program constructs
     // the payload internally via CPI). Skip VotingVerifier and start at HubApproved,
@@ -2898,10 +2921,10 @@ pub async fn verify_onchain_evm_its(
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
@@ -2939,16 +2962,19 @@ pub async fn verify_onchain_evm_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
@@ -3334,22 +3360,25 @@ pub async fn wait_for_its_remote_deploy(
     evm_gateway_addr: Address,
     evm_rpc_url: &str,
 ) -> Result<()> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
     let rpc = read_axelar_rpc(config)?;
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
-    let voting_verifier = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/VotingVerifier/{source_chain}/address"),
-    )
-    .ok();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
 
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
@@ -3529,16 +3558,19 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     deploy_message_id: &str,
     solana_rpc: &str,
 ) -> Result<()> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
     let rpc = read_axelar_rpc(config)?;
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let sol_rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -3677,16 +3709,19 @@ pub async fn wait_for_its_remote_deploy_to_stellar(
     stellar_gateway_addr: &str,
     signer_pk: [u8; 32],
 ) -> Result<()> {
-    let (lcd, _, _, _) = read_axelar_config(config)?;
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
     let rpc = read_axelar_rpc(config)?;
 
-    let axelarnet_gateway =
-        read_axelar_contract_field(config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
-    let cosm_gateway_dest = read_axelar_contract_field(
-        config,
-        &format!("/axelar/contracts/Gateway/{destination_chain}/address"),
-    )?;
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
 
     let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
 
