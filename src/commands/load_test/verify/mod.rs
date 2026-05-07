@@ -11,9 +11,7 @@ use serde_json::json;
 use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
-use super::metrics::{
-    AmplifierTiming, FailureCategory, PeakThroughput, TxMetrics, VerificationReport,
-};
+use super::metrics::{AmplifierTiming, PeakThroughput, TxMetrics, VerificationReport};
 use crate::cosmos::{
     lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
     rpc_tx_search_event,
@@ -31,197 +29,30 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Interval for recalculating rolling throughput.
 const THROUGHPUT_WINDOW: Duration = Duration::from_secs(10);
 
-// ---------------------------------------------------------------------------
-// Real-time stats (throughput + latency) for spinner display
-// ---------------------------------------------------------------------------
+mod report;
+mod state;
 
-struct RealTimeStats {
-    snapshot_time: Instant,
-    snapshot_counts: [usize; 5], // voted, routed, hub_approved, approved, executed
-    throughputs: [Option<f64>; 5],
-    latencies: Vec<f64>, // sorted executed_secs for completed txs
-}
+use self::report::{compute_peak_throughput, compute_verification_report};
+use self::state::{ApprovalResult, Phase, RealTimeStats, phase_counts};
 
-impl RealTimeStats {
-    fn new() -> Self {
-        Self {
-            snapshot_time: Instant::now(),
-            snapshot_counts: [0; 5],
-            throughputs: [None; 5],
-            latencies: Vec::new(),
-        }
-    }
+// Re-export `PendingTx` to the parent `load_test` module so the per-pair
+// runners can receive it back from the `tx_to_pending_*` constructors and
+// forward it through their verifier mpsc channels.
+pub(in crate::commands::load_test) use self::state::PendingTx;
 
-    /// Update throughputs every THROUGHPUT_WINDOW and collect new latencies.
-    #[allow(clippy::float_arithmetic)]
-    fn update(&mut self, counts: [usize; 5], txs: &[PendingTx]) {
-        let elapsed = self.snapshot_time.elapsed();
-        if elapsed >= THROUGHPUT_WINDOW {
-            let secs = elapsed.as_secs_f64();
-            for (i, &count) in counts.iter().enumerate() {
-                let delta = count.saturating_sub(self.snapshot_counts[i]);
-                self.throughputs[i] = if delta > 0 {
-                    Some(delta as f64 / secs)
-                } else {
-                    self.throughputs[i] // keep last known value
-                };
-            }
-            self.snapshot_counts = counts;
-            self.snapshot_time = Instant::now();
-        }
-
-        // Rebuild latencies from all completed txs (simple and correct).
-        let new_len = txs
-            .iter()
-            .filter(|t| t.timing.executed_secs.is_some())
-            .count();
-        if new_len != self.latencies.len() {
-            self.latencies.clear();
-            for tx in txs {
-                if let Some(secs) = tx.timing.executed_secs {
-                    self.latencies.push(secs);
-                }
-            }
-            self.latencies
-                .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        }
-    }
-
-    /// Format a single phase: "450/600(4.2/s)" or "450/600" if no throughput yet.
-    fn fmt_phase(count: usize, total: usize, tps: Option<f64>) -> String {
-        match tps {
-            Some(t) => format!("{count}/{total}({t:.1}/s)"),
-            None => format!("{count}/{total}"),
-        }
-    }
-
-    /// Format latency summary: "e2e: avg 94.5s p50 92.1s p75 96.3s p99 102.1s"
-    #[allow(clippy::float_arithmetic)]
-    fn fmt_latency(&self) -> String {
-        let n = self.latencies.len();
-        if n == 0 {
-            return String::new();
-        }
-        let sum: f64 = self.latencies.iter().sum();
-        let avg = sum / n as f64;
-        let pct = |p: f64| -> f64 {
-            let idx = ((n as f64 * p) as usize).min(n - 1);
-            self.latencies[idx]
-        };
-        let min = self.latencies[0];
-        let max = self.latencies[n - 1];
-        format!(
-            " | e2e: avg {avg:.1}s p50 {:.1}s p75 {:.1}s p99 {:.1}s min {min:.1}s max {max:.1}s",
-            pct(0.50),
-            pct(0.75),
-            pct(0.99),
-        )
-    }
-
-    /// Build the full spinner message for GMP (no hub phase).
-    fn spinner_msg_gmp(
-        &self,
-        counts: [usize; 5],
-        total: usize,
-        err: Option<&str>,
-        has_voting_verifier: bool,
-    ) -> String {
-        let [voted, routed, _, approved, executed] = counts;
-        let [tv, tr, _, ta, te] = self.throughputs;
-        let mut parts = Vec::new();
-        if has_voting_verifier {
-            parts.push(format!("voted: {}", Self::fmt_phase(voted, total, tv)));
-        }
-        parts.push(format!("routed: {}", Self::fmt_phase(routed, total, tr)));
-        parts.push(format!(
-            "approved: {}",
-            Self::fmt_phase(approved, total, ta)
+/// Parse a hex-encoded 32-byte payload hash, with or without the `0x`
+/// prefix. Returns an error rather than silently zero-extending so a
+/// truncated hash from upstream code surfaces immediately instead of
+/// propagating into a downstream "wrong gateway hash" mismatch.
+fn parse_payload_hash(hex_str: &str) -> Result<FixedBytes<32>> {
+    let bytes = alloy::hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?;
+    if bytes.len() != 32 {
+        return Err(eyre::eyre!(
+            "payload_hash must be 32 bytes, got {}",
+            bytes.len()
         ));
-        parts.push(format!(
-            "executed: {}",
-            Self::fmt_phase(executed, total, te)
-        ));
-        let mut msg = parts.join("  ");
-        msg.push_str(&self.fmt_latency());
-        if let Some(e) = err {
-            msg.push_str(&format!("  (err: {e})"));
-        }
-        msg
     }
-
-    /// Build the full spinner message for ITS (with hub phase).
-    fn spinner_msg_its(&self, counts: [usize; 5], total: usize, err: Option<&str>) -> String {
-        let [voted, routed, hub, approved, executed] = counts;
-        let [tv, tr, th, ta, te] = self.throughputs;
-        let mut msg = format!(
-            "voted: {}  hub: {}  routed: {}  approved: {}  executed: {}",
-            Self::fmt_phase(voted, total, tv),
-            Self::fmt_phase(hub, total, th),
-            Self::fmt_phase(routed, total, tr),
-            Self::fmt_phase(approved, total, ta),
-            Self::fmt_phase(executed, total, te),
-        );
-        msg.push_str(&self.fmt_latency());
-        if let Some(e) = err {
-            msg.push_str(&format!("  (err: {e})"));
-        }
-        msg
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase tracking
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Voted,
-    Routed,
-    HubApproved,
-    DiscoverSecondLeg,
-    Approved,
-    Executed,
-    Done,
-}
-
-#[allow(dead_code)]
-enum ApprovalResult {
-    Approved,
-    AlreadyExecuted,
-    NotYet,
-}
-
-// ---------------------------------------------------------------------------
-// Per-tx state
-// ---------------------------------------------------------------------------
-
-/// Per-tx state tracked during batch verification.
-pub(super) struct PendingTx {
-    idx: usize,
-    message_id: String,
-    send_instant: Instant,
-    source_address: String,
-    contract_addr: Address,
-    payload_hash: FixedBytes<32>,
-    payload_hash_hex: String,
-    /// Pre-computed command ID for Solana destination checks.
-    command_id: Option<[u8; 32]>,
-    /// GMP-level destination chain from ContractCall event (e.g. "axelar" for ITS).
-    gmp_destination_chain: String,
-    /// GMP-level destination address from ContractCall event (e.g. ITS Hub contract).
-    gmp_destination_address: String,
-    timing: AmplifierTiming,
-    failed: bool,
-    fail_reason: Option<String>,
-    phase: Phase,
-    /// Second-leg message_id discovered from hub execution tx (ITS only).
-    second_leg_message_id: Option<String>,
-    /// Second-leg payload_hash discovered from hub execution tx (ITS only).
-    second_leg_payload_hash: Option<String>,
-    /// Second-leg source_address (e.g. ITS Hub contract on Axelar).
-    second_leg_source_address: Option<String>,
-    /// Second-leg destination_address (e.g. ITS proxy on destination chain).
-    second_leg_destination_address: Option<String>,
+    Ok(FixedBytes::from_slice(&bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,33 +1379,6 @@ async fn poll_pipeline_its_hub(
     ));
 
     compute_peak_throughput(txs)
-}
-
-/// Count how many txs have reached each phase (cumulative).
-fn phase_counts(txs: &[PendingTx]) -> (usize, usize, usize, usize, usize) {
-    let mut voted = 0;
-    let mut routed = 0;
-    let mut hub_approved = 0;
-    let mut approved = 0;
-    let mut executed = 0;
-    for tx in txs {
-        if tx.timing.voted_secs.is_some() {
-            voted += 1;
-        }
-        if tx.timing.routed_secs.is_some() {
-            routed += 1;
-        }
-        if tx.timing.hub_approved_secs.is_some() {
-            hub_approved += 1;
-        }
-        if tx.timing.approved_secs.is_some() {
-            approved += 1;
-        }
-        if tx.timing.executed_secs.is_some() {
-            executed += 1;
-        }
-    }
-    (voted, routed, hub_approved, approved, executed)
 }
 
 // ---------------------------------------------------------------------------
@@ -4443,220 +4247,6 @@ async fn check_evm_is_message_approved<P: Provider>(
         .call()
         .await?;
     Ok(approved)
-}
-
-// ---------------------------------------------------------------------------
-// Shared report computation
-// ---------------------------------------------------------------------------
-
-/// Compute peak throughput per pipeline step using 5-second sliding windows
-/// over the absolute completion timestamps.
-/// Compute sustained throughput per pipeline step: count / (last - first) on
-/// absolute completion timestamps. The lowest value is the pipeline bottleneck.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
-fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
-    let Some(epoch) = txs.iter().map(|t| t.send_instant).min() else {
-        return PeakThroughput::default();
-    };
-
-    let mut voted_times: Vec<f64> = Vec::new();
-    let mut routed_times: Vec<f64> = Vec::new();
-    let mut hub_approved_times: Vec<f64> = Vec::new();
-    let mut approved_times: Vec<f64> = Vec::new();
-    let mut executed_times: Vec<f64> = Vec::new();
-
-    for tx in txs {
-        let base = tx.send_instant.duration_since(epoch).as_secs_f64();
-        if let Some(s) = tx.timing.voted_secs {
-            voted_times.push(base + s);
-        }
-        if let Some(s) = tx.timing.routed_secs {
-            routed_times.push(base + s);
-        }
-        if let Some(s) = tx.timing.hub_approved_secs {
-            hub_approved_times.push(base + s);
-        }
-        if let Some(s) = tx.timing.approved_secs {
-            approved_times.push(base + s);
-        }
-        if let Some(s) = tx.timing.executed_secs {
-            executed_times.push(base + s);
-        }
-    }
-
-    fn sustained_rate(times: &[f64]) -> Option<f64> {
-        if times.len() < 2 {
-            return None;
-        }
-        // `times[i]` is already relative to the first-tx submission instant
-        // (the `epoch` in `compute_peak_throughput`). The honest rate is
-        // "how many tx finished this phase in the elapsed time since we
-        // started sending" — i.e. count / latest_completion_offset.
-        //
-        // Earlier we used `(max - min)` of the phase-completion times, but
-        // burst-mode runs collapse that span to ~0 when all 5 txs cross a
-        // phase in the same verifier poll iteration, producing meaningless
-        // millions of tx/s.
-        let max = times.iter().cloned().reduce(f64::max)?;
-        if max > 0.0 {
-            Some(times.len() as f64 / max)
-        } else {
-            None
-        }
-    }
-
-    PeakThroughput {
-        voted_tps: sustained_rate(&voted_times),
-        routed_tps: sustained_rate(&routed_times),
-        hub_approved_tps: sustained_rate(&hub_approved_times),
-        approved_tps: sustained_rate(&approved_times),
-        executed_tps: sustained_rate(&executed_times),
-    }
-}
-
-/// Compute the `VerificationReport` from pending tx results, writing timings
-/// back into the original metrics array.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
-fn compute_verification_report(
-    txs: &[PendingTx],
-    metrics: &mut [TxMetrics],
-    peak_throughput: PeakThroughput,
-) -> VerificationReport {
-    let mut successful = 0u64;
-    let mut failed = 0u64;
-    let mut failure_reasons: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
-    let mut stuck_count = 0u64;
-    let mut stuck_phases: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-
-    for tx in txs {
-        if tx.idx < metrics.len() {
-            metrics[tx.idx].amplifier_timing = Some(tx.timing.clone());
-        }
-        if tx.failed {
-            failed += 1;
-            if let Some(ref reason) = tx.fail_reason {
-                *failure_reasons.entry(reason.clone()).or_insert(0) += 1;
-
-                // Categorize stuck txs by the phase they got stuck at
-                if reason.contains("timed out") {
-                    stuck_count += 1;
-                    let phase = stuck_phase(tx);
-                    *stuck_phases.entry(phase).or_insert(0) += 1;
-                }
-            }
-        } else if tx.timing.executed_ok == Some(true) {
-            successful += 1;
-        }
-    }
-
-    let total_verified = successful + failed;
-    let success_rate = if total_verified > 0 {
-        successful as f64 / total_verified as f64
-    } else {
-        0.0
-    };
-
-    let failure_categories: Vec<FailureCategory> = failure_reasons
-        .into_iter()
-        .map(|(reason, count)| FailureCategory { reason, count })
-        .collect();
-
-    let stuck_at: Vec<FailureCategory> = stuck_phases
-        .into_iter()
-        .map(|(reason, count)| FailureCategory { reason, count })
-        .collect();
-
-    let all_timings: Vec<&AmplifierTiming> = txs.iter().map(|t| &t.timing).collect();
-    let avg_voted = avg_option(all_timings.iter().filter_map(|t| t.voted_secs));
-    let avg_routed = avg_option(all_timings.iter().filter_map(|t| t.routed_secs));
-    let avg_hub_approved = avg_option(all_timings.iter().filter_map(|t| t.hub_approved_secs));
-    let avg_approved = avg_option(all_timings.iter().filter_map(|t| t.approved_secs));
-    let avg_executed = avg_option(all_timings.iter().filter_map(|t| t.executed_secs));
-    let min_executed = min_option(all_timings.iter().filter_map(|t| t.executed_secs));
-    let max_executed = max_option(all_timings.iter().filter_map(|t| t.executed_secs));
-
-    // Time from earliest send to last successful execution (for throughput).
-    // This excludes timeout wait for stuck txs.
-    let earliest_send = txs.iter().map(|tx| tx.send_instant).min();
-    let last_execution = txs
-        .iter()
-        .filter(|tx| tx.timing.executed_ok == Some(true))
-        .filter_map(|tx| {
-            let secs = tx.timing.executed_secs?;
-            Some(tx.send_instant + Duration::from_secs_f64(secs))
-        })
-        .max();
-    let time_to_last_success = match (earliest_send, last_execution) {
-        (Some(start), Some(end)) if end > start => Some(end.duration_since(start).as_secs_f64()),
-        _ => None,
-    };
-
-    VerificationReport {
-        total_verified,
-        successful,
-        pending: 0,
-        failed,
-        success_rate,
-        failure_reasons: failure_categories,
-        avg_voted_secs: avg_voted,
-        avg_routed_secs: avg_routed,
-        avg_hub_approved_secs: avg_hub_approved,
-        avg_approved_secs: avg_approved,
-        avg_executed_secs: avg_executed,
-        min_executed_secs: min_executed,
-        max_executed_secs: max_executed,
-        time_to_last_success_secs: time_to_last_success,
-        peak_throughput,
-        stuck: stuck_count,
-        stuck_at,
-    }
-}
-
-/// Determine which phase a timed-out tx got stuck at (the last phase it didn't complete).
-fn stuck_phase(tx: &PendingTx) -> String {
-    match tx.phase {
-        Phase::Voted => "voted".into(),
-        Phase::Routed => "routed".into(),
-        Phase::HubApproved => "hub approved".into(),
-        Phase::DiscoverSecondLeg => "second-leg discovery".into(),
-        Phase::Approved => "approved".into(),
-        Phase::Executed => "executed".into(),
-        Phase::Done => "done".into(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-fn parse_payload_hash(hex_str: &str) -> Result<FixedBytes<32>> {
-    let bytes = alloy::hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?;
-    if bytes.len() != 32 {
-        return Err(eyre::eyre!(
-            "payload_hash must be 32 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    Ok(FixedBytes::from_slice(&bytes))
-}
-
-#[allow(clippy::float_arithmetic)]
-fn avg_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
-    let vals: Vec<f64> = iter.collect();
-    if vals.is_empty() {
-        None
-    } else {
-        Some(vals.iter().sum::<f64>() / vals.len() as f64)
-    }
-}
-
-fn min_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
-    iter.reduce(f64::min)
-}
-
-fn max_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
-    iter.reduce(f64::max)
 }
 
 // ---------------------------------------------------------------------------
