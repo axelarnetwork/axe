@@ -153,7 +153,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let write_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    // Verify the token is actually registered on the source EVM ITS.
+    // Verify the token is actually registered on the source EVM ITS. For an
+    // older ITS deployment (no `validTokenAddress` getter),
+    // `interchainTokenAddress` is the only public lookup that doesn't revert
+    // for unregistered token ids — so a successful return doesn't actually
+    // prove registration; the resulting `interchainTransfer` may still revert
+    // with `TakeTokenFailed` because no `TokenManager` was deployed for the
+    // id. That's a runtime failure mode the load-test treats as a 0/N report.
     let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
     let token_addr = its_service
         .interchainTokenAddress(token_id)
@@ -165,6 +171,30 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
                 hex::encode(token_id)
             )
         })?;
+    // Best-effort: report the manager type if the ITS deployment exposes the
+    // getter (modern ITS does). Older deployments revert here for
+    // unregistered token ids — which is itself diagnostic, so we surface the
+    // condition as a warn rather than failing the whole run.
+    match its_service.tokenManagerType(token_id).call().await {
+        Ok(t) => ui::kv(
+            "token manager type",
+            &format!(
+                "{t} ({})",
+                match t {
+                    0 => "NATIVE_INTERCHAIN_TOKEN",
+                    1 => "MINT_BURN_FROM",
+                    2 => "LOCK_UNLOCK",
+                    3 => "LOCK_UNLOCK_FEE",
+                    4 => "MINT_BURN",
+                    _ => "unknown",
+                }
+            ),
+        ),
+        Err(_) => ui::warn(
+            "ITS.tokenManagerType reverted — token may not be registered on this chain's ITS \
+             (interchainTransfer will likely revert with TakeTokenFailed)",
+        ),
+    }
     ui::address("token address (EVM)", &format!("{token_addr}"));
 
     // --- XRPL recipient setup ---
@@ -285,13 +315,15 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     // XRPL canonical XRP wraps to a lock/unlock-managed ERC20 on the EVM
     // side, so ITS does `transferFrom(sender, token_manager, amount)` which
-    // requires an allowance. Pre-approve the ITS proxy from each derived key
-    // before the burst — without this the ITS reverts with
+    // requires an allowance from the user to the **token manager** (not the
+    // ITS proxy). Pre-approve the token manager from each derived key before
+    // the burst — without this the ITS reverts with
     // `TakeTokenFailed(bytes)` (selector 0x1a59c9bd).
     super::its_evm_to_sol::approve_its_for_keys(
         &evm_rpc_url,
         token_addr,
         its_proxy_addr,
+        token_id,
         &derived,
         amount_per_key,
     )

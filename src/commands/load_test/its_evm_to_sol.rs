@@ -2,11 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// How long to wait for an EVM tx receipt before giving up.
-/// Flow confirms in ~8s; other chains typically <20s. 60s gives congested
-/// networks enough room while still catching silently-dropped txs.
-const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
-
 use alloy::{
     primitives::{Address, Bytes, FixedBytes, U256},
     providers::{Provider, ProviderBuilder},
@@ -28,6 +23,11 @@ use crate::commands::test_its::{
 use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
+
+/// How long to wait for an EVM tx receipt before giving up.
+/// Flow confirms in ~8s; other chains typically <20s. 60s gives congested
+/// networks enough room while still catching silently-dropped txs.
+const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
@@ -641,9 +641,16 @@ pub(super) async fn deploy_its_token<P: Provider>(
 }
 
 /// Distribute ITS tokens from deployer to all derived wallets.
-/// Pre-approve the ITS proxy on each derived key's token balance so
+/// Pre-approve the ITS token manager on each derived key's token balance so
 /// `interchainTransfer` doesn't revert with `TakeTokenFailed` when the
 /// underlying token manager is lock/unlock (e.g. canonical XRP wrapped on EVM).
+///
+/// The spender that pulls the tokens is the **token manager** for the given
+/// `token_id`, not the ITS proxy itself: ITS dispatches into
+/// `tokenManager.takeToken(from, amount)`, which then does
+/// `IERC20.safeTransferFrom(from, address(this), amount)` — `address(this)`
+/// is the token manager. So the user's allowance is checked against the
+/// token manager's address, which we look up via `ITS.tokenManagerAddress`.
 ///
 /// Mint/burn-managed tokens (the AXE we deploy via `deployInterchainToken`)
 /// don't need this — ITS is the minter and the InterchainToken's `burn(from,
@@ -659,24 +666,35 @@ pub async fn approve_its_for_keys(
     rpc_url: &str,
     token_addr: Address,
     its_proxy: Address,
+    token_id: FixedBytes<32>,
     derived: &[PrivateKeySigner],
     amount_per_key: U256,
 ) -> eyre::Result<()> {
-    use alloy::providers::ProviderBuilder;
-
     let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let its = InterchainTokenService::new(its_proxy, &read_provider);
+    let token_manager: Address = its
+        .tokenManagerAddress(token_id)
+        .call()
+        .await
+        .map_err(|e| {
+            eyre!(
+                "ITS.tokenManagerAddress({}) failed — token may not be registered yet: {e}",
+                hex::encode(token_id)
+            )
+        })?;
+
     let read_token = ERC20::new(token_addr, &read_provider);
     let approve_threshold = amount_per_key.saturating_mul(U256::from(2));
 
     let spinner = ui::wait_spinner(&format!(
-        "approving ITS for {} keys (lock/unlock token)...",
+        "approving token manager {token_manager} for {} keys (lock/unlock token)...",
         derived.len()
     ));
 
     let mut approved = 0usize;
     for (i, signer) in derived.iter().enumerate() {
         let allowance = read_token
-            .allowance(signer.address(), its_proxy)
+            .allowance(signer.address(), token_manager)
             .call()
             .await
             .unwrap_or_default();
@@ -688,17 +706,17 @@ pub async fn approve_its_for_keys(
             .connect_http(rpc_url.parse()?);
         let token = ERC20::new(token_addr, &write_provider);
         let pending = token
-            .approve(its_proxy, U256::MAX)
+            .approve(token_manager, U256::MAX)
             .send()
             .await
-            .map_err(|e| eyre!("failed to approve ITS for key {i}: {e}"))?;
+            .map_err(|e| eyre!("failed to approve token manager for key {i}: {e}"))?;
         pending
             .get_receipt()
             .await
             .map_err(|e| eyre!("approve receipt for key {i} failed: {e}"))?;
         approved += 1;
         spinner.set_message(format!(
-            "approving ITS ({}/{} new approvals)...",
+            "approving token manager ({}/{} new approvals)...",
             approved,
             derived.len()
         ));
@@ -707,12 +725,12 @@ pub async fn approve_its_for_keys(
     spinner.finish_and_clear();
     if approved == 0 {
         ui::info(&format!(
-            "ITS already approved for all {} keys (reused from prior run)",
+            "token manager already approved for all {} keys (reused from prior run)",
             derived.len()
         ));
     } else {
         ui::success(&format!(
-            "approved ITS for {approved}/{} keys",
+            "approved token manager for {approved}/{} keys",
             derived.len()
         ));
     }

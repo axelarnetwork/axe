@@ -146,6 +146,23 @@ sol! {
     #[sol(rpc)]
     contract InterchainTokenService {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
+        /// Address of the deployed `TokenManager` for the given token id. The
+        /// token manager — not the ITS proxy — is the spender that pulls
+        /// tokens via `safeTransferFrom(from, address(this), amount)` for
+        /// lock/unlock-managed tokens, so canonical-token transfers must
+        /// approve THIS address (not the ITS proxy).
+        function tokenManagerAddress(bytes32 tokenId) external view returns (address);
+        /// Token-manager type for the given token id. 0 = native interchain
+        /// (mint/burn via the Axelar InterchainToken's owner-only `mint/burn`,
+        /// no allowance required), 2 = lock/unlock (`safeTransferFrom` via the
+        /// token manager, allowance from sender → token manager required),
+        /// 4 = mint-burn-from (`burnFrom` via the token, allowance from
+        /// sender → token manager required).
+        ///
+        /// Reverts on older ITS deployments for token ids that have no
+        /// `TokenManager` deployed locally — that revert is itself
+        /// diagnostic (the canonical token isn't registered on this chain).
+        function tokenManagerType(bytes32 tokenId) external view returns (uint8);
         function isTrustedChain(string calldata chainName) external view returns (bool);
         function itsHubAddress() external view returns (string memory);
         /// Legacy ITS trust API. Returns the trusted address for a chain — for
