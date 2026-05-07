@@ -1,6 +1,8 @@
+use alloy::network::TransactionBuilder;
 use alloy::primitives::U256;
 use alloy::primitives::keccak256;
 use alloy::providers::Provider;
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use anchor_lang::prelude::system_instruction;
 use eyre::{Result, eyre};
@@ -256,9 +258,6 @@ pub async fn ensure_funded_evm_with_extra<P: Provider>(
     derived: &[PrivateKeySigner],
     extra_wei: u128,
 ) -> Result<()> {
-    use alloy::network::TransactionBuilder;
-    use alloy::rpc::types::TransactionRequest;
-
     let min_needed = MIN_WEI_PER_KEY + extra_wei;
     let target = TARGET_WEI_PER_KEY + extra_wei;
 

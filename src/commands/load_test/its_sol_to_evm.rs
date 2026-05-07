@@ -1,12 +1,19 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
 use eyre::eyre;
 use futures::future::join_all;
+use rand::Rng;
 use solana_client::rpc_client::RpcClient;
+use solana_sdk::instruction::{AccountMeta, Instruction};
+use solana_sdk::message::Message;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
+use solana_sdk::transaction::Transaction;
 use tokio::sync::Mutex;
 
 use super::LoadTestArgs;
@@ -16,8 +23,6 @@ use super::{finish_report, read_its_cache, save_its_cache, validate_evm_rpc, val
 use crate::config::ChainsConfig;
 use crate::solana;
 use crate::ui;
-use alloy::primitives::Address;
-use std::path::Path;
 
 // Token spec lives in `crate::types::LOAD_TEST_SOL_SPEC`.
 const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
@@ -130,7 +135,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // checks gateway approval/execution, not the receiver's balance.
     let receiver: Address = match args.private_key.as_deref() {
         Some(pk) => {
-            use alloy::signers::local::PrivateKeySigner;
             let signer: PrivateKeySigner = pk
                 .parse()
                 .map_err(|e| eyre!("invalid EVM private key for receiver derivation: {e}"))?;
@@ -716,7 +720,6 @@ async fn setup_its_token(
 
 /// Generate a random 32-byte salt.
 fn generate_salt() -> [u8; 32] {
-    use rand::Rng;
     let mut salt = [0u8; 32];
     rand::thread_rng().fill(&mut salt);
     salt
@@ -763,10 +766,6 @@ fn distribute_its_tokens(
     _token_id: &[u8; 32],
     amount_per_key: u64,
 ) -> eyre::Result<()> {
-    use solana_sdk::instruction::{AccountMeta, Instruction};
-    use solana_sdk::message::Message;
-    use solana_sdk::transaction::Transaction;
-
     let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
         solana_commitment_config::CommitmentConfig::finalized(),

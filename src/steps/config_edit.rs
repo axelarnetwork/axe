@@ -4,6 +4,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
+use crate::types::Network;
 use crate::ui;
 
 pub fn run(ctx: &DeployContext) -> Result<()> {
@@ -25,7 +26,6 @@ pub fn run(ctx: &DeployContext) -> Result<()> {
         .unwrap_or(&ctx.axelar_id)
         .to_string();
 
-    use crate::types::Network;
     let (governance_address, admin_address, service_name, voting_threshold, signing_threshold) =
         match env {
             Network::DevnetAmplifier => (

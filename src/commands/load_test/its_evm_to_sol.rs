@@ -9,6 +9,7 @@ use alloy::{
 };
 use eyre::eyre;
 use futures::future::join_all;
+use solana_sdk::signer::Signer;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
@@ -281,10 +282,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     // Receiver address on Solana — use the default Solana keypair's pubkey.
     let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-    let receiver_bytes = {
-        use solana_sdk::signer::Signer;
-        Bytes::from(sol_keypair.pubkey().to_bytes().to_vec())
-    };
+    let receiver_bytes = Bytes::from(sol_keypair.pubkey().to_bytes().to_vec());
 
     // === SUSTAINED MODE ===
     if !burst_mode {

@@ -1,5 +1,8 @@
-use anchor_lang::InstructionData;
+use std::time::Instant;
+
+use anchor_lang::{Discriminator, InstructionData};
 use eyre::Result;
+use solana_axelar_std::execute_data::MerklizedPayload;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
@@ -10,10 +13,12 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
-use solana_transaction_status::UiTransactionEncoding;
-use std::time::Instant;
+use solana_transaction_status::{
+    UiInnerInstructions, UiInstruction, UiTransactionEncoding, option_serializer::OptionSerializer,
+};
 
 use crate::commands::load_test::metrics::TxMetrics;
+use crate::ui;
 
 // ---------------------------------------------------------------------------
 // ITS PDA helpers
@@ -608,11 +613,6 @@ pub fn extract_gateway_call_contract_payload(
     rpc_url: &str,
     signature_str: &str,
 ) -> Result<CallContractEventInfo> {
-    use anchor_lang::Discriminator;
-    use solana_transaction_status::{
-        UiInnerInstructions, UiInstruction, option_serializer::OptionSerializer,
-    };
-
     let rpc_client = rpc_client(rpc_url);
     let sig: Signature = signature_str
         .parse()
@@ -975,9 +975,6 @@ pub fn approve_messages_on_gateway(
     payer: &Keypair,
     execute_data: &ExecuteData,
 ) -> Result<()> {
-    use crate::ui;
-    use solana_axelar_std::execute_data::MerklizedPayload;
-
     // Step 7a: Initialize verification session
     ui::info("initializing payload verification session...");
     match initialize_verification_session(
