@@ -200,11 +200,11 @@ pub enum TestCommands {
         keypair: Option<String>,
 
         /// Override source chain RPC URL (default: from config)
-        #[arg(long)]
+        #[arg(long, env = "SOURCE_RPC")]
         source_rpc: Option<String>,
 
         /// Override destination chain RPC URL (default: from config)
-        #[arg(long)]
+        #[arg(long, env = "DESTINATION_RPC")]
         destination_rpc: Option<String>,
 
         /// Hex-encoded payload to send (default: random test message)
@@ -236,6 +236,12 @@ pub enum TestCommands {
         /// use more wallets, reducing per-address mempool pressure.
         #[arg(long, default_value = "3")]
         key_cycle: u64,
+
+        /// Number of extra accounts to add to ITS-with-data payloads (default: 0).
+        /// The first extra account is a valid ATA for the ITS token mint;
+        /// remaining accounts are random pubkeys. Useful for testing ALT paths.
+        #[arg(long, default_value = "0")]
+        extra_accounts: u32,
     },
 }
 

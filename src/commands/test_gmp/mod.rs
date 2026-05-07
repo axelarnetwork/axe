@@ -249,7 +249,7 @@ pub async fn run_config(
             .contract_address("AxelarGasService", &dst)?
             .parse()?;
         ui::section(&format!("Destination SenderReceiver ({dst})"));
-        let addr = crate::commands::load_test::helpers::ensure_sender_receiver_on_evm_chain(
+        let addr = crate::commands::load_test::ensure_sender_receiver_on_evm_chain(
             &dst,
             dst_rpc,
             &evm_pk,

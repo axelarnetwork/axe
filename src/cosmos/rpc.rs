@@ -174,16 +174,90 @@ pub async fn lcd_query_proposal(lcd: &str, proposal_id: u64) -> Result<Value> {
     Ok(proposal)
 }
 
+/// Public Axelar LCD endpoints used as silent fallbacks when the primary
+/// (chain-config or env-override) endpoint is unreachable. Imperator's
+/// mainnet LCD has been flapping with 502s; lavenderfive and polkachu are
+/// healthy alternatives at the time of writing.
+const LCD_FALLBACKS_MAINNET: &[&str] = &[
+    "https://rest.lavenderfive.com/axelar",
+    "https://axelar-rest.publicnode.com",
+];
+
 pub async fn lcd_cosmwasm_smart_query(
     lcd: &str,
     contract: &str,
     query_msg: &Value,
 ) -> Result<Value> {
+    let user_override = std::env::var("AXELAR_LCD_URL").ok();
+    let primary = user_override
+        .clone()
+        .unwrap_or_else(|| lcd.to_string())
+        .trim_end_matches('/')
+        .to_string();
+
+    // Try the primary endpoint first; on transient failures (HTTP 5xx, network
+    // error, non-JSON body) silently fall through to known-good public
+    // endpoints. Only the user-set AXELAR_LCD_URL skips fallback — we honor
+    // their explicit choice and surface the error directly.
+    let mut candidates: Vec<String> = vec![primary.clone()];
+    if user_override.is_none() {
+        for fb in LCD_FALLBACKS_MAINNET {
+            if *fb != primary {
+                candidates.push((*fb).to_string());
+            }
+        }
+    }
+
     let query_json = serde_json::to_string(query_msg)?;
     let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_json.as_bytes());
-    let url = format!("{lcd}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
-    let resp: Value = reqwest::get(&url).await?.json().await?;
-    Ok(resp["data"].clone())
+    let mut last_err: Option<eyre::Report> = None;
+
+    for endpoint in &candidates {
+        let url = format!("{endpoint}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
+        match reqwest::get(&url).await {
+            Ok(response) => {
+                let status = response.status();
+                match response.text().await {
+                    Ok(body) => {
+                        if !status.is_success() {
+                            last_err = Some(eyre::eyre!(
+                                "LCD {endpoint} returned HTTP {status}. \
+                                 First 200 chars of body: {}",
+                                body.chars().take(200).collect::<String>()
+                            ));
+                            continue;
+                        }
+                        match serde_json::from_str::<Value>(&body) {
+                            Ok(resp) => return Ok(resp["data"].clone()),
+                            Err(e) => {
+                                last_err = Some(eyre::eyre!(
+                                    "LCD {endpoint} returned non-JSON body. \
+                                     First 200 chars: {}\nParse error: {e}",
+                                    body.chars().take(200).collect::<String>()
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        last_err = Some(eyre::eyre!("LCD {endpoint} body read failed: {e}"));
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = Some(eyre::eyre!("LCD request to {endpoint} failed: {e}"));
+                continue;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("LCD query exhausted all endpoints"))).map_err(|e| {
+        eyre::eyre!(
+            "{e}\nTip: set AXELAR_LCD_URL to a working endpoint (e.g. \
+                 `https://rest.lavenderfive.com/axelar` for mainnet)."
+        )
+    })
 }
 
 /// Fetch code IDs by matching storeCodeProposalCodeHash against on-chain checksums.
@@ -251,16 +325,84 @@ pub fn read_axelar_rpc(target_json: &Path) -> Result<String> {
         .ok_or_else(|| eyre::eyre!("no axelar.rpc in target json"))
 }
 
+/// Public Axelar Tendermint RPC endpoints used as silent fallbacks when the
+/// primary endpoint (from chain config or `AXELAR_RPC_URL`) is unreachable.
+/// Imperator's mainnet RPC has been flapping with 502s; these are healthy
+/// alternatives at the time of writing.
+const RPC_FALLBACKS_MAINNET: &[&str] = &[
+    "https://axelar-rpc.publicnode.com",
+    "https://rpc.cosmos.directory/axelar",
+];
+
 /// Query Tendermint RPC `tx_search` for a single event key/value pair.
-/// Returns the parsed JSON response.
-pub(super) async fn rpc_tx_search_event(
-    rpc: &str,
-    event_key: &str,
-    event_value: &str,
-) -> Result<Value> {
-    let url = format!("{rpc}/tx_search?query=\"{event_key}='{event_value}'\"&per_page=1");
-    let resp = reqwest::get(&url).await?.json::<Value>().await?;
-    Ok(resp)
+/// Returns the parsed JSON response. Silently falls back to public RPCs if
+/// the primary endpoint errors and `AXELAR_RPC_URL` is not explicitly set.
+pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) -> Result<Value> {
+    let user_override = std::env::var("AXELAR_RPC_URL").ok();
+    let primary = user_override
+        .clone()
+        .unwrap_or_else(|| rpc.to_string())
+        .trim_end_matches('/')
+        .to_string();
+
+    let mut candidates: Vec<String> = vec![primary.clone()];
+    if user_override.is_none() {
+        for fb in RPC_FALLBACKS_MAINNET {
+            if *fb != primary {
+                candidates.push((*fb).to_string());
+            }
+        }
+    }
+
+    let query = format!("\"{event_key}='{event_value}'\"");
+    let encoded = url_encode_query(&query);
+    let mut last_err: Option<eyre::Report> = None;
+
+    for endpoint in &candidates {
+        let url = format!("{endpoint}/tx_search?query={encoded}&per_page=1");
+        match reqwest::get(&url).await {
+            Ok(response) => {
+                let status = response.status();
+                if !status.is_success() {
+                    last_err = Some(eyre::eyre!(
+                        "Tendermint RPC {endpoint} returned HTTP {status}"
+                    ));
+                    continue;
+                }
+                match response.json::<Value>().await {
+                    Ok(v) => return Ok(v),
+                    Err(e) => {
+                        last_err = Some(eyre::eyre!("RPC {endpoint} JSON decode failed: {e}"));
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = Some(eyre::eyre!("RPC request to {endpoint} failed: {e}"));
+                continue;
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("Tendermint RPC query exhausted all endpoints")))
+        .map_err(|e| {
+            eyre::eyre!(
+                "{e}\nTip: set AXELAR_RPC_URL to a working endpoint (e.g. \
+                 `https://axelar-rpc.publicnode.com` for mainnet)."
+            )
+        })
+}
+
+fn url_encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Query Tendermint RPC `tx_search` with a raw query string (e.g.

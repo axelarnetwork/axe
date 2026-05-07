@@ -8,9 +8,7 @@ use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
 use crate::commands::load_test::evm_sender::{make_executable_payload, memo_program_id};
 use crate::evm::{ContractCall, SenderReceiver};
-use crate::solana::{
-    extract_its_message_id, load_keypair, send_call_contract, wait_for_signature_finalized,
-};
+use crate::solana::{extract_its_message_id, load_keypair, send_call_contract};
 use crate::ui;
 
 /// The bits of a freshly sent GMP `callContract` that downstream Amplifier
@@ -145,21 +143,15 @@ pub fn send_svm_call_contract(
     ui::kv("message_id", &message_id);
     ui::kv("payload_hash", &alloy::hex::encode(payload_hash));
     ui::success(&format!(
-        "confirmed ({}ms)",
+        "finalized ({}ms)",
         metrics.latency_ms.unwrap_or(0)
     ));
 
-    // The Axelar verifier set reads Solana state at finalized commitment;
-    // shipping `message_id` to the cosmos hub before the source tx is
-    // finalized risks a split poll (some verifiers see the tx, some don't).
-    let spinner = ui::wait_spinner("Waiting for source tx to finalize on Solana...");
-    let parsed_sig = raw_sig
-        .parse()
-        .map_err(|e| eyre::eyre!("invalid Solana signature '{raw_sig}': {e}"))?;
-    let finalize_result = wait_for_signature_finalized(src_rpc, &parsed_sig);
-    spinner.finish_and_clear();
-    finalize_result?;
-    ui::success("source tx finalized");
+    // `send_call_contract` already waits for finalized commitment (see
+    // `crate::solana::send_call_contract`'s `RpcClient::new_with_commitment(_,
+    // CommitmentConfig::finalized())`), so by the time we reach this point
+    // the source tx is rollback-proof and verifiers reading at finalized
+    // see consistent state. No separate finality barrier needed.
 
     Ok(SentGmp {
         destination_chain: destination_chain.to_string(),

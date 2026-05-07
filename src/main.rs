@@ -6,11 +6,14 @@ mod evm;
 mod preflight;
 mod solana;
 mod state;
+mod stellar;
 mod steps;
+mod sui;
 mod timing;
 mod types;
 pub mod ui;
 mod utils;
+mod xrpl;
 
 use clap::Parser;
 use eyre::Result;
@@ -145,6 +148,7 @@ async fn main() -> Result<()> {
                 tps,
                 duration_secs,
                 key_cycle,
+                extra_accounts,
             } => {
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
@@ -175,6 +179,7 @@ async fn main() -> Result<()> {
                     tps,
                     duration_secs,
                     key_cycle,
+                    extra_accounts,
                 })
                 .await
             }

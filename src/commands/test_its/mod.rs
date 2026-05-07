@@ -45,8 +45,8 @@ use relay::{relay_to_destination, relay_to_hub};
 use remediation::print_untrusted_chain_remediation;
 
 use crate::cli::resolve_axelar_id;
-use crate::commands::event_extractors::{
-    extract_contract_call_event, extract_token_deployed_event,
+pub use crate::commands::event_extractors::{
+    extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
 use crate::commands::test_helpers::{
     end_poll_with_retry, execute_on_axelarnet_gateway, route_messages_with_retry,

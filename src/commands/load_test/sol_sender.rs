@@ -2,17 +2,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use alloy::primitives::keccak256;
+use alloy::sol_types::SolValue;
+use eyre::eyre;
 use futures::future::join_all;
 use indicatif::ProgressBar;
+use rand::Rng;
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use tokio::sync::Mutex;
-
-use alloy::primitives::keccak256;
-use alloy::sol_types::SolValue;
-use rand::Rng;
-
-use solana_sdk::pubkey::Pubkey;
 
 use super::LoadTestArgs;
 use super::keypairs;
@@ -20,6 +20,17 @@ use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::solana;
 use crate::ui;
+
+/// Per-network funding hint for an empty Solana wallet. `solana airdrop`
+/// only works on devnet/testnet; on mainnet users have to source SOL
+/// elsewhere.
+fn fund_hint(pubkey: &solana_sdk::pubkey::Pubkey) -> String {
+    if cfg!(feature = "mainnet") {
+        format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
+    } else {
+        format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+    }
+}
 
 /// Generate a unique ABI-encoded payload compatible with `SenderReceiver._execute`.
 /// The contract does `abi.decode(payload_, (string))`, so we must ABI-encode the string.
@@ -86,12 +97,21 @@ pub async fn run_load_test_with_metrics(
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
 
     // Check main wallet balance
-    solana::check_solana_balance(
+    let rpc_client = RpcClient::new_with_commitment(
         &args.source_rpc,
-        "wallet",
-        &main_keypair.pubkey(),
-        solana::MIN_SOL_SEND_LAMPORTS,
-    )?;
+        solana_commitment_config::CommitmentConfig::finalized(),
+    );
+    let pubkey = main_keypair.pubkey();
+    let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
+    #[allow(clippy::float_arithmetic)]
+    let sol = balance as f64 / 1e9;
+    ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
+    if balance == 0 {
+        return Err(eyre!(
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
+        ));
+    }
 
     // Derive and fund keypairs (1 key per tx to avoid nonce contention)
     let keypairs = prepare_keypairs(&args.source_rpc, num_txs, &main_keypair)?;
@@ -275,12 +295,21 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let total_expected = tps as u64 * duration_secs;
 
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
-    solana::check_solana_balance(
+    let rpc_client = RpcClient::new_with_commitment(
         &args.source_rpc,
-        "wallet",
-        &main_keypair.pubkey(),
-        solana::MIN_SOL_SEND_LAMPORTS,
-    )?;
+        solana_commitment_config::CommitmentConfig::finalized(),
+    );
+    let pubkey = main_keypair.pubkey();
+    let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
+    #[allow(clippy::float_arithmetic)]
+    let sol = balance as f64 / 1e9;
+    ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
+    if balance == 0 {
+        return Err(eyre!(
+            "wallet ({pubkey}) has no SOL. {}",
+            fund_hint(&pubkey)
+        ));
+    }
 
     let payload: Option<Vec<u8>> = match &args.payload {
         Some(hex_str) => Some(hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?),

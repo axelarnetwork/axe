@@ -126,13 +126,6 @@ pub enum Network {
 }
 
 impl Network {
-    pub const ALL: &'static [Self] = &[
-        Self::Mainnet,
-        Self::Testnet,
-        Self::Stagenet,
-        Self::DevnetAmplifier,
-    ];
-
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",
@@ -374,14 +367,6 @@ pub const ITS_CONFIG_SPEC: TestTokenSpec = TestTokenSpec {
     name: "Axe ITS Test",
     symbol: "AXE",
     decimals: 9,
-};
-
-/// Spec used by the EVM-source load test (`load-test ... --protocol its`,
-/// EVM → Solana).
-pub const LOAD_TEST_EVM_SPEC: TestTokenSpec = TestTokenSpec {
-    name: "AXE",
-    symbol: "AXE",
-    decimals: 18,
 };
 
 /// Spec used by the Solana-source load test (`load-test ... --protocol its`,

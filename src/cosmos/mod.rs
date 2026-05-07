@@ -21,7 +21,7 @@ pub use events::{
 pub use rpc::{
     check_axelar_balance, fetch_verifier_set, lcd_cosmwasm_smart_query, lcd_fetch_code_id,
     lcd_query_proposal, read_axelar_config, read_axelar_contract_field, read_axelar_rpc,
-    rpc_block_time, rpc_tx_search,
+    rpc_block_time, rpc_tx_search, rpc_tx_search_event,
 };
 pub use signers::derive_axelar_wallet;
 pub use tx::{
