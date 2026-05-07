@@ -19,11 +19,11 @@ use sha2::{Digest, Sha256};
 use stellar_rpc_client::Client as RpcClient;
 use stellar_strkey::{Contract as StrContract, ed25519::PublicKey as StrPubKey};
 use stellar_xdr::curr::{
-    AccountId, BytesM, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
+    AccountId, BytesM, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
     InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
     PublicKey, ScAddress, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
     SorobanAuthorizationEntry, StringM, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    TransactionMeta, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
@@ -33,6 +33,16 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// with the actual resource fee, but a generous floor avoids `txInsufficientFee`
 /// rejections when the network bumps fees mid-test.
 const BASE_FEE_ITS: u32 = 1_000;
+/// Base fee for view-only invokes (`balance`, `interchain_token_address`,
+/// gateway `is_message_*`). Simulation discards the fee anyway, so this is
+/// just the floor we pass into the envelope before the resource-fee top-up.
+const BASE_FEE_VIEW: u32 = 100;
+/// Base fee for SAC token ops (`transfer`, `balance`).
+const BASE_FEE_TOKEN_OP: u32 = 200;
+/// Base fee for ITS deploy/register flows. Soroban deploy is heavier than a
+/// transfer so the floor is bumped up to avoid `txInsufficientFee` when fees
+/// spike.
+const BASE_FEE_DEPLOY: u32 = 500;
 /// Upper bound for waiting on a single tx to validate. Stellar ledger close
 /// time is ~5s; a generous window protects against RPC lag without hiding
 /// real failures.
@@ -533,7 +543,7 @@ impl StellarClient {
                 its_contract,
                 "deploy_interchain_token",
                 vec![caller, salt_arg, metadata, supply, minter],
-                500, // higher base fee — Soroban deploy is heavy
+                BASE_FEE_DEPLOY,
                 None,
             )
             .await?;
@@ -566,7 +576,7 @@ impl StellarClient {
             its_contract,
             "deploy_remote_interchain_token",
             vec![caller, salt_arg, dest_chain_v, gas_v],
-            500,
+            BASE_FEE_DEPLOY,
             gw_filter,
         )
         .await
@@ -636,7 +646,7 @@ impl StellarClient {
                 its_contract,
                 "interchain_token_address",
                 vec![token_id_v],
-                100,
+                BASE_FEE_VIEW,
                 None,
             )
             .await?;
@@ -663,7 +673,7 @@ impl StellarClient {
             token_contract,
             "transfer",
             vec![from, to, amount_v],
-            200,
+            BASE_FEE_TOKEN_OP,
             None,
         )
         .await
@@ -683,7 +693,7 @@ impl StellarClient {
                 token_contract,
                 "balance",
                 vec![account_v],
-                100,
+                BASE_FEE_VIEW,
                 None,
             )
             .await?;
@@ -728,11 +738,9 @@ impl StellarClient {
             }),
         };
         let ops: VecM<Operation, 100> = vec![op].try_into().map_err(|e| eyre!("op vec: {e}"))?;
-        let source_account =
-            AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(*signer_account_pk)));
         let tx = Transaction {
             source_account: MuxedAccount::Ed25519(Uint256(*signer_account_pk)),
-            fee: 100,
+            fee: BASE_FEE_VIEW,
             // simulate doesn't need a real seq number; use 1 as a placeholder.
             seq_num: SequenceNumber(1),
             cond: Preconditions::None,
@@ -740,7 +748,6 @@ impl StellarClient {
             operations: ops,
             ext: TransactionExt::V0,
         };
-        let _ = source_account;
         let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
             tx,
             signatures: VecM::default(),
@@ -880,7 +887,6 @@ fn extract_status(resp: &stellar_rpc_client::GetTransactionResponse) -> Option<S
 /// The Soroban return value lives in `result_meta.soroban_meta.return_value`
 /// (V3) or `result_meta.soroban_meta.return_value` (V4 — same location).
 fn extract_return_value(resp: &stellar_rpc_client::GetTransactionResponse) -> Option<ScVal> {
-    use stellar_xdr::curr::TransactionMeta;
     let meta = resp.result_meta.as_ref()?;
     match meta {
         TransactionMeta::V3(m) => m.soroban_meta.as_ref().map(|s| s.return_value.clone()),
@@ -903,7 +909,6 @@ fn find_event_index(
     resp: &stellar_rpc_client::GetTransactionResponse,
     target: &Hash,
 ) -> Option<u32> {
-    use stellar_xdr::curr::{ContractId, TransactionMeta};
     let target_cid = ContractId(target.clone());
     let meta = resp.result_meta.as_ref()?;
 
