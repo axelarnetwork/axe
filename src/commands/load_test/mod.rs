@@ -1009,10 +1009,20 @@ async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             (new_addr, write_provider)
         } else {
             ui::info(&format!("SenderReceiver: reusing {addr}"));
-            let private_key = args
-                .private_key
-                .as_deref()
-                .unwrap_or("0x0000000000000000000000000000000000000000000000000000000000000001");
+            // Build a wallet provider against the user's key so the load test
+            // can submit txs through it. We fall through to fail-loud when
+            // no key is set rather than substituting a well-known low-entropy
+            // key — that placeholder existed historically as a stand-in for
+            // a "read-only" provider but the type signature returns a
+            // wallet provider, so any tx submitted through it would have
+            // been a footgun (the placeholder address has zero funds and
+            // is sweepable by anyone who finds the same constant).
+            let private_key = args.private_key.as_deref().ok_or_else(|| {
+                eyre::eyre!(
+                    "EVM private key required to use the cached SenderReceiver. \
+                     Set EVM_PRIVATE_KEY env var or use --private-key"
+                )
+            })?;
             let signer: PrivateKeySigner = private_key.parse()?;
             let provider = ProviderBuilder::new()
                 .wallet(signer)
@@ -2424,10 +2434,19 @@ async fn ensure_sender_receiver(
             !matches!(sr.gateway().call().await, Ok(onchain_gw) if onchain_gw == gateway_addr)
         };
         if !needs_redeploy {
-            let pk =
-                args.private_key.as_deref().or(evm_private_key).unwrap_or(
-                    "0x0000000000000000000000000000000000000000000000000000000000000001",
-                );
+            // Wallet provider — caller may submit txs through it. Fail loud
+            // when no key is configured rather than substitute the historic
+            // `0x0…01` placeholder, which was a sweepable-funds footgun.
+            let pk = args
+                .private_key
+                .as_deref()
+                .or(evm_private_key)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "EVM private key required to reuse the cached SenderReceiver. \
+                     Set EVM_PRIVATE_KEY env var or use --private-key"
+                    )
+                })?;
             let signer: PrivateKeySigner = pk.parse()?;
             let provider = ProviderBuilder::new()
                 .wallet(signer)
