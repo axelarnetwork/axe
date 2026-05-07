@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::ui;
-use crate::xrpl::{XrplClient, XrplWallet, build_its_transfer_memos};
+use crate::xrpl::{LAST_LEDGER_SEQUENCE_BUMP, XrplClient, XrplWallet, build_its_transfer_memos};
 use xrpl_api::SubmitRequest;
 use xrpl_binary_codec::{serialize, sign::sign_transaction};
 use xrpl_types::{AccountId, Amount, Blob, PaymentTransaction};
@@ -76,10 +76,11 @@ async fn submit_single(
 
     // The SDK's `prepare_transaction` sets `LastLedgerSequence = validated + 4`,
     // which is only ~16 seconds and frequently expires before inclusion under
-    // any congestion or a one-ledger delay. Extend the window — xrpl.js
-    // autofill defaults to +20; we use +30 to be safe at load-test volumes.
+    // any congestion or a one-ledger delay. Extend the window via the shared
+    // `LAST_LEDGER_SEQUENCE_BUMP` (xrpl.js autofill defaults to +20; we use
+    // +26 to be safe at load-test volumes).
     if let Some(lls) = tx.common.last_ledger_sequence {
-        tx.common.last_ledger_sequence = Some(lls.saturating_add(26));
+        tx.common.last_ledger_sequence = Some(lls.saturating_add(LAST_LEDGER_SEQUENCE_BUMP));
     }
 
     if let Err(e) = sign_transaction(&mut tx, &wallet.public_key, &wallet.secret_key) {

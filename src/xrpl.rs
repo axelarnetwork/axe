@@ -25,6 +25,22 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Upper bound on how long we wait for a single tx to validate.
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// `LastLedgerSequence` bump applied on top of whatever
+/// `prepare_transaction` autofills. The SDK sets `validated + 4` (~16 s),
+/// which expires too easily under any one-ledger delay. xrpl.js autofill
+/// defaults to +20; we add +26 here to leave a comfortable window for
+/// load-test bursts that may queue behind several congested closes.
+pub const LAST_LEDGER_SEQUENCE_BUMP: u32 = 26;
+
+/// Maximum txs returned by `account_tx` when scanning for an inbound
+/// `Payment` carrying a particular `message_id` memo. The XRPL public
+/// servers cap responses lower (200 is the documented ceiling), so this is
+/// also the practical lookback window.
+const ACCOUNT_TX_LIMIT: u32 = 200;
+
+/// Drops per XRP. Used by the `xrp_to_drops` helper.
+const DROPS_PER_XRP: u64 = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Wallet (secp256k1 keypair + derived r-address)
 // ---------------------------------------------------------------------------
@@ -396,7 +412,7 @@ impl XrplClient {
             .await
             .map_err(|e| eyre!("prepare_transaction failed: {e}"))?;
         if let Some(lls) = tx.common.last_ledger_sequence {
-            tx.common.last_ledger_sequence = Some(lls.saturating_add(26));
+            tx.common.last_ledger_sequence = Some(lls.saturating_add(LAST_LEDGER_SEQUENCE_BUMP));
         }
         sign_transaction(&mut tx, &wallet.public_key, &wallet.secret_key)
             .map_err(|e| eyre!("sign_transaction failed: {e:?}"))?;
@@ -446,7 +462,7 @@ impl XrplClient {
             forward: Some(false),
             ledger_index_min: min_ledger.map(|n| n.to_string()),
             pagination: xrpl_api::RequestPagination {
-                limit: Some(200),
+                limit: Some(ACCOUNT_TX_LIMIT),
                 ..Default::default()
             },
             ..Default::default()
@@ -576,7 +592,7 @@ pub fn account_id_to_hex(id: &AccountId) -> String {
 
 /// Convenience conversion: 1 XRP = 1_000_000 drops.
 pub const fn xrp_to_drops(xrp: u64) -> u64 {
-    xrp.saturating_mul(1_000_000)
+    xrp.saturating_mul(DROPS_PER_XRP)
 }
 
 /// Default faucet URL for a given XRPL chain. We look at the configured
