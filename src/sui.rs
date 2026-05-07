@@ -958,6 +958,23 @@ pub fn read_sui_gateway_pkg(config: &std::path::Path, chain_id: &str) -> Result<
 // Build + send a GMP send_call from Sui to any destination
 // ---------------------------------------------------------------------------
 
+/// One Sui→destination GMP call. Bundles the per-call inputs (destination
+/// fields + gas/budget) so `send_gmp_call` doesn't need an 8-positional-arg
+/// signature where it's easy to swap, e.g., the chain and address strings at
+/// the call site.
+pub struct SuiGmpCall<'a> {
+    pub destination_chain: &'a str,
+    pub destination_address: &'a str,
+    pub payload: &'a [u8],
+    /// Cross-chain gas paid into the Sui `GasService`, in mist (1 SUI = 1e9
+    /// mist). Used by the relayer to fund the destination-side `execute`.
+    pub gas_value_mist: u64,
+    /// On-chain Sui tx gas budget in mist, separate from `gas_value_mist`
+    /// (which is the cross-chain message gas). Caller picks based on a
+    /// pessimistic upper bound for the PTB cost.
+    pub gas_budget_mist: u64,
+}
+
 /// Outcome of a GMP send: tx digest + the index in `events[]` of the
 /// `ContractCall` event (which is the message id suffix).
 #[derive(Debug, Clone)]
@@ -989,11 +1006,7 @@ pub async fn send_gmp_call(
     client: &SuiClient,
     wallet: &SuiWallet,
     contracts: &SuiContractsConfig,
-    destination_chain: &str,
-    destination_address: &str,
-    payload: &[u8],
-    gas_value_mist: u64,
-    gas_budget_mist: u64,
+    call: &SuiGmpCall<'_>,
 ) -> Result<GmpSendResult> {
     // Fetch shared-object versions in parallel.
     let (singleton_v, gateway_v, gas_service_v) = tokio::try_join!(
@@ -1009,11 +1022,11 @@ pub async fn send_gmp_call(
     let singleton = b.shared_object(contracts.gmp_singleton, singleton_v, true);
     let gateway = b.shared_object(contracts.gateway_object, gateway_v, true);
     let gas_svc = b.shared_object(contracts.gas_service_object, gas_service_v, true);
-    let dest_chain_arg = b.pure_string(destination_chain)?;
-    let dest_addr_arg = b.pure_string(destination_address)?;
-    let payload_arg = b.pure_vec_u8(payload)?;
+    let dest_chain_arg = b.pure_string(call.destination_chain)?;
+    let dest_addr_arg = b.pure_string(call.destination_address)?;
+    let payload_arg = b.pure_vec_u8(call.payload)?;
     let refund_arg = b.pure_address(wallet.address)?;
-    let amt_arg = b.pure_u64(gas_value_mist)?;
+    let amt_arg = b.pure_u64(call.gas_value_mist)?;
     let coin_arg = b.split_coin(Argument::Gas, amt_arg);
     let params_arg = b.pure_vec_u8(&[])?;
 
@@ -1041,7 +1054,7 @@ pub async fn send_gmp_call(
             objects: vec![gas_coin],
             owner: wallet.address,
             price: rgp,
-            budget: gas_budget_mist,
+            budget: call.gas_budget_mist,
         },
     );
 

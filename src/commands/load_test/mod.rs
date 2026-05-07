@@ -2837,11 +2837,13 @@ async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &sui_client,
             &main_wallet,
             &sui_contracts,
-            &args.destination_axelar_id,
-            &dest_addr_str,
-            &payload_bytes,
-            gas_value_mist,
-            SUI_DEFAULT_GAS_BUDGET_MIST,
+            &crate::sui::SuiGmpCall {
+                destination_chain: &args.destination_axelar_id,
+                destination_address: &dest_addr_str,
+                payload: &payload_bytes,
+                gas_value_mist,
+                gas_budget_mist: SUI_DEFAULT_GAS_BUDGET_MIST,
+            },
         )
         .await;
 
