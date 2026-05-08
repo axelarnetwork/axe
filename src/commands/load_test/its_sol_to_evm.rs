@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use alloy::primitives::Address;
@@ -68,8 +68,97 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     validate_evm_rpc(&evm_rpc_url).await?;
 
     let cfg = ChainsConfig::load(&args.config)?;
+    verify_axelar_prerequisites(&cfg, dest)?;
 
-    // Check verification contracts exist
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "ITS (interchainTransfer via hub)");
+
+    let (rpc_client, main_keypair) =
+        init_solana_client_and_main_keypair(&args.source_rpc, args.keypair.as_deref())?;
+
+    let gas_value = parse_gas_value(args.gas_value.as_deref())?;
+    let (evm, dest_address_bytes) =
+        resolve_evm_targets_and_receiver(&cfg, dest, args.private_key.as_deref())?;
+
+    let sizing = compute_run_sizing(&args);
+
+    let (token_id, _salt, mint) = setup_its_token(
+        &args.source_rpc,
+        &main_keypair,
+        src,
+        dest,
+        sizing.num_keys,
+        gas_value,
+        args.token_id.as_deref(),
+        &args.config,
+        evm.evm_gateway_addr,
+        &evm_rpc_url,
+        &rpc_client,
+    )
+    .await?;
+
+    ui::kv("token ID", &hex::encode(token_id));
+    ui::address("mint", &mint.to_string());
+
+    // --- Derive and fund keypairs ---
+    let keypairs = prepare_keypairs(&args.source_rpc, sizing.num_keys, &main_keypair)?;
+
+    // --- Create ATAs and distribute tokens ---
+    distribute_its_tokens(
+        &args.source_rpc,
+        &main_keypair,
+        &keypairs,
+        &mint,
+        &token_id,
+        compute_distribution_amount(&args, &sizing),
+    )?;
+
+    let transfer = ItsTransferSpec {
+        token_id,
+        mint,
+        gas_value,
+        dest_address_bytes,
+    };
+
+    if !sizing.burst_mode {
+        run_sustained_pipeline(&args, &evm, &sizing, keypairs, &transfer).await
+    } else {
+        run_burst_pipeline(&args, &evm, &keypairs, &transfer, &evm_rpc_url).await
+    }
+}
+
+/// EVM-side addresses resolved from config for the destination chain, plus
+/// the global AxelarnetGateway used as the GMP-hub destination.
+struct EvmTargets {
+    its_proxy_addr: Address,
+    evm_gateway_addr: Address,
+    axelarnet_gw_addr: String,
+}
+
+/// Sizing parameters derived from CLI flags: chooses burst vs sustained,
+/// number of ephemeral keys, and total expected tx count.
+struct RunSizing {
+    burst_mode: bool,
+    sustained_params: Option<(u64, u64)>,
+    num_keys: usize,
+    total_expected: u64,
+}
+
+/// Per-transfer payload bits that are common to burst and sustained modes:
+/// the deployed ITS token, its mint, the gas value, and the EVM receiver
+/// (already encoded as bytes).
+struct ItsTransferSpec {
+    token_id: [u8; 32],
+    mint: solana_sdk::pubkey::Pubkey,
+    gas_value: u64,
+    dest_address_bytes: Vec<u8>,
+}
+
+/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
+/// AxelarnetGateway). Bails with the existing error strings if either is
+/// missing.
+fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> eyre::Result<()> {
     if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
@@ -82,15 +171,19 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
     }
+    Ok(())
+}
 
-    ui::kv("source", src);
-    ui::kv("destination", dest);
-    ui::kv("protocol", "ITS (interchainTransfer via hub)");
-
-    // --- Solana keypair ---
-    let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
+/// Build the Solana RPC client, load the main funding keypair, and log the
+/// wallet's address and current SOL balance. Bails with the existing
+/// fund-wallet hint if the balance is zero.
+fn init_solana_client_and_main_keypair(
+    solana_rpc: &str,
+    keypair_path: Option<&str>,
+) -> eyre::Result<(RpcClient, Keypair)> {
+    let main_keypair = solana::load_keypair(keypair_path)?;
     let rpc_client = RpcClient::new_with_commitment(
-        &args.source_rpc,
+        solana_rpc,
         solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
@@ -108,14 +201,30 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             }
         ));
     }
+    Ok((rpc_client, main_keypair))
+}
 
-    // --- Gas value ---
-    let gas_value: u64 = match &args.gas_value {
+/// Parse the user-supplied gas value (lamports), defaulting to
+/// `default_gas_value()`, and emit the matching UI line.
+fn parse_gas_value(gas_value: Option<&str>) -> eyre::Result<u64> {
+    let gas_value: u64 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => default_gas_value(),
     };
     ui::kv("gas value", &format!("{gas_value} lamports"));
+    Ok(gas_value)
+}
 
+/// Resolve the EVM-destination addresses (ITS proxy, gateway, axelarnet
+/// gateway) and derive the EVM-side receiver wallet, emitting UI lines in
+/// the original order: destination ITS, receiver, EVM gateway. The interleave
+/// matters — original error paths log destination ITS and receiver before
+/// the gateway parse can fail.
+fn resolve_evm_targets_and_receiver(
+    cfg: &ChainsConfig,
+    dest: &str,
+    private_key: Option<&str>,
+) -> eyre::Result<(EvmTargets, Vec<u8>)> {
     // --- EVM destination ITS proxy (used by the relayer to dispatch execute) ---
     let dest_cfg = cfg
         .chains
@@ -133,7 +242,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // tokens at a wallet the user owns (no dust burn). Fall back to the
     // canonical dEaD burn address when no key is configured — verify only
     // checks gateway approval/execution, not the receiver's balance.
-    let receiver: Address = match args.private_key.as_deref() {
+    let receiver: Address = match private_key {
         Some(pk) => {
             let signer: PrivateKeySigner = pk
                 .parse()
@@ -149,6 +258,25 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let evm_gateway_addr: Address = dest_cfg.contract_address("AxelarGateway", dest)?.parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
+    // --- ITS hub routing info ---
+    // ITS always routes through "axelar" hub. The GMP destination is the AxelarnetGateway.
+    let axelarnet_gw_addr = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
+
+    Ok((
+        EvmTargets {
+            its_proxy_addr,
+            evm_gateway_addr,
+            axelarnet_gw_addr,
+        },
+        dest_address_bytes,
+    ))
+}
+
+/// Decide burst vs sustained, ephemeral key count, and total-expected tx count.
+fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     let sustained_params = args.tps.zip(args.duration_secs);
     let burst_mode = sustained_params.is_none();
     let (num_keys, total_expected) = if burst_mode {
@@ -159,208 +287,207 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
-
-    // --- Token setup ---
-    let (token_id, _salt, mint) = setup_its_token(
-        &args.source_rpc,
-        &main_keypair,
-        src,
-        dest,
+    RunSizing {
+        burst_mode,
+        sustained_params,
         num_keys,
-        gas_value,
-        args.token_id.as_deref(),
-        &args.config,
-        evm_gateway_addr,
-        &evm_rpc_url,
-        &rpc_client,
-    )
-    .await?;
+        total_expected,
+    }
+}
 
-    ui::kv("token ID", &hex::encode(token_id));
-    ui::address("mint", &mint.to_string());
-
-    // --- Derive and fund keypairs ---
-    let keypairs = prepare_keypairs(&args.source_rpc, num_keys, &main_keypair)?;
-    let key_count = keypairs.len();
-
-    // --- Create ATAs and distribute tokens ---
-    let amount_per_key_dist = if burst_mode {
+/// Per-key token amount to seed the ephemeral wallets with: `AMOUNT_PER_KEY`
+/// for burst mode, otherwise enough headroom for the sustained per-key cycle.
+fn compute_distribution_amount(args: &LoadTestArgs, sizing: &RunSizing) -> u64 {
+    if sizing.burst_mode {
         AMOUNT_PER_KEY
     } else {
-        let txs_per_key = sustained_params
+        let txs_per_key = sizing
+            .sustained_params
             .expect("burst_mode is false")
             .1
             .div_ceil(args.key_cycle);
         AMOUNT_PER_TX * txs_per_key * 2
-    };
-    distribute_its_tokens(
-        &args.source_rpc,
-        &main_keypair,
-        &keypairs,
-        &mint,
-        &token_id,
-        amount_per_key_dist,
-    )?;
+    }
+}
 
-    // --- ITS hub routing info ---
-    // ITS always routes through "axelar" hub. The GMP destination is the AxelarnetGateway.
-    let axelarnet_gw_addr = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+/// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
+/// Solana sustained loop, stitch amplifier timings back into the report, and
+/// hand off to `finish_report`.
+async fn run_sustained_pipeline(
+    args: &LoadTestArgs,
+    evm: &EvmTargets,
+    sizing: &RunSizing,
+    keypairs: Vec<Arc<Keypair>>,
+    transfer: &ItsTransferSpec,
+) -> eyre::Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let evm_rpc_url = args.destination_rpc.clone();
+    let tps_n = sizing.sustained_params.expect("burst_mode is false").0 as usize;
+    let duration_secs = sizing.sustained_params.expect("burst_mode is false").1;
+    let key_cycle = args.key_cycle as usize;
 
-    // === SUSTAINED MODE ===
-    if !burst_mode {
-        let tps_n = sustained_params.expect("burst_mode is false").0 as usize;
-        let duration_secs = sustained_params.expect("burst_mode is false").1;
-        let key_cycle = args.key_cycle as usize;
+    // Streaming verification: run concurrently with sends.
+    let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let send_done = Arc::new(AtomicBool::new(false));
+    let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
-        // Streaming verification: run concurrently with sends.
-        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
-        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+    let vconfig = args.config.clone();
+    let vsource = args.source_axelar_id.clone();
+    let vdest = args.destination_axelar_id.clone();
+    let vdest_rpc = evm_rpc_url.clone();
+    let vdone = Arc::clone(&send_done);
+    let vgw = evm.evm_gateway_addr;
+    let verify_handle = tokio::spawn(async move {
+        let spinner = spinner_rx.await.expect("spinner channel dropped");
+        super::verify::verify_onchain_evm_its_streaming(
+            &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
+        )
+        .await
+    });
 
-        let vconfig = args.config.clone();
-        let vsource = args.source_axelar_id.clone();
-        let vdest = args.destination_axelar_id.clone();
-        let vdest_rpc = evm_rpc_url.clone();
-        let vdone = std::sync::Arc::clone(&send_done);
-        let vgw = evm_gateway_addr;
-        let verify_handle = tokio::spawn(async move {
-            let spinner = spinner_rx.await.expect("spinner channel dropped");
-            super::verify::verify_onchain_evm_its_streaming(
-                &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
-            )
-            .await
-        });
+    let spinner = ui::wait_spinner(&format!(
+        "[0/{duration_secs}s] starting sustained ITS send..."
+    ));
+    let _ = spinner_tx.send(spinner.clone());
 
-        let spinner = ui::wait_spinner(&format!(
-            "[0/{duration_secs}s] starting sustained ITS send..."
-        ));
-        let _ = spinner_tx.send(spinner.clone());
+    let test_start = Instant::now();
 
-        let test_start = Instant::now();
+    let dest_chain_s = dest.to_string();
+    let da_s = transfer.dest_address_bytes.clone();
+    let rpc_s = args.source_rpc.clone();
+    let axelarnet_gw_s = evm.axelarnet_gw_addr.clone();
+    let token_id = transfer.token_id;
+    let mint = transfer.mint;
+    let gas_value = transfer.gas_value;
+    let token_program_s =
+        solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let ata_program_s =
+        solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
-        let dest_chain_s = dest.to_string();
-        let da_s = dest_address_bytes.clone();
-        let rpc_s = args.source_rpc.clone();
-        let axelarnet_gw_s = axelarnet_gw_addr.clone();
-        let token_program_s = solana_sdk::pubkey::Pubkey::from_str_const(
-            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-        );
-        let ata_program_s = solana_sdk::pubkey::Pubkey::from_str_const(
-            "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-        );
+    let make_task: super::sustained::MakeTask =
+        Box::new(move |key_idx: usize, _nonce: Option<u64>| {
+            let kp = keypairs[key_idx].clone();
+            let dc = dest_chain_s.clone();
+            let da = da_s.clone();
+            let rpc = rpc_s.clone();
+            let tid = token_id;
+            let m = mint;
+            let gv = gas_value;
+            let gmp_dest = axelarnet_gw_s.clone();
+            let vtx = verify_tx.clone();
 
-        let make_task: super::sustained::MakeTask =
-            Box::new(move |key_idx: usize, _nonce: Option<u64>| {
-                let kp = keypairs[key_idx].clone();
-                let dc = dest_chain_s.clone();
-                let da = da_s.clone();
-                let rpc = rpc_s.clone();
-                let tid = token_id;
-                let m = mint;
-                let gv = gas_value;
-                let gmp_dest = axelarnet_gw_s.clone();
-                let vtx = verify_tx.clone();
+            Box::pin(async move {
+                let submit_start = Instant::now();
+                let source_addr = kp.pubkey().to_string();
 
-                Box::pin(async move {
-                    let submit_start = Instant::now();
-                    let source_addr = kp.pubkey().to_string();
+                let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
+                    &[kp.pubkey().as_ref(), token_program_s.as_ref(), m.as_ref()],
+                    &ata_program_s,
+                )
+                .0;
 
-                    let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
-                        &[kp.pubkey().as_ref(), token_program_s.as_ref(), m.as_ref()],
-                        &ata_program_s,
-                    )
-                    .0;
-
-                    match solana::send_its_interchain_transfer(
-                        &rpc,
-                        &kp,
-                        &tid,
-                        &source_ata,
-                        &m,
-                        &dc,
-                        &da,
-                        AMOUNT_PER_TX,
-                        gv,
-                    ) {
-                        Ok((_sig, mut metrics)) => {
-                            metrics.signature =
-                                solana::extract_its_message_id(&rpc, &metrics.signature)
-                                    .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
-                            metrics.source_address = source_addr;
-                            metrics.send_instant = Some(submit_start);
-                            metrics.gmp_destination_chain =
-                                crate::types::HubChain::NAME.to_string();
-                            metrics.gmp_destination_address = gmp_dest;
-                            // Stream to concurrent verification
-                            if metrics.success {
-                                let pending = super::verify::tx_to_pending_its(&metrics, false);
-                                let _ = vtx.send(pending);
-                            }
-                            metrics
+                match solana::send_its_interchain_transfer(
+                    &rpc,
+                    &kp,
+                    &tid,
+                    &source_ata,
+                    &m,
+                    &dc,
+                    &da,
+                    AMOUNT_PER_TX,
+                    gv,
+                ) {
+                    Ok((_sig, mut metrics)) => {
+                        metrics.signature =
+                            solana::extract_its_message_id(&rpc, &metrics.signature)
+                                .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
+                        metrics.source_address = source_addr;
+                        metrics.send_instant = Some(submit_start);
+                        metrics.gmp_destination_chain = crate::types::HubChain::NAME.to_string();
+                        metrics.gmp_destination_address = gmp_dest;
+                        // Stream to concurrent verification
+                        if metrics.success {
+                            let pending = super::verify::tx_to_pending_its(&metrics, false);
+                            let _ = vtx.send(pending);
                         }
-                        Err(e) => {
-                            #[allow(clippy::cast_possible_truncation)]
-                            let elapsed_ms = submit_start.elapsed().as_millis() as u64;
-                            TxMetrics {
-                                signature: String::new(),
-                                submit_time_ms: elapsed_ms,
-                                confirm_time_ms: None,
-                                latency_ms: None,
-                                compute_units: None,
-                                slot: None,
-                                success: false,
-                                error: Some(e.to_string()),
-                                payload: Vec::new(),
-                                payload_hash: String::new(),
-                                source_address: String::new(),
-                                gmp_destination_chain: String::new(),
-                                gmp_destination_address: String::new(),
-                                send_instant: None,
-                                amplifier_timing: None,
-                            }
+                        metrics
+                    }
+                    Err(e) => {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let elapsed_ms = submit_start.elapsed().as_millis() as u64;
+                        TxMetrics {
+                            signature: String::new(),
+                            submit_time_ms: elapsed_ms,
+                            confirm_time_ms: None,
+                            latency_ms: None,
+                            compute_units: None,
+                            slot: None,
+                            success: false,
+                            error: Some(e.to_string()),
+                            payload: Vec::new(),
+                            payload_hash: String::new(),
+                            source_address: String::new(),
+                            gmp_destination_chain: String::new(),
+                            gmp_destination_address: String::new(),
+                            send_instant: None,
+                            amplifier_timing: None,
                         }
                     }
-                })
-            });
+                }
+            })
+        });
 
-        let result = super::sustained::run_sustained_loop(
-            tps_n,
-            duration_secs,
-            key_cycle,
-            None,
-            make_task,
-            Some(send_done),
-            spinner,
-        )
-        .await;
+    let result = super::sustained::run_sustained_loop(
+        tps_n,
+        duration_secs,
+        key_cycle,
+        None,
+        make_task,
+        Some(send_done),
+        spinner,
+    )
+    .await;
 
-        let mut report = super::sustained::build_sustained_report(
-            result,
-            src,
-            dest,
-            &format!("{its_proxy_addr}"),
-            total_expected,
-            num_keys,
-        );
+    let mut report = super::sustained::build_sustained_report(
+        result,
+        src,
+        dest,
+        &format!("{}", evm.its_proxy_addr),
+        sizing.total_expected,
+        sizing.num_keys,
+    );
 
-        let (verification, timings) = verify_handle.await??;
-        for (msg_id, timing) in timings {
-            if let Some(tx) = report
-                .transactions
-                .iter_mut()
-                .find(|t| t.signature == msg_id)
-            {
-                tx.amplifier_timing = Some(timing);
-            }
+    let (verification, timings) = verify_handle.await??;
+    for (msg_id, timing) in timings {
+        if let Some(tx) = report
+            .transactions
+            .iter_mut()
+            .find(|t| t.signature == msg_id)
+        {
+            tx.amplifier_timing = Some(timing);
         }
-        report.verification = Some(verification);
-
-        return finish_report(&args, &mut report, test_start);
     }
-    // === END SUSTAINED MODE ===
+    report.verification = Some(verification);
+
+    finish_report(args, &mut report, test_start)
+}
+
+/// Drive the burst-mode pipeline: fan out the Solana ITS transfers, batch-
+/// verify on the EVM destination, and hand off to `finish_report`.
+async fn run_burst_pipeline(
+    args: &LoadTestArgs,
+    evm: &EvmTargets,
+    keypairs: &[Arc<Keypair>],
+    transfer: &ItsTransferSpec,
+    evm_rpc_url: &str,
+) -> eyre::Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let key_count = keypairs.len();
+    let token_id = transfer.token_id;
+    let mint = transfer.mint;
+    let gas_value = transfer.gas_value;
 
     // --- Parallel sends ---
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
@@ -370,19 +497,19 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let mut tasks = Vec::with_capacity(key_count);
 
-    for kp in &keypairs {
+    for kp in keypairs {
         let metrics_clone = Arc::clone(&metrics_list);
         let counter = Arc::clone(&confirmed_counter);
         let sp = spinner.clone();
         let total = key_count;
         let rpc = args.source_rpc.clone();
         let dc = dest.to_string();
-        let da = dest_address_bytes.clone();
+        let da = transfer.dest_address_bytes.clone();
         let tid = token_id;
         let m = mint;
         let gv = gas_value;
         let kp = kp.clone();
-        let gmp_dest_addr = axelarnet_gw_addr.clone();
+        let gmp_dest_addr = evm.axelarnet_gw_addr.clone();
 
         let handle = tokio::spawn(async move {
             let submit_start = Instant::now();
@@ -489,7 +616,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
-        destination_address: format!("{its_proxy_addr}"),
+        destination_address: format!("{}", evm.its_proxy_addr),
         protocol: String::new(),
         tps: None,
         duration_secs: None,
@@ -537,15 +664,15 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
-        &format!("{its_proxy_addr}"),
-        evm_gateway_addr,
-        &evm_rpc_url,
+        &format!("{}", evm.its_proxy_addr),
+        evm.evm_gateway_addr,
+        evm_rpc_url,
         &mut report.transactions,
     )
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &mut report, test_start)
+    finish_report(args, &mut report, test_start)
 }
 
 // ---------------------------------------------------------------------------
