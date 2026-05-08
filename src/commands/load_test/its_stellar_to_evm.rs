@@ -139,13 +139,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     );
 
     // --- Burst vs sustained ---
-    let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
+    let sustained_params = args.tps.zip(args.duration_secs);
+    let burst_mode = sustained_params.is_none();
     let (num_keys, total_expected) = if burst_mode {
         let n = args.num_txs.max(1) as usize;
         (n, args.num_txs.max(1))
     } else {
-        let tps = args.tps.unwrap() as usize;
-        let dur = args.duration_secs.unwrap();
+        let (tps, dur) = sustained_params.expect("burst_mode is false");
+        let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
 
@@ -181,7 +182,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let amount_per_key = if burst_mode {
         AMOUNT_PER_KEY
     } else {
-        let txs_per_key = args.duration_secs.unwrap().div_ceil(args.key_cycle);
+        let txs_per_key = sustained_params
+            .expect("burst_mode is false")
+            .1
+            .div_ceil(args.key_cycle);
         AMOUNT_PER_TX.saturating_mul(txs_per_key).saturating_mul(2)
     };
     distribute_token_balances(
@@ -202,8 +206,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     // --- Sustained mode ---
     if !burst_mode {
-        let tps_n = args.tps.unwrap() as usize;
-        let duration_secs = args.duration_secs.unwrap();
+        let tps_n = sustained_params.expect("burst_mode is false").0 as usize;
+        let duration_secs = sustained_params.expect("burst_mode is false").1;
         let key_cycle = args.key_cycle as usize;
 
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();

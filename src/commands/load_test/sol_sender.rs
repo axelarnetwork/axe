@@ -288,8 +288,14 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     send_done: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     spinner_tx: tokio::sync::oneshot::Sender<indicatif::ProgressBar>,
 ) -> eyre::Result<LoadTestReport> {
-    let tps = args.tps.unwrap() as usize;
-    let duration_secs = args.duration_secs.unwrap();
+    // `run_sustained` is only called from sustained-mode dispatch, where
+    // both `tps` and `duration_secs` have already been validated as `Some`.
+    let tps = args
+        .tps
+        .expect("run_sustained called outside sustained mode") as usize;
+    let duration_secs = args
+        .duration_secs
+        .expect("run_sustained called outside sustained mode");
     let key_cycle = args.key_cycle as usize;
     let pool_size = tps * key_cycle;
     let total_expected = tps as u64 * duration_secs;

@@ -855,11 +855,12 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     let destination_address = format!("{sender_receiver_addr}");
 
     // --- Burst vs sustained ---
-    let sustained_mode = args.tps.is_some() && args.duration_secs.is_some();
-    let num_keys = if sustained_mode {
-        args.tps.unwrap() as usize * args.key_cycle as usize
-    } else {
-        args.num_txs.max(1) as usize
+    // Destructure the sustained-mode params once; later branches rely on
+    // `Some(...)` here instead of brittle `.unwrap()` calls.
+    let sustained_params = args.tps.zip(args.duration_secs);
+    let num_keys = match sustained_params {
+        Some((tps, _)) => tps as usize * args.key_cycle as usize,
+        None => args.num_txs.max(1) as usize,
     };
     ui::info(&format!("deriving {num_keys} Stellar keys..."));
     let wallets = crate::commands::load_test::stellar_sender::derive_wallets(&main_seed, num_keys)?;
@@ -876,7 +877,7 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     };
 
     let test_start = Instant::now();
-    let mut report = if sustained_mode {
+    let mut report = if let Some((tps, duration_secs)) = sustained_params {
         let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
         let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
@@ -905,8 +906,7 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
         });
 
         let spinner = ui::wait_spinner(&format!(
-            "[0/{}s] starting sustained Stellar GMP send...",
-            args.duration_secs.unwrap()
+            "[0/{duration_secs}s] starting sustained Stellar GMP send..."
         ));
         let _ = spinner_tx.send(spinner.clone());
 
@@ -923,8 +923,8 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
             args.destination_axelar_id.clone(),
             destination_address.clone(),
             payload_override,
-            args.tps.unwrap() as usize,
-            args.duration_secs.unwrap(),
+            tps as usize,
+            duration_secs,
             args.key_cycle as usize,
             Some(verify_tx),
             Some(send_done),
@@ -941,7 +941,7 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
             src,
             dest,
             &destination_address,
-            args.tps.unwrap() * args.duration_secs.unwrap(),
+            tps * duration_secs,
             num_keys,
         );
         let (verification, timings) = verify_handle.await??;
