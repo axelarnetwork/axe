@@ -1749,52 +1749,6 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     Ok((report, timings))
 }
 
-/// Build a PendingTx for streaming GMP verification when the destination is
-/// Stellar — populates `gmp_destination_address` so the Stellar checker
-/// has the contract C-address to query.
-#[allow(dead_code)]
-pub(super) fn tx_to_pending_stellar_gmp(
-    tx: &TxMetrics,
-    has_voting_verifier: bool,
-    destination_contract: &str,
-    source_type: SourceChainType,
-) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    let message_id = match source_type {
-        SourceChainType::Evm
-        | SourceChainType::Xrpl
-        | SourceChainType::Stellar
-        | SourceChainType::Sui => tx.signature.clone(),
-        SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
-        }
-    };
-    PendingTx {
-        idx: 0,
-        message_id,
-        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-        source_address: tx.source_address.clone(),
-        contract_addr: Address::ZERO,
-        payload_hash,
-        payload_hash_hex: tx.payload_hash.clone(),
-        command_id: None,
-        gmp_destination_chain: tx.gmp_destination_chain.clone(),
-        gmp_destination_address: destination_contract.to_string(),
-        timing: AmplifierTiming::default(),
-        failed: false,
-        fail_reason: None,
-        phase: if has_voting_verifier {
-            Phase::Voted
-        } else {
-            Phase::Routed
-        },
-        second_leg_message_id: None,
-        second_leg_payload_hash: None,
-        second_leg_source_address: None,
-        second_leg_destination_address: None,
-    }
-}
-
 /// Convert a confirmed TxMetrics into a PendingTx for Solana verification.
 pub(super) fn tx_to_pending_solana(
     tx: &TxMetrics,
