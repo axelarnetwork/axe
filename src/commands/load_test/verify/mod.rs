@@ -31,7 +31,7 @@ mod report;
 mod state;
 
 use self::report::{compute_peak_throughput, compute_verification_report};
-use self::state::{ApprovalResult, Phase, RealTimeStats, phase_counts};
+use self::state::{Phase, RealTimeStats, phase_counts};
 
 // Re-export `PendingTx` to the parent `load_test` module so the per-pair
 // runners can receive it back from the `tx_to_pending_*` constructors and
@@ -81,166 +81,7 @@ enum DestinationChecker<'a, P: Provider> {
     },
 }
 
-#[allow(dead_code)]
 impl<P: Provider> DestinationChecker<'_, P> {
-    async fn check_approved(
-        &self,
-        tx: &PendingTx,
-        _idx: usize,
-        source_chain: &str,
-    ) -> Result<ApprovalResult> {
-        match self {
-            Self::Evm { gw_contract } => {
-                let approved = check_evm_is_message_approved(
-                    gw_contract,
-                    source_chain,
-                    &tx.message_id,
-                    &tx.source_address,
-                    tx.contract_addr,
-                    tx.payload_hash,
-                )
-                .await?;
-                if approved {
-                    Ok(ApprovalResult::Approved)
-                } else {
-                    // tx is already routed, so false = already executed
-                    Ok(ApprovalResult::AlreadyExecuted)
-                }
-            }
-            Self::Solana { rpc_client, .. } => {
-                let client = rpc_client.clone();
-                let cmd_id = tx.command_id.unwrap_or_default();
-                let result = tokio::task::spawn_blocking(move || {
-                    check_solana_incoming_message(&client, &cmd_id)
-                })
-                .await??;
-                match result {
-                    Some(0) => Ok(ApprovalResult::Approved),
-                    Some(_) => Ok(ApprovalResult::AlreadyExecuted),
-                    None => Ok(ApprovalResult::NotYet),
-                }
-            }
-            Self::Stellar {
-                client,
-                gateway_contract,
-                signer_pk,
-                ..
-            } => {
-                let approved = client
-                    .gateway_is_message_approved(
-                        signer_pk,
-                        gateway_contract,
-                        source_chain,
-                        &tx.message_id,
-                        &tx.source_address,
-                        // For GMP, contract_address is the destination C-address;
-                        // we stash that in `payload_hash_hex` slot? No — use a
-                        // dedicated field. PendingTx.gmp_destination_address
-                        // holds the destination contract for non-ITS flows.
-                        &tx.gmp_destination_address,
-                        tx.payload_hash.0,
-                    )
-                    .await
-                    .unwrap_or(None);
-                match approved {
-                    Some(true) => Ok(ApprovalResult::Approved),
-                    Some(false) => Ok(ApprovalResult::AlreadyExecuted),
-                    None => Ok(ApprovalResult::NotYet),
-                }
-            }
-            Self::Sui {
-                client,
-                gateway_pkg,
-                ..
-            } => {
-                // Sui events are immutable; check Executed first (it
-                // implies Approved). Two queries; both are idempotent.
-                let executed_event_type = format!("{gateway_pkg}::events::MessageExecuted");
-                let approved_event_type = format!("{gateway_pkg}::events::MessageApproved");
-                let executed = client
-                    .has_message_executed(&executed_event_type, source_chain, &tx.message_id)
-                    .await
-                    .unwrap_or(false);
-                if executed {
-                    return Ok(ApprovalResult::AlreadyExecuted);
-                }
-                let approved = client
-                    .has_message_approved(&approved_event_type, source_chain, &tx.message_id)
-                    .await
-                    .unwrap_or(false);
-                if approved {
-                    Ok(ApprovalResult::Approved)
-                } else {
-                    Ok(ApprovalResult::NotYet)
-                }
-            }
-        }
-    }
-
-    async fn check_executed(
-        &self,
-        tx: &PendingTx,
-        _idx: usize,
-        source_chain: &str,
-    ) -> Result<bool> {
-        match self {
-            Self::Evm { gw_contract } => {
-                let approved = check_evm_is_message_approved(
-                    gw_contract,
-                    source_chain,
-                    &tx.message_id,
-                    &tx.source_address,
-                    tx.contract_addr,
-                    tx.payload_hash,
-                )
-                .await?;
-                // false = approval consumed = executed
-                Ok(!approved)
-            }
-            Self::Solana { rpc_client, .. } => {
-                let client = rpc_client.clone();
-                let cmd_id = tx.command_id.unwrap_or_default();
-                let result = tokio::task::spawn_blocking(move || {
-                    check_solana_incoming_message(&client, &cmd_id)
-                })
-                .await??;
-                match result {
-                    Some(status) if status != 0 => Ok(true),
-                    _ => Ok(false),
-                }
-            }
-            Self::Stellar {
-                client,
-                gateway_contract,
-                signer_pk,
-                ..
-            } => {
-                let executed = client
-                    .gateway_is_message_executed(
-                        signer_pk,
-                        gateway_contract,
-                        source_chain,
-                        &tx.message_id,
-                    )
-                    .await
-                    .unwrap_or(None);
-                Ok(matches!(executed, Some(true)))
-            }
-            Self::Sui {
-                client,
-                gateway_pkg,
-                ..
-            } => {
-                let event_type = format!("{gateway_pkg}::events::MessageExecuted");
-                let executed = client
-                    .has_message_executed(&event_type, source_chain, &tx.message_id)
-                    .await
-                    .unwrap_or(false);
-                Ok(executed)
-            }
-        }
-    }
-
     fn approval_label(&self) -> &str {
         match self {
             Self::Evm { .. } => "EVM approval",
@@ -258,31 +99,6 @@ impl<P: Provider> DestinationChecker<'_, P> {
             Self::Sui { .. } => "Sui execution",
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Check outcome — returned from parallel checks, applied to txs afterward
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-enum CheckOutcome {
-    /// No change (not ready yet, or tx was already terminal).
-    NotYet,
-    /// Phase completed — record timing and advance.
-    PhaseComplete { elapsed: f64 },
-    /// Voted phase: no VotingVerifier, just advance to Routed.
-    SkipVoting,
-    /// Approved check found the tx already executed — skip to Done.
-    AlreadyExecuted { elapsed: f64 },
-    /// Second-leg discovered — carries the extracted info.
-    SecondLegDiscovered {
-        message_id: String,
-        payload_hash: String,
-        source_address: String,
-        destination_address: String,
-    },
-    /// Check returned an error.
-    Error(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -780,10 +596,6 @@ async fn poll_pipeline<P: Provider>(
 /// Second-leg message info extracted from hub execution tx.
 struct SecondLegInfo {
     message_id: String,
-    #[allow(dead_code)]
-    source_chain: String,
-    #[allow(dead_code)]
-    destination_chain: String,
     payload_hash: String,
     source_address: String,
     destination_address: String,
@@ -846,7 +658,10 @@ async fn discover_second_leg(
             })
         };
 
-        if let (Some(msg_id), Some(src), Some(dst), Some(ph)) = (
+        // `source_chain` and `destination_chain` gate that we got a hub
+        // execution event but aren't consumed downstream, so they don't
+        // make it into `SecondLegInfo`.
+        if let (Some(msg_id), Some(_), Some(_), Some(ph)) = (
             get_attr("message_id"),
             get_attr("source_chain"),
             get_attr("destination_chain"),
@@ -854,8 +669,6 @@ async fn discover_second_leg(
         ) {
             return Ok(Some(SecondLegInfo {
                 message_id: msg_id,
-                source_chain: src,
-                destination_chain: dst,
                 payload_hash: ph,
                 source_address: get_attr("source_address").unwrap_or_default(),
                 destination_address: get_attr("destination_address").unwrap_or_default(),
@@ -1385,14 +1198,11 @@ async fn poll_pipeline_its_hub(
 
 /// Source chain type — determines how message IDs are constructed.
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum SourceChainType {
     /// Solana source: message ID = `{signature}-{group}.{index}`
     Svm,
     /// EVM source: message ID = `{tx_hash}-{event_index}` (already in tx.signature)
     Evm,
-    /// XRPL source: message ID = `0x{lowercase_tx_hash}` (already in tx.signature)
-    Xrpl,
     /// Stellar source: message ID = `0x{lowercase_tx_hash}-{event_index}`
     Stellar,
     /// Sui source: message ID = `{base58_tx_digest}-{event_index}`
@@ -1459,10 +1269,9 @@ pub async fn verify_onchain<P: Provider>(
             PendingTx {
                 idx,
                 message_id: match source_type {
-                    SourceChainType::Evm
-                    | SourceChainType::Xrpl
-                    | SourceChainType::Stellar
-                    | SourceChainType::Sui => tx.signature.clone(),
+                    SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+                        tx.signature.clone()
+                    }
                     SourceChainType::Svm => {
                         format!("{}-{}.1", tx.signature, solana_call_contract_index())
                     }
@@ -1624,10 +1433,9 @@ pub async fn verify_onchain_stellar_gmp(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm
-                | SourceChainType::Xrpl
-                | SourceChainType::Stellar
-                | SourceChainType::Sui => tx.signature.clone(),
+                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+                    tx.signature.clone()
+                }
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -1759,10 +1567,9 @@ pub(super) fn tx_to_pending_solana(
 ) -> PendingTx {
     let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
     let message_id = match source_type {
-        SourceChainType::Evm
-        | SourceChainType::Xrpl
-        | SourceChainType::Stellar
-        | SourceChainType::Sui => tx.signature.clone(),
+        SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+            tx.signature.clone()
+        }
         SourceChainType::Svm => {
             format!("{}-{}.1", tx.signature, solana_call_contract_index())
         }
@@ -1777,51 +1584,6 @@ pub(super) fn tx_to_pending_solana(
         payload_hash,
         payload_hash_hex: tx.payload_hash.clone(),
         command_id: Some(keccak256(&cmd_input).into()),
-        gmp_destination_chain: String::new(),
-        gmp_destination_address: String::new(),
-        timing: AmplifierTiming::default(),
-        failed: false,
-        fail_reason: None,
-        phase: if has_voting_verifier {
-            Phase::Voted
-        } else {
-            Phase::Routed
-        },
-        second_leg_message_id: None,
-        second_leg_payload_hash: None,
-        second_leg_source_address: None,
-        second_leg_destination_address: None,
-    }
-}
-
-/// Convert a confirmed TxMetrics into a PendingTx for EVM GMP verification.
-#[allow(dead_code)]
-pub(super) fn tx_to_pending_evm(
-    tx: &TxMetrics,
-    _source_chain: &str,
-    contract_addr: Address,
-    has_voting_verifier: bool,
-    source_type: SourceChainType,
-) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    let message_id = match source_type {
-        SourceChainType::Evm
-        | SourceChainType::Xrpl
-        | SourceChainType::Stellar
-        | SourceChainType::Sui => tx.signature.clone(),
-        SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
-        }
-    };
-    PendingTx {
-        idx: 0,
-        message_id,
-        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-        source_address: tx.source_address.clone(),
-        contract_addr,
-        payload_hash,
-        payload_hash_hex: tx.payload_hash.clone(),
-        command_id: None,
         gmp_destination_chain: String::new(),
         gmp_destination_address: String::new(),
         timing: AmplifierTiming::default(),
@@ -1942,71 +1704,9 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
 // Sui destination verifier (GMP)
 // ---------------------------------------------------------------------------
 
-/// Verify *->Sui GMP transactions through Amplifier. Uses Sui events polling
-/// (`MessageApproved` / `MessageExecuted` on the AxelarGateway events module)
-/// for the destination-side phases.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub async fn verify_onchain_sui_gmp_streaming(
-    config: &Path,
-    source_chain: &str,
-    destination_chain: &str,
-    destination_address: &str,
-    sui_rpc: &str,
-    mut rx: mpsc::UnboundedReceiver<PendingTx>,
-    send_done: Arc<AtomicBool>,
-    spinner: indicatif::ProgressBar,
-) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
-
-    let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
-    let sui_client = crate::sui::SuiClient::new(sui_rpc);
-
-    let checker: DestinationChecker<'_, alloy::providers::RootProvider> = DestinationChecker::Sui {
-        client: sui_client,
-        gateway_pkg,
-        _phantom: std::marker::PhantomData,
-    };
-
-    let mut txs: Vec<PendingTx> = Vec::new();
-
-    let peaks = poll_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        Some(&cosm_gateway),
-        source_chain,
-        destination_chain,
-        destination_address,
-        &checker,
-        None,
-        None,
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
-    )
-    .await;
-
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
-}
-
 /// Burst-mode Sui destination verifier — block on confirmed metrics array.
+/// Uses Sui events polling (`MessageApproved` / `MessageExecuted` on the
+/// AxelarGateway events module) for the destination-side phases.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_sui_gmp(
     config: &Path,
@@ -2056,10 +1756,9 @@ pub async fn verify_onchain_sui_gmp(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm
-                | SourceChainType::Xrpl
-                | SourceChainType::Stellar
-                | SourceChainType::Sui => tx.signature.clone(),
+                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+                    tx.signature.clone()
+                }
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -2234,10 +1933,9 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
             let message_id = match source_type {
-                SourceChainType::Evm
-                | SourceChainType::Xrpl
-                | SourceChainType::Stellar
-                | SourceChainType::Sui => tx.signature.clone(),
+                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+                    tx.signature.clone()
+                }
                 SourceChainType::Svm => {
                     format!("{}-{}.1", tx.signature, solana_call_contract_index())
                 }
@@ -3642,139 +3340,6 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     Ok(())
 }
 
-/// Wait for an ITS `deploy_remote_interchain_token` message to land on a
-/// Stellar destination. Mirrors the EVM/Solana variants but checks the
-/// destination Soroban gateway via `is_message_executed` for the second-leg
-/// id. Stellar gateway state is small (mint+associate) so we poll
-/// `is_message_executed` rather than tracking PDAs.
-///
-/// Staged: not yet wired into a runner. Lives here so the `*_to_stellar`
-/// ITS modules (currently bailed at dispatch pending Stellar trusted-chain
-/// upstream config) can pick it up unchanged.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub async fn wait_for_its_remote_deploy_to_stellar(
-    config: &Path,
-    source_chain: &str,
-    destination_chain: &str,
-    deploy_message_id: &str,
-    stellar_rpc: &str,
-    stellar_network_type: &str,
-    stellar_gateway_addr: &str,
-    signer_pk: [u8; 32],
-) -> Result<()> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let rpc = read_axelar_rpc(config)?;
-
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
-
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
-
-    let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
-
-    ui::kv("deploy message ID", deploy_message_id);
-    let spinner =
-        ui::wait_spinner("waiting for remote deploy to propagate through hub to Stellar...");
-    let start = Instant::now();
-    let timeout = Duration::from_secs(300);
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum DeployPhase {
-        HubApproved,
-        DiscoverSecondLeg,
-        Routed,
-        Executed,
-        Done,
-    }
-
-    let mut phase = DeployPhase::HubApproved;
-    let mut second_leg_id: Option<String> = None;
-
-    loop {
-        if start.elapsed() >= timeout {
-            spinner.finish_and_clear();
-            eyre::bail!(
-                "remote deploy timed out after {}s at phase {phase:?}",
-                timeout.as_secs()
-            );
-        }
-
-        match phase {
-            DeployPhase::HubApproved => {
-                if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
-                    .await
-                    .unwrap_or(false)
-                {
-                    spinner.set_message("remote deploy: hub approved");
-                    phase = DeployPhase::DiscoverSecondLeg;
-                    continue;
-                }
-                spinner.set_message("remote deploy: waiting for hub approval...");
-            }
-            DeployPhase::DiscoverSecondLeg => {
-                match discover_second_leg(&rpc, deploy_message_id).await {
-                    Ok(Some(info)) => {
-                        spinner.set_message(format!(
-                            "remote deploy: second leg discovered ({})",
-                            info.message_id
-                        ));
-                        second_leg_id = Some(info.message_id);
-                        phase = DeployPhase::Routed;
-                        continue;
-                    }
-                    Ok(None) => {
-                        spinner.set_message("remote deploy: discovering second leg...");
-                    }
-                    Err(e) => {
-                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
-                    }
-                }
-            }
-            DeployPhase::Routed => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
-                if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
-                    .await
-                    .unwrap_or(false)
-                {
-                    spinner.set_message("remote deploy: routed to Stellar");
-                    phase = DeployPhase::Executed;
-                    continue;
-                }
-                spinner.set_message("remote deploy: waiting for routing...");
-            }
-            DeployPhase::Executed => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
-                match stellar_client
-                    .gateway_is_message_executed(&signer_pk, stellar_gateway_addr, "axelar", sl_id)
-                    .await
-                {
-                    Ok(Some(true)) => {
-                        phase = DeployPhase::Done;
-                        continue;
-                    }
-                    _ => {
-                        spinner.set_message("remote deploy: waiting for Stellar execution...");
-                    }
-                }
-            }
-            DeployPhase::Done => break,
-        }
-
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-
-    spinner.finish_and_clear();
-    ui::success("remote token deployed on Stellar");
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Single-shot check helpers
 // ---------------------------------------------------------------------------
@@ -3867,156 +3432,6 @@ async fn check_hub_approved(
 const COSMOS_BATCH_SIZE: usize = 10;
 /// Solana's getMultipleAccounts supports up to 100 accounts per call.
 const SOLANA_BATCH_SIZE: usize = 100;
-/// Max concurrent batch requests per phase per poll cycle.
-#[allow(dead_code)]
-const MAX_BATCH_CONCURRENCY: usize = 10;
-
-/// Batch-check VotingVerifier `messages_status` for multiple messages.
-/// Returns a `Vec<bool>` aligned with the input `txs` slice — `true` = succeeded.
-#[allow(dead_code)]
-async fn batch_check_voting_verifier(
-    lcd: &str,
-    voting_verifier: &str,
-    source_chain: &str,
-    destination_chain: &str,
-    destination_address: &str,
-    txs: &[(usize, &PendingTx)],
-) -> Vec<(usize, bool)> {
-    let mut results = Vec::with_capacity(txs.len());
-    for chunk in txs.chunks(COSMOS_BATCH_SIZE) {
-        let messages: Vec<_> = chunk
-            .iter()
-            .map(|(_, tx)| {
-                json!({
-                    "cc_id": {
-                        "source_chain": source_chain,
-                        "message_id": tx.message_id,
-                    },
-                    "source_address": tx.source_address,
-                    "destination_chain": destination_chain,
-                    "destination_address": destination_address,
-                    "payload_hash": tx.payload_hash_hex,
-                })
-            })
-            .collect();
-        let query = json!({ "messages_status": messages });
-        match lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await {
-            Ok(resp) => {
-                // Response is an array of {message, status} objects.
-                if let Some(arr) = resp.as_array() {
-                    for (j, item) in arr.iter().enumerate() {
-                        if j < chunk.len() {
-                            let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
-                            results.push((chunk[j].0, status.to_lowercase().contains("succeeded")));
-                        }
-                    }
-                } else {
-                    // Fallback: treat entire response as single check.
-                    let s = serde_json::to_string(&resp).unwrap_or_default();
-                    let ok = s.to_lowercase().contains("succeeded");
-                    for (idx, _) in chunk {
-                        results.push((*idx, ok));
-                    }
-                }
-            }
-            Err(_) => {
-                // On error, mark all as not-yet so they're retried next cycle.
-                for (idx, _) in chunk {
-                    results.push((*idx, false));
-                }
-            }
-        }
-    }
-    results
-}
-
-/// Batch-check Cosmos Gateway `outgoing_messages` for multiple messages.
-#[allow(dead_code)]
-async fn batch_check_cosmos_routed(
-    lcd: &str,
-    cosm_gateway: &str,
-    source_chain: &str,
-    txs: &[(usize, &PendingTx)],
-) -> Vec<(usize, bool)> {
-    let mut results = Vec::with_capacity(txs.len());
-    for chunk in txs.chunks(COSMOS_BATCH_SIZE) {
-        let cc_ids: Vec<_> = chunk
-            .iter()
-            .map(|(_, tx)| {
-                json!({
-                    "source_chain": source_chain,
-                    "message_id": tx.message_id,
-                })
-            })
-            .collect();
-        let query = json!({ "outgoing_messages": cc_ids });
-        match lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await {
-            Ok(resp) => {
-                if let Some(arr) = resp.as_array() {
-                    for (j, item) in arr.iter().enumerate() {
-                        if j < chunk.len() {
-                            results.push((chunk[j].0, !item.is_null()));
-                        }
-                    }
-                } else {
-                    for (idx, _) in chunk {
-                        results.push((*idx, false));
-                    }
-                }
-            }
-            Err(_) => {
-                for (idx, _) in chunk {
-                    results.push((*idx, false));
-                }
-            }
-        }
-    }
-    results
-}
-
-/// Batch-check AxelarnetGateway `executable_messages` for multiple messages.
-#[allow(dead_code)]
-async fn batch_check_hub_approved(
-    lcd: &str,
-    axelarnet_gateway: &str,
-    source_chain: &str,
-    txs: &[(usize, &PendingTx)],
-) -> Vec<(usize, bool)> {
-    let mut results = Vec::with_capacity(txs.len());
-    for chunk in txs.chunks(COSMOS_BATCH_SIZE) {
-        let cc_ids: Vec<_> = chunk
-            .iter()
-            .map(|(_, tx)| {
-                json!({
-                    "source_chain": source_chain,
-                    "message_id": tx.message_id,
-                })
-            })
-            .collect();
-        let query = json!({ "executable_messages": { "cc_ids": cc_ids } });
-        match lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &query).await {
-            Ok(resp) => {
-                if let Some(arr) = resp.as_array() {
-                    for (j, item) in arr.iter().enumerate() {
-                        if j < chunk.len() {
-                            results.push((chunk[j].0, !item.is_null()));
-                        }
-                    }
-                } else {
-                    for (idx, _) in chunk {
-                        results.push((*idx, false));
-                    }
-                }
-            }
-            Err(_) => {
-                for (idx, _) in chunk {
-                    results.push((*idx, false));
-                }
-            }
-        }
-    }
-    results
-}
 
 // ---------------------------------------------------------------------------
 // Owned-data batch helpers — chunks run concurrently via join_all

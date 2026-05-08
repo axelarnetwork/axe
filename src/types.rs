@@ -318,12 +318,6 @@ impl From<ChainAxelarId> for String {
 pub enum ItsMessageType {
     InterchainTransfer = 0,
     DeployInterchainToken = 1,
-    /// Wrapping discriminator for outbound (source → hub) messages. Defined
-    /// here for completeness even though we don't currently send `SendToHub`
-    /// envelopes from this codebase — the Solana ITS program builds them on
-    /// our behalf via `solana_axelar_its::encoding::HubMessage::SendToHub`.
-    #[allow(dead_code)]
-    SendToHub = 3,
     ReceiveFromHub = 4,
 }
 

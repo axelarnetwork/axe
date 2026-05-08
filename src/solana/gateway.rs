@@ -310,7 +310,6 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
 
 /// Deserialize the execute_data hex string from a Cosmos proof response
 /// into the Solana `ExecuteData` struct.
-#[allow(dead_code)]
 pub fn decode_execute_data(execute_data_hex: &str) -> Result<ExecuteData> {
     let bytes = hex::decode(execute_data_hex)?;
     let execute_data: ExecuteData = borsh::BorshDeserialize::try_from_slice(&bytes)?;
@@ -319,8 +318,7 @@ pub fn decode_execute_data(execute_data_hex: &str) -> Result<ExecuteData> {
 
 /// Step 7a: Initialize a payload verification session on the Solana gateway.
 /// This creates the session PDA that tracks signature verification progress.
-#[allow(dead_code)]
-pub fn initialize_verification_session(
+fn initialize_verification_session(
     rpc_url: &str,
     payer: &Keypair,
     payload_merkle_root: [u8; 32],
@@ -383,8 +381,7 @@ pub fn initialize_verification_session(
 
 /// Step 7b: Verify a single signature against the verification session.
 /// Called once per signer. Can be called in parallel.
-#[allow(dead_code)]
-pub fn verify_signature(
+fn verify_signature(
     rpc_url: &str,
     payer: &Keypair,
     payload_merkle_root: [u8; 32],
@@ -454,8 +451,7 @@ pub fn verify_signature(
 
 /// Step 7c: Approve a message on the Solana gateway after all signatures
 /// have been verified. Creates the IncomingMessage PDA.
-#[allow(dead_code)]
-pub fn approve_message(
+fn approve_message(
     rpc_url: &str,
     payer: &Keypair,
     merklized_message: MerklizedMessage,
@@ -524,7 +520,6 @@ pub fn approve_message(
 /// 1. Initialize verification session
 /// 2. Verify all signatures
 /// 3. Approve the message
-#[allow(dead_code)]
 pub fn approve_messages_on_gateway(
     rpc_url: &str,
     payer: &Keypair,
@@ -624,7 +619,6 @@ pub fn approve_messages_on_gateway(
 /// Execute an approved GMP message on the Memo program.
 /// Calls the Memo program's `execute` instruction which validates the message
 /// against the gateway and logs the memo payload.
-#[allow(dead_code)]
 pub fn execute_on_memo(
     rpc_url: &str,
     payer: &Keypair,

@@ -414,7 +414,6 @@ pub fn migrate_steps(state: &mut State) {
 // Step accessors — keep call sites concise without forcing match arms.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)] // wired up in Phase 2-5 of the typed-state migration
 impl Step {
     /// The `proposalKey` for `CosmosTx` and `CosmosPoll` steps.
     pub fn proposal_key(&self) -> Option<&str> {

@@ -16,8 +16,7 @@ use tokio::sync::Mutex;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::stellar::{
-    StellarClient, StellarWallet, scval_address_account, scval_address_from_str, scval_bytes,
-    scval_string, scval_token,
+    StellarClient, StellarWallet, scval_address_account, scval_bytes, scval_string, scval_token,
 };
 use crate::ui;
 
@@ -448,28 +447,5 @@ pub async fn ensure_funded(
         "funded {} Stellar keys via Friendbot",
         missing.len()
     ));
-    Ok(())
-}
-
-/// Convenience: derive + fund.
-#[allow(dead_code)]
-pub async fn prepare_wallets(
-    client: &StellarClient,
-    main_seed: &[u8; 32],
-    count: usize,
-    use_friendbot: bool,
-) -> Result<Vec<StellarWallet>> {
-    if count == 0 {
-        return Err(eyre!("Stellar load test needs at least 1 ephemeral wallet"));
-    }
-    let wallets = derive_wallets(main_seed, count)?;
-    ensure_funded(client, &wallets, use_friendbot).await?;
-    Ok(wallets)
-}
-
-// Suppress unused warnings while the reverse direction is staged.
-#[allow(dead_code)]
-fn _suppress() -> Result<()> {
-    let _ = scval_address_from_str as fn(&str) -> _;
     Ok(())
 }

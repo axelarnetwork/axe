@@ -17,7 +17,7 @@ use ripemd::Ripemd160;
 use sha2::{Digest, Sha256, Sha512};
 use xrpl_api::{AccountInfoRequest, SubmitRequest, TxRequest};
 use xrpl_binary_codec::{serialize, sign::sign_transaction};
-use xrpl_types::{AccountId, Amount, Blob, DropsAmount, Memo, PaymentTransaction};
+use xrpl_types::{AccountId, Amount, Blob, Memo, PaymentTransaction};
 
 /// Poll interval while waiting for a submitted tx to be validated on the
 /// ledger. XRPL closes ledgers ~every 3–4s, so 2s is a reasonable cadence.
@@ -608,12 +608,6 @@ pub fn faucet_url_for_network(network_type_or_rpc: &str) -> Option<&'static str>
     } else {
         None
     }
-}
-
-/// `DropsAmount` convenience — wraps validation.
-#[allow(dead_code)]
-pub fn drops(d: u64) -> Result<DropsAmount> {
-    DropsAmount::from_drops(d).map_err(|e| eyre!("invalid drops amount {d}: {e}"))
 }
 
 /// Compute the deterministic hash of a signed XRPL transaction blob, returning

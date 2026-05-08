@@ -43,14 +43,6 @@ const SECP256K1_PK_LEN: usize = 33; // compressed
 /// Sui's intent scope for a TransactionData payload: [scope=0, version=0, app_id=0].
 const TX_INTENT: [u8; 3] = [0, 0, 0];
 
-/// Polling cadence + timeout for `wait_for_tx`. Used by Sui ITS work that
-/// is staged but not yet wired into a runner; kept here so the
-/// `SuiClient::wait_for_tx` helper has its constants colocated.
-#[allow(dead_code)]
-const POLL_INTERVAL: Duration = Duration::from_millis(750);
-#[allow(dead_code)]
-const TX_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Public Sui RPCs used as silent fallbacks if the configured endpoint errors.
 /// Mainnet and testnet share keys; we pick by URL hint.
 const TESTNET_FALLBACKS: &[&str] = &[
@@ -183,16 +175,6 @@ impl SuiWallet {
     }
 
     /// Diagnostic label for the keypair scheme. Useful when surfacing
-    /// "you signed with X but the chain config expected Y" errors; not
-    /// referenced by the current GMP runners.
-    #[allow(dead_code)]
-    pub fn scheme_label(&self) -> &'static str {
-        match self.keypair {
-            SuiKeypair::Ed25519 { .. } => "ed25519",
-            SuiKeypair::Secp256k1 { .. } => "secp256k1",
-        }
-    }
-
     /// Build the wire-format intent signature for the given pre-intent
     /// message (full bytes, including the 3-byte intent prefix).
     ///
@@ -279,11 +261,6 @@ impl SuiClient {
                 .build()
                 .expect("reqwest client build"),
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn rpc_url(&self) -> &str {
-        &self.primary
     }
 
     /// JSON-RPC call with silent fallback on transient failures.
@@ -430,26 +407,6 @@ impl SuiClient {
         ))
     }
 
-    /// Fetch ObjectReference for an owned object (used as ImmutableOrOwned input).
-    /// Staged for the deferred Sui ITS source-side PTB construction (needs
-    /// owned `Coin<T>` object refs). Not yet wired.
-    #[allow(dead_code)]
-    pub async fn get_owned_object_ref(&self, object_id: &SuiAddress) -> Result<ObjectReference> {
-        let r = self
-            .call(
-                "sui_getObject",
-                json!([
-                    owner_addr_hex(object_id),
-                    {"showOwner": false, "showContent": false}
-                ]),
-            )
-            .await?;
-        object_ref_from_json(
-            r.get("data")
-                .ok_or_else(|| eyre!("getObject missing data: {r}"))?,
-        )
-    }
-
     /// Submit a fully-signed transaction. Returns the tx digest.
     pub async fn execute_transaction(
         &self,
@@ -500,78 +457,6 @@ impl SuiClient {
             error,
             events,
         })
-    }
-
-    /// Wait for a transaction to be confirmed and return its full details.
-    /// Staged for the deferred Sui ITS work (used to wait for a remote-deploy
-    /// or interchain-transfer tx before its events become queryable). Not
-    /// yet wired into the GMP runners.
-    #[allow(dead_code)]
-    pub async fn wait_for_tx(&self, digest: &str) -> Result<Value> {
-        let start = std::time::Instant::now();
-        loop {
-            match self
-                .call(
-                    "sui_getTransactionBlock",
-                    json!([
-                        digest,
-                        {"showEffects": true, "showEvents": true, "showInput": false}
-                    ]),
-                )
-                .await
-            {
-                Ok(v) if v.is_object() => return Ok(v),
-                _ => {
-                    if start.elapsed() >= TX_TIMEOUT {
-                        return Err(eyre!("timed out waiting for Sui tx {digest}"));
-                    }
-                    tokio::time::sleep(POLL_INTERVAL).await;
-                }
-            }
-        }
-    }
-
-    /// Query events emitted by a specific transaction digest. Staged for
-    /// Sui ITS work (the source-side runner inspects its own ContractCall
-    /// event indices); not yet wired.
-    #[allow(dead_code)]
-    pub async fn query_tx_events(&self, digest: &str) -> Result<Vec<Value>> {
-        let tx = self.wait_for_tx(digest).await?;
-        Ok(tx
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    /// `suix_queryEvents` filtered by Move event type. Returns the freshest
-    /// event matching the filter, or None. Staged for Sui ITS work; the
-    /// GMP destination verifier uses `has_matching_event` (paginated)
-    /// instead.
-    #[allow(dead_code)]
-    pub async fn find_event_by_move_type(
-        &self,
-        move_event_type: &str,
-        descending: bool,
-        limit: usize,
-    ) -> Result<Option<Value>> {
-        let r = self
-            .call(
-                "suix_queryEvents",
-                json!([
-                    {"MoveEventType": move_event_type},
-                    null,
-                    limit,
-                    descending,
-                ]),
-            )
-            .await?;
-        let arr = r
-            .get("data")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        Ok(arr.into_iter().next())
     }
 
     /// Query recent `MessageApproved` events from a Move events module
@@ -789,17 +674,6 @@ impl PtbBuilder {
             initial_shared_version,
             mutable,
         )));
-        Argument::Input(idx)
-    }
-
-    /// Add an immutable-or-owned object input to the PTB. Staged for the
-    /// deferred Sui ITS work (passing `Coin<T>` objects into
-    /// `interchain_transfer<T>`); the GMP runner only uses split-coin via
-    /// `Argument::Gas`.
-    #[allow(dead_code)]
-    pub fn owned_object(&mut self, obj_ref: ObjectReference) -> Argument {
-        let idx = self.inputs.len() as u16;
-        self.inputs.push(Input::ImmutableOrOwned(obj_ref));
         Argument::Input(idx)
     }
 

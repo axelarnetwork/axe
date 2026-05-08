@@ -21,13 +21,6 @@ pub(super) enum Phase {
     Done,
 }
 
-#[allow(dead_code)]
-pub(super) enum ApprovalResult {
-    Approved,
-    AlreadyExecuted,
-    NotYet,
-}
-
 /// Per-tx state tracked during batch verification.
 ///
 /// Visibility note: the struct is `pub(in crate::commands::load_test)` (one
