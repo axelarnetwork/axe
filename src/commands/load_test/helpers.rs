@@ -299,7 +299,6 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     Ok(addr)
 }
 
-#[allow(clippy::float_arithmetic)]
 pub(crate) fn print_final_report(report: &LoadTestReport) {
     println!();
     println!(

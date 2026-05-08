@@ -102,7 +102,6 @@ pub(super) fn print_tx_header(
         println!("{} {}", "Compute Units:".bold(), cu);
     }
     {
-        #[allow(clippy::float_arithmetic)]
         let fee = meta.fee as f64 / 1e9;
         println!("{} ◎{fee}", "Fee:".bold());
     }

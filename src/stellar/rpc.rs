@@ -116,7 +116,6 @@ impl StellarClient {
     /// `AxelarGateway` hash so the returned `event_index` matches the
     /// `hex_tx_hash_and_event_index` message-id format expected by the
     /// Stellar `VotingVerifier`.
-    #[allow(clippy::too_many_arguments)]
     pub async fn invoke_contract(
         &self,
         wallet: &StellarWallet,

@@ -97,7 +97,6 @@ pub enum DeployCommands {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)]
 pub enum TestCommands {
     /// Test GMP: send a cross-chain message and relay through the full Amplifier pipeline
     Gmp {

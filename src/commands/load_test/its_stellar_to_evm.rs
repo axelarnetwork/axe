@@ -492,7 +492,6 @@ async fn run_burst_pipeline(
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
@@ -819,7 +818,6 @@ async fn submit_its_transfer(
         .await
     {
         Ok(invoked) => {
-            #[allow(clippy::cast_possible_truncation)]
             let submit_time_ms = submit_start.elapsed().as_millis() as u64;
             let event_index = invoked.event_index.unwrap_or(0);
             let message_id = format!("0x{}-{event_index}", invoked.tx_hash_hex.to_lowercase());
@@ -846,7 +844,6 @@ async fn submit_its_transfer(
             }
         }
         Err(e) => {
-            #[allow(clippy::cast_possible_truncation)]
             let elapsed_ms = submit_start.elapsed().as_millis() as u64;
             TxMetrics {
                 signature: String::new(),

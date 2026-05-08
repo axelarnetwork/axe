@@ -68,7 +68,6 @@ fn prepare_keypairs(
     let derived = keypairs::derive_keypairs(main_keypair, num_keys)?;
     let balances = keypairs::ensure_funded(solana_rpc, main_keypair, &derived)?;
 
-    #[allow(clippy::float_arithmetic)]
     let total_sol: f64 = balances.iter().sum::<u64>() as f64 / 1e9;
     ui::success(&format!(
         "funded {} keys ({:.4} SOL)",
@@ -86,7 +85,6 @@ fn prepare_keypairs(
 ///
 /// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
 /// `SenderReceiver._execute`. When false, payloads use the Solana executable format.
-#[allow(clippy::too_many_lines, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     destination_address: &str,
@@ -103,7 +101,6 @@ pub async fn run_load_test_with_metrics(
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
@@ -185,7 +182,6 @@ pub async fn run_load_test_with_metrics(
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
     let compute_units: Vec<u64> = metrics.iter().filter_map(|m| m.compute_units).collect();
 
-    #[allow(clippy::cast_precision_loss)]
     let report = LoadTestReport {
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
@@ -255,7 +251,6 @@ fn send_sol_tx(
             metrics
         }
         Err(e) => {
-            #[allow(clippy::cast_possible_truncation)]
             let elapsed_ms = submit_start.elapsed().as_millis() as u64;
             TxMetrics {
                 signature: String::new(),
@@ -279,7 +274,6 @@ fn send_sol_tx(
 }
 
 /// Run Solana sustained load test at a controlled TPS rate.
-#[allow(clippy::float_arithmetic)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     evm_destination: bool,
@@ -307,7 +301,6 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
@@ -444,7 +437,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     ))
 }
 
-#[allow(clippy::semicolon_outside_block, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn execute_and_record(
     solana_rpc: &str,
     keypair: Arc<dyn Signer + Send + Sync>,
@@ -472,7 +465,6 @@ async fn execute_and_record(
             metrics_list.lock().await.push(metrics);
         }
         Err(e) => {
-            #[allow(clippy::cast_possible_truncation)]
             let elapsed_ms = submit_start.elapsed().as_millis() as u64;
             let metrics = TxMetrics {
                 signature: String::new(),

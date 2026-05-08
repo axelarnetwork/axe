@@ -30,7 +30,6 @@ pub struct SubmittedTx {
 ///
 /// Returns the fully-formed `Transaction` (unsigned), ready to BCS-serialize
 /// and sign.
-#[allow(clippy::too_many_arguments)]
 pub struct PtbBuilder {
     inputs: Vec<Input>,
     commands: Vec<Command>,
@@ -103,7 +102,6 @@ impl PtbBuilder {
         Argument::NestedResult(cmd_idx, 0)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn move_call(
         &mut self,
         package: SuiAddress,

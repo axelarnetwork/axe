@@ -267,7 +267,6 @@ async fn init_evm_signer_and_provider(
 
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = read_provider.get_balance(deployer_address).await?.to();
         let eth = balance as f64 / 1e18;
@@ -313,7 +312,6 @@ fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<(u128
     };
     let gas_value = U256::from(gas_value_wei);
 
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "gas value",
@@ -815,7 +813,6 @@ async fn run_burst_pipeline(
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
@@ -873,7 +870,6 @@ async fn run_burst_pipeline(
 }
 
 /// Deploy a new interchain token and its remote counterpart.
-#[allow(clippy::too_many_arguments)]
 async fn deploy_its_token<P: Provider>(
     provider: &P,
     factory_addr: Address,
@@ -999,7 +995,6 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
             let tx_hash = *pending.tx_hash();
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     match extract_contract_call_event(&receipt) {
@@ -1054,7 +1049,6 @@ fn make_failure_with_hash(
     error: &str,
     tx_hash: Option<alloy::primitives::TxHash>,
 ) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),

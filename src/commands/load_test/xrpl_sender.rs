@@ -115,7 +115,6 @@ async fn submit_single(
         Err(e) => return fail_metrics(submit_start, &source_addr, &format!("submit: {e}")),
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     let submit_time_ms = submit_start.elapsed().as_millis() as u64;
 
     // XRPL message IDs are `0x{lowercase-hex-tx-hash}` per the
@@ -142,7 +141,6 @@ async fn submit_single(
 }
 
 fn fail_metrics(submit_start: Instant, source: &str, err: &str) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: String::new(),
@@ -248,7 +246,6 @@ pub async fn run_burst(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
 fn build_burst_report(
     metrics: Vec<TxMetrics>,
     source_chain: &str,

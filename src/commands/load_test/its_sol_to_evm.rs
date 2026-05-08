@@ -188,7 +188,6 @@ fn init_solana_client_and_main_keypair(
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
@@ -414,7 +413,6 @@ async fn run_sustained_pipeline(
                         metrics
                     }
                     Err(e) => {
-                        #[allow(clippy::cast_possible_truncation)]
                         let elapsed_ms = submit_start.elapsed().as_millis() as u64;
                         TxMetrics {
                             signature: String::new(),
@@ -553,7 +551,6 @@ async fn run_burst_pipeline(
                     metrics_clone.lock().await.push(metrics);
                 }
                 Err(e) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
                     let metrics = TxMetrics {
                         signature: String::new(),
@@ -612,7 +609,6 @@ async fn run_burst_pipeline(
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
     let compute_units: Vec<u64> = metrics.iter().filter_map(|m| m.compute_units).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
@@ -874,7 +870,6 @@ fn prepare_keypairs(
     let derived = keypairs::derive_keypairs(main_keypair, num_keys)?;
     let balances = keypairs::ensure_funded(solana_rpc, main_keypair, &derived)?;
 
-    #[allow(clippy::float_arithmetic)]
     let total_sol: f64 = balances.iter().sum::<u64>() as f64 / 1e9;
     ui::success(&format!(
         "funded {} keys ({:.4} SOL)",

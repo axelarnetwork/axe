@@ -99,7 +99,6 @@ async fn submit_single(
         .await
     {
         Ok(invoked) => {
-            #[allow(clippy::cast_possible_truncation)]
             let submit_time_ms = submit_start.elapsed().as_millis() as u64;
             // Stellar message IDs are `0x{lowercase_tx_hash}-{event_index}` per
             // the `hex_tx_hash_and_event_index` msg_id format. When
@@ -152,7 +151,6 @@ fn build_send_args(
 }
 
 fn fail_metrics(submit_start: Instant, source: &str, err: &str) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: String::new(),
@@ -245,7 +243,6 @@ pub async fn run_burst(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
 fn build_burst_report(
     metrics: Vec<TxMetrics>,
     source_chain: &str,

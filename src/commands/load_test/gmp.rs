@@ -304,7 +304,6 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     // Extract 32-byte private key for deriving sub-wallets
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = read_provider.get_balance(signer_address).await?.to();
         let eth = balance as f64 / 1e18;
@@ -465,7 +464,6 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = source_read_provider.get_balance(signer_address).await?.to();
         let eth = balance as f64 / 1e18;
@@ -1289,7 +1287,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let main_wallet = load_sui_main_wallet()?;
     ui::kv("Sui wallet", &main_wallet.address_hex());
     let bal = sui_client.get_balance(&main_wallet.address).await?;
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let sui_amount = bal as f64 / 1e9;
     ui::kv("Sui balance", &format!("{bal} mist ({sui_amount:.4} SUI)"));
     if bal < SUI_DEFAULT_GAS_VALUE_MIST + SUI_DEFAULT_GAS_BUDGET_MIST {
@@ -1391,7 +1388,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 
         match result {
             Ok(r) if r.success => {
-                #[allow(clippy::cast_possible_truncation)]
                 let latency_ms = send_start.elapsed().as_millis() as u64;
                 let message_id = format!("{}-{}", r.digest, r.event_index);
                 metrics.push(TxMetrics {
@@ -1465,7 +1461,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let test_duration = test_start.elapsed().as_secs_f64();
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = crate::commands::load_test::metrics::LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),

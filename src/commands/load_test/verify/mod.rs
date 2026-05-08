@@ -833,7 +833,6 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
 /// Burst-mode Sui destination verifier — block on confirmed metrics array.
 /// Uses Sui events polling (`MessageApproved` / `MessageExecuted` on the
 /// AxelarGateway events module) for the destination-side phases.
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_sui_gmp(
     config: &Path,
     source_chain: &str,
@@ -968,7 +967,6 @@ pub async fn verify_onchain_solana_streaming(
 /// 2. **Routed** — Cosmos Gateway outgoing_messages (dest Solana chain)
 /// 3. **Approved** — Solana IncomingMessage PDA exists
 /// 4. **Executed** — Solana IncomingMessage PDA status = executed
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana(
     config: &Path,
     source_chain: &str,
@@ -1059,7 +1057,6 @@ pub async fn verify_onchain_solana(
 /// 4. **Routed** — Cosmos Gateway outgoing_messages (second-leg)
 /// 5. **Approved** — Solana IncomingMessage PDA exists
 /// 6. **Executed** — Solana IncomingMessage PDA status = executed
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_its(
     config: &Path,
     source_chain: &str,
@@ -1117,7 +1114,6 @@ pub async fn verify_onchain_solana_its(
 
 /// Streaming version of `verify_onchain_solana_its` — runs concurrently with
 /// the send phase, receiving confirmed txs via the channel.
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_its_streaming(
     config: &Path,
     source_chain: &str,
@@ -1286,7 +1282,6 @@ pub async fn verify_onchain_stellar_its_streaming(
 /// Verify EVM/Solana → XRPL ITS transactions. Polls the recipient XRPL
 /// account's `account_tx` for an inbound `Payment` whose `message_id` memo
 /// matches the second-leg message id (the XRPL relayer attaches that memo).
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_xrpl_its(
     config: &Path,
     source_chain: &str,
@@ -1407,7 +1402,6 @@ pub async fn verify_onchain_xrpl_its_streaming(
 /// 4. **Routed** — Cosmos Gateway outgoing_messages (second-leg, dest EVM chain)
 /// 5. **Approved** — EVM gateway isMessageApproved (second-leg)
 /// 6. **Executed** — EVM approval consumed
-#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_evm_its(
     config: &Path,
     source_chain: &str,

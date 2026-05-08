@@ -287,7 +287,6 @@ pub fn send_its_interchain_transfer(
     let mut transaction = Transaction::new_unsigned(message);
     transaction.sign(&[keypair], blockhash);
 
-    #[allow(clippy::cast_possible_truncation)]
     let submit_time_ms = submit_start.elapsed().as_millis() as u64;
 
     let signature = match rpc_client.send_and_confirm_transaction(&transaction) {
@@ -321,7 +320,6 @@ pub fn send_its_interchain_transfer(
         }
     };
 
-    #[allow(clippy::cast_possible_truncation)]
     let confirm_time_ms = submit_start.elapsed().as_millis() as u64;
     let latency_ms = confirm_time_ms.saturating_sub(submit_time_ms);
 

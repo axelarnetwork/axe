@@ -102,7 +102,6 @@ pub fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -
 ///
 /// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
 /// `SenderReceiver._execute`. When false, payloads use the Solana gateway format.
-#[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     sender_receiver_addr: Address,
@@ -251,7 +250,6 @@ pub async fn run_load_test_with_metrics(
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss)]
     let report = LoadTestReport {
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
@@ -305,7 +303,6 @@ pub async fn run_load_test_with_metrics(
 /// (including QuikNode) do not reliably return pending-mempool txs in
 /// `eth_getTransactionCount(addr, "pending")`, causing nonce collisions when the same
 /// key fires again within 3s before its previous tx confirms.
-#[allow(clippy::too_many_arguments)]
 async fn execute_and_record_evm<P: Provider>(
     provider: &P,
     sender_receiver_addr: Address,
@@ -337,7 +334,6 @@ async fn execute_and_record_evm<P: Provider>(
             let tx_hash = *pending.tx_hash();
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     // Extract ContractCall event index
@@ -388,7 +384,7 @@ async fn execute_and_record_evm<P: Provider>(
 ///
 /// Uses a rotating pool of `tps * key_cycle` derived wallets, cycling keys
 /// every `key_cycle` seconds. Sends `tps` txs per second for `duration_secs`.
-#[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     sender_receiver_addr: Address,
@@ -558,7 +554,6 @@ fn make_failure_with_hash(
     error: &str,
     tx_hash: Option<alloy::primitives::TxHash>,
 ) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),

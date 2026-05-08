@@ -75,7 +75,6 @@ impl RealTimeStats {
     }
 
     /// Update throughputs every THROUGHPUT_WINDOW and collect new latencies.
-    #[allow(clippy::float_arithmetic)]
     pub(super) fn update(&mut self, counts: [usize; 5], txs: &[PendingTx]) {
         let elapsed = self.snapshot_time.elapsed();
         if elapsed >= THROUGHPUT_WINDOW {
@@ -118,7 +117,6 @@ impl RealTimeStats {
     }
 
     /// Format latency summary: "e2e: avg 94.5s p50 92.1s p75 96.3s p99 102.1s"
-    #[allow(clippy::float_arithmetic)]
     fn fmt_latency(&self) -> String {
         let n = self.latencies.len();
         if n == 0 {

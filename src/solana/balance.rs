@@ -39,9 +39,7 @@ pub fn check_solana_balance(
         eyre::eyre!("failed to query Solana balance for {pubkey} on {rpc_url}: {e}")
     })?;
 
-    #[allow(clippy::cast_precision_loss)]
     let display = balance as f64 / 1_000_000_000.0;
-    #[allow(clippy::cast_precision_loss)]
     let min_display = min_lamports as f64 / 1_000_000_000.0;
 
     if balance < min_lamports {

@@ -183,7 +183,6 @@ async fn init_evm_source_context(
     check_evm_balance(&read_provider, deployer_address).await?;
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = read_provider.get_balance(deployer_address).await?.to();
         let eth = balance as f64 / 1e18;
@@ -258,7 +257,6 @@ fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<u128>
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => default_gas_value_wei(src),
     };
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "gas value",
@@ -681,7 +679,6 @@ async fn run_burst_pipeline(
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),

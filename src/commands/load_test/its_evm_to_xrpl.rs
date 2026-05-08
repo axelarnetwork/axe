@@ -66,7 +66,6 @@ const MAX_RETRIES: u32 = 5;
 /// 0.001 axlXRP = 1e15 wei → 1000 drops on XRPL.
 const AMOUNT_PER_TX_WEI: u128 = 1_000_000_000_000_000;
 
-#[allow(clippy::cognitive_complexity)]
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
@@ -369,7 +368,6 @@ fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<(u128
         None => default_gas_value_wei(src),
     };
     let gas_value = U256::from(gas_value_wei);
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "gas value",
@@ -438,7 +436,6 @@ async fn derive_and_fund_evm_signers(
     let gas_extra_per_key = per_tx_native_cost
         .saturating_mul(txs_per_key)
         .saturating_mul(2);
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "per-key budget",
@@ -725,7 +722,6 @@ async fn run_burst_pipeline(
     let total_failed = metrics.iter().filter(|m| !m.success).count() as u64;
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),

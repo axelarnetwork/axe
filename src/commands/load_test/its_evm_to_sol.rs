@@ -49,7 +49,6 @@ fn default_gas_value_wei(source_chain: &str) -> u128 {
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
-#[allow(clippy::cognitive_complexity)]
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
@@ -195,7 +194,6 @@ async fn init_evm_source(args: &LoadTestArgs, evm_rpc_url: &str) -> eyre::Result
 
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = read_provider.get_balance(deployer_address).await?.to();
         let eth = balance as f64 / 1e18;
@@ -240,7 +238,6 @@ fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<u128>
         None => default_gas_value_wei(src),
     };
 
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "gas value",
@@ -672,7 +669,6 @@ async fn run_burst_pipeline(
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
@@ -732,7 +728,6 @@ async fn run_burst_pipeline(
 
 /// Deploy a new interchain token and its remote counterpart.
 /// Returns (tokenId, localTokenAddress).
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn deploy_its_token<P: Provider>(
     provider: &P,
     factory_addr: Address,
@@ -997,7 +992,6 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
             let tx_hash = *pending.tx_hash();
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     // Extract full ContractCall event data
@@ -1053,7 +1047,6 @@ fn make_failure_with_hash(
     error: &str,
     tx_hash: Option<alloy::primitives::TxHash>,
 ) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),

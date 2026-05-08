@@ -35,7 +35,6 @@ pub(super) type MakeTask = Box<dyn FnMut(usize, Option<u64>) -> TxFuture + Send>
 /// - `nonces`: pre-fetched nonces for EVM keys (incremented locally per tick).
 /// - `send_done` + verify channel: signalled when the send phase finishes.
 /// - `spinner`: progress bar for live display.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_sustained_loop(
     tps: usize,
     duration_secs: u64,
@@ -176,7 +175,6 @@ pub(super) async fn run_sustained_loop(
 }
 
 /// Build a `LoadTestReport` from the sustained loop result.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub(super) fn build_sustained_report(
     result: SustainedResult,
     source_chain: &str,

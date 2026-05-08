@@ -53,7 +53,6 @@ pub struct GmpSendResult {
 /// `gas_value_mist` is the SUI to attach as cross-chain gas (split off the
 /// gas coin). `gas_budget_mist` is the on-chain Sui gas budget (the cost
 /// of running this PTB itself), separate from the cross-chain gas payment.
-#[allow(clippy::too_many_arguments)]
 pub async fn send_gmp_call(
     client: &SuiClient,
     wallet: &SuiWallet,

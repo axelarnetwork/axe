@@ -51,7 +51,6 @@ pub fn derive_keypairs(main: &Keypair, count: usize) -> Result<Vec<Keypair>> {
 /// Check that all derived keypairs are funded, and fund any that aren't.
 ///
 /// Shows a progress bar during funding. Returns the per-key balance after funding.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Result<Vec<u64>> {
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
@@ -134,7 +133,6 @@ pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Resu
 
 /// Like `ensure_funded`, but targets a balance that covers `fires_per_key`
 /// transactions, each costing `gas_lamports` on top of the base tx fee.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded_for_sustained(
     rpc_url: &str,
     main: &Keypair,
@@ -251,7 +249,6 @@ const TARGET_WEI_PER_KEY: u128 = 10_000_000_000_000_000; // 0.01 ETH
 /// Check that all derived EVM signers are funded, and fund any that aren't.
 /// Each key needs gas + `extra_wei` (e.g. for cross-chain gas value).
 /// (e.g. for `msg.value` in cross-chain gas payment).
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub async fn ensure_funded_evm_with_extra<P: Provider>(
     provider: &P,
     main_signer: &PrivateKeySigner,
@@ -390,7 +387,6 @@ pub fn derive_xrpl_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<Xrp
 ///
 /// The XRPL base reserve (~10 XRP) is implicitly part of `target_drops` —
 /// callers should include it when deciding how much to request.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub async fn ensure_funded_xrpl(
     client: &XrplClient,
     main_wallet: Option<&XrplWallet>,

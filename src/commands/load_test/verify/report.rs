@@ -13,7 +13,6 @@ use crate::commands::load_test::metrics::{
 /// over the absolute completion timestamps.
 /// Compute sustained throughput per pipeline step: count / (last - first) on
 /// absolute completion timestamps. The lowest value is the pipeline bottleneck.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub(super) fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
     let Some(epoch) = txs.iter().map(|t| t.send_instant).min() else {
         return PeakThroughput::default();
@@ -76,7 +75,6 @@ pub(super) fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
 
 /// Compute the `VerificationReport` from pending tx results, writing timings
 /// back into the original metrics array.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub(super) fn compute_verification_report(
     txs: &[PendingTx],
     metrics: &mut [TxMetrics],
@@ -186,7 +184,6 @@ fn stuck_phase(tx: &PendingTx) -> String {
     }
 }
 
-#[allow(clippy::float_arithmetic)]
 fn avg_option(iter: impl Iterator<Item = f64>) -> Option<f64> {
     let vals: Vec<f64> = iter.collect();
     if vals.is_empty() {
