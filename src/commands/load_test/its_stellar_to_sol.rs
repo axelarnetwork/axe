@@ -53,7 +53,89 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     validate_solana_rpc(&solana_rpc_url).await?;
 
     let cfg = ChainsConfig::load(&args.config)?;
+    verify_axelar_prerequisites(&cfg, dest)?;
 
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "ITS (interchainTransfer via hub)");
+
+    let stellar = read_stellar_setup(&args.config, src, &args.source_rpc)?;
+    let main_wallet = init_stellar_main_wallet(
+        &stellar.client,
+        args.private_key.as_deref(),
+        stellar.use_friendbot,
+    )
+    .await?;
+    let solana = resolve_solana_target(args.keypair.as_deref())?;
+    let gas_stroops = parse_gas_stroops(args.gas_value.as_deref())?;
+    let sizing = compute_run_sizing(&args);
+
+    let (token_id, wallets) = prepare_token_and_wallets(
+        &args,
+        &stellar,
+        &main_wallet,
+        &solana_rpc_url,
+        gas_stroops,
+        &sizing,
+    )
+    .await?;
+
+    let transfer = ItsTransferSpec {
+        token_id,
+        gas_stroops,
+        axelarnet_gw_addr: cfg
+            .axelar
+            .global_contract_address("AxelarnetGateway")?
+            .to_string(),
+    };
+
+    if !sizing.burst_mode {
+        run_sustained_pipeline(&args, &stellar, &solana, wallets, &transfer, &sizing).await
+    } else {
+        run_burst_pipeline(&args, &stellar, &solana, wallets, &transfer, &sizing).await
+    }
+}
+
+/// Stellar source-side configuration: the connected client, the contract
+/// addresses needed for ITS calls, and whether the network supports
+/// Friendbot-based account activation.
+struct StellarSetup {
+    client: StellarClient,
+    its_addr: String,
+    gateway_addr: String,
+    xlm_addr: String,
+    use_friendbot: bool,
+}
+
+/// Solana destination identity: the recipient pubkey and the equivalent
+/// 32-byte address used as the ITS payload destination.
+struct SolanaTarget {
+    recipient: solana_sdk::pubkey::Pubkey,
+    address_bytes: Vec<u8>,
+}
+
+/// Sizing parameters derived from CLI flags: chooses burst vs sustained,
+/// number of ephemeral wallets, and total tx count expected.
+struct RunSizing {
+    burst_mode: bool,
+    sustained_params: Option<(u64, u64)>,
+    num_keys: usize,
+    total_expected: u64,
+}
+
+/// Per-transfer payload bits common to burst and sustained modes: the
+/// deployed ITS token, the gas value, and the GMP-hub destination
+/// (AxelarnetGateway) used for verification routing.
+struct ItsTransferSpec {
+    token_id: [u8; 32],
+    gas_stroops: u64,
+    axelarnet_gw_addr: String,
+}
+
+/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
+/// AxelarnetGateway). Bails with the existing error strings if either is
+/// missing.
+fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> Result<()> {
     if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
@@ -66,41 +148,56 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
     }
+    Ok(())
+}
 
-    ui::kv("source", src);
-    ui::kv("destination", dest);
-    ui::kv("protocol", "ITS (interchainTransfer via hub)");
+/// Read the Stellar source-chain config (network type, ITS / gateway / XLM
+/// addresses) and emit the matching UI lines. Returns a bundle ready for
+/// downstream stages.
+fn read_stellar_setup(
+    config: &std::path::Path,
+    src: &str,
+    stellar_rpc: &str,
+) -> Result<StellarSetup> {
+    let network_type = super::read_stellar_network_type(config, src)?;
+    let client = StellarClient::new(stellar_rpc, &network_type)?;
+    let its_addr = super::read_stellar_contract_address(config, src, "InterchainTokenService")?;
+    let gateway_addr = super::read_stellar_contract_address(config, src, "AxelarGateway")?;
+    let xlm_addr = super::read_stellar_token_address(config, src)?;
+    ui::address("Stellar ITS", &its_addr);
+    ui::address("Stellar AxelarGateway", &gateway_addr);
+    ui::address("Stellar XLM token", &xlm_addr);
 
-    // --- Stellar config + main wallet ---
-    let stellar_rpc = &args.source_rpc;
-    let network_type = super::read_stellar_network_type(&args.config, src)?;
-    let stellar_client = StellarClient::new(stellar_rpc, &network_type)?;
-    let stellar_its_addr =
-        super::read_stellar_contract_address(&args.config, src, "InterchainTokenService")?;
-    let stellar_gateway_addr =
-        super::read_stellar_contract_address(&args.config, src, "AxelarGateway")?;
-    let stellar_xlm_addr = super::read_stellar_token_address(&args.config, src)?;
-    ui::address("Stellar ITS", &stellar_its_addr);
-    ui::address("Stellar AxelarGateway", &stellar_gateway_addr);
-    ui::address("Stellar XLM token", &stellar_xlm_addr);
+    let use_friendbot = matches!(network_type.as_str(), "testnet" | "futurenet");
+    Ok(StellarSetup {
+        client,
+        its_addr,
+        gateway_addr,
+        xlm_addr,
+        use_friendbot,
+    })
+}
 
-    let main_wallet = super::load_stellar_main_wallet(args.private_key.as_deref())?;
+/// Load the Stellar main wallet and ensure it is activated. For ITS the main
+/// wallet itself signs deploy + distribution txs, so it must be activated.
+/// (GMP doesn't need this — ephemeral wallets sign there.) Friendbot it on
+/// testnet/futurenet; otherwise leave to the user.
+async fn init_stellar_main_wallet(
+    client: &StellarClient,
+    private_key: Option<&str>,
+    use_friendbot: bool,
+) -> Result<StellarWallet> {
+    let main_wallet = super::load_stellar_main_wallet(private_key)?;
     ui::kv("Stellar wallet", &main_wallet.address());
 
-    // For ITS the main wallet itself signs deploy + distribution txs, so it
-    // must be activated. (GMP doesn't need this — ephemeral wallets sign
-    // there.) Friendbot it on testnet/futurenet; otherwise leave to the user.
-    let use_friendbot = matches!(network_type.as_str(), "testnet" | "futurenet");
-    if stellar_client
+    if client
         .account_sequence(&main_wallet.address())
         .await?
         .is_none()
     {
         if use_friendbot {
             ui::info("activating Stellar main wallet via Friendbot...");
-            stellar_client
-                .friendbot_fund(&main_wallet.address())
-                .await?;
+            client.friendbot_fund(&main_wallet.address()).await?;
             ui::success("main wallet activated");
         } else {
             eyre::bail!(
@@ -110,19 +207,28 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             );
         }
     }
+    Ok(main_wallet)
+}
 
-    // --- Solana destination: receiver pubkey + ITS program id ---
-    // The Solana keypair is required only for its pubkey (the ITS recipient).
-    // It is not used to sign anything on Solana — the relayer drives the
-    // destination-side execution.
-    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-    let sol_recipient = sol_keypair.pubkey();
-    let dest_address_bytes = sol_recipient.to_bytes().to_vec();
-    ui::kv("Solana recipient", &sol_recipient.to_string());
+/// Resolve the Solana destination: load the keypair (only used for its
+/// pubkey — the relayer drives destination-side execution), build the 32-byte
+/// address, and emit the matching UI lines.
+fn resolve_solana_target(keypair: Option<&str>) -> Result<SolanaTarget> {
+    let sol_keypair = crate::solana::load_keypair(keypair)?;
+    let recipient = sol_keypair.pubkey();
+    let address_bytes = recipient.to_bytes().to_vec();
+    ui::kv("Solana recipient", &recipient.to_string());
     ui::address("Solana ITS program", &solana_axelar_its::id().to_string());
+    Ok(SolanaTarget {
+        recipient,
+        address_bytes,
+    })
+}
 
-    // --- Gas (XLM stroops) ---
-    let gas_stroops: u64 = match &args.gas_value {
+/// Parse the user-supplied gas value (XLM stroops), defaulting to
+/// `DEFAULT_GAS_STROOPS`, and emit the matching UI line.
+fn parse_gas_stroops(gas_value: Option<&str>) -> Result<u64> {
+    let gas_stroops: u64 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => DEFAULT_GAS_STROOPS,
     };
@@ -133,8 +239,12 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             gas_stroops as f64 / 10_000_000.0
         ),
     );
+    Ok(gas_stroops)
+}
 
-    // --- Burst vs sustained ---
+/// Decide burst vs sustained, ephemeral wallet count, and total expected tx
+/// count.
+fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     let sustained_params = args.tps.zip(args.duration_secs);
     let burst_mode = sustained_params.is_none();
     let (num_keys, total_expected) = if burst_mode {
@@ -145,144 +255,212 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
+    RunSizing {
+        burst_mode,
+        sustained_params,
+        num_keys,
+        total_expected,
+    }
+}
 
-    // --- Token setup (cache → reuse / deploy fresh) ---
+/// Compute the AXE amount each ephemeral wallet should hold so it can run all
+/// of its planned transfers (sustained budgets 2x the txs-per-key cap to
+/// absorb retries; burst uses the static `AMOUNT_PER_KEY`).
+fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64) -> u128 {
+    let amount = if sizing.burst_mode {
+        AMOUNT_PER_KEY
+    } else {
+        let txs_per_key = sizing
+            .sustained_params
+            .expect("burst_mode is false")
+            .1
+            .div_ceil(key_cycle);
+        AMOUNT_PER_TX.saturating_mul(txs_per_key).saturating_mul(2)
+    };
+    amount as u128
+}
+
+/// Derive `num_keys` ephemeral Stellar wallets from the main wallet's seed
+/// and ensure each is activated.
+async fn derive_and_fund_ephemeral_wallets(
+    client: &StellarClient,
+    main_wallet: &StellarWallet,
+    num_keys: usize,
+    use_friendbot: bool,
+) -> Result<Vec<StellarWallet>> {
+    ui::info(&format!("deriving {num_keys} Stellar keys..."));
+    let main_seed = main_wallet.signing_key.to_bytes();
+    let wallets = super::stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    let _ = main_seed;
+    super::stellar_sender::ensure_funded(client, &wallets, use_friendbot).await?;
+    Ok(wallets)
+}
+
+/// Run the cache-or-deploy ITS token setup, derive + fund the ephemeral
+/// wallets, then distribute AXE to each wallet according to the run sizing.
+/// Returns `(token_id, wallets)` ready for the burst/sustained pipelines.
+async fn prepare_token_and_wallets(
+    args: &LoadTestArgs,
+    stellar: &StellarSetup,
+    main_wallet: &StellarWallet,
+    solana_rpc_url: &str,
+    gas_stroops: u64,
+    sizing: &RunSizing,
+) -> Result<([u8; 32], Vec<StellarWallet>)> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
     let (token_id, _salt, token_address) = setup_its_token(
-        &stellar_client,
-        &main_wallet,
-        &stellar_its_addr,
-        &stellar_gateway_addr,
-        &stellar_xlm_addr,
+        &stellar.client,
+        main_wallet,
+        &stellar.its_addr,
+        &stellar.gateway_addr,
+        &stellar.xlm_addr,
         gas_stroops,
         src,
         dest,
         &args.destination_axelar_id,
         args.token_id.as_deref(),
         &args.config,
-        &solana_rpc_url,
-        num_keys,
+        solana_rpc_url,
+        sizing.num_keys,
     )
     .await?;
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("token contract (Stellar)", &token_address);
 
-    // --- Derive + activate ephemeral wallets ---
-    ui::info(&format!("deriving {num_keys} Stellar keys..."));
-    let main_seed = main_wallet.signing_key.to_bytes();
-    let wallets = super::stellar_sender::derive_wallets(&main_seed, num_keys)?;
-    let _ = main_seed;
-    super::stellar_sender::ensure_funded(&stellar_client, &wallets, use_friendbot).await?;
-
-    // --- Distribute AXE to ephemeral wallets ---
-    let amount_per_key = if burst_mode {
-        AMOUNT_PER_KEY
-    } else {
-        let txs_per_key = sustained_params
-            .expect("burst_mode is false")
-            .1
-            .div_ceil(args.key_cycle);
-        AMOUNT_PER_TX.saturating_mul(txs_per_key).saturating_mul(2)
-    };
-    distribute_token_balances(
-        &stellar_client,
-        &main_wallet,
-        &token_address,
-        &wallets,
-        amount_per_key as u128,
+    let wallets = derive_and_fund_ephemeral_wallets(
+        &stellar.client,
+        main_wallet,
+        sizing.num_keys,
+        stellar.use_friendbot,
     )
     .await?;
 
-    // --- ITS hub routing info (used in TxMetrics so the verifier can find
-    //     the second-leg message via the hub's outgoing_messages) ---
-    let axelarnet_gw_addr = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let amount_per_key = compute_amount_per_key(sizing, args.key_cycle);
+    distribute_token_balances(
+        &stellar.client,
+        main_wallet,
+        &token_address,
+        &wallets,
+        amount_per_key,
+    )
+    .await?;
 
-    // --- Sustained mode ---
-    if !burst_mode {
-        let tps_n = sustained_params.expect("burst_mode is false").0 as usize;
-        let duration_secs = sustained_params.expect("burst_mode is false").1;
-        let key_cycle = args.key_cycle as usize;
+    Ok((token_id, wallets))
+}
 
-        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
-        let send_done = Arc::new(AtomicBool::new(false));
-        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
+/// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
+/// Stellar sustained sender, stitch amplifier timings back into the report,
+/// and hand off to `finish_report`.
+async fn run_sustained_pipeline(
+    args: &LoadTestArgs,
+    stellar: &StellarSetup,
+    solana: &SolanaTarget,
+    wallets: Vec<StellarWallet>,
+    transfer: &ItsTransferSpec,
+    sizing: &RunSizing,
+) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let tps_n = sizing.sustained_params.expect("burst_mode is false").0 as usize;
+    let duration_secs = sizing.sustained_params.expect("burst_mode is false").1;
+    let key_cycle = args.key_cycle as usize;
 
-        let vconfig = args.config.clone();
-        let vsource = args.source_axelar_id.clone();
-        let vdest = args.destination_axelar_id.clone();
-        let vdest_rpc = solana_rpc_url.clone();
-        let vdone = Arc::clone(&send_done);
-        let verify_handle = tokio::spawn(async move {
-            let spinner = spinner_rx.await.expect("spinner channel dropped");
-            super::verify::verify_onchain_solana_its_streaming(
-                &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
-            )
-            .await
-        });
+    let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let send_done = Arc::new(AtomicBool::new(false));
+    let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
-        let spinner = ui::wait_spinner(&format!(
-            "[0/{duration_secs}s] starting sustained Stellar ITS send..."
-        ));
-        let _ = spinner_tx.send(spinner.clone());
-
-        let test_start = Instant::now();
-        let result = run_sustained_loop(
-            &stellar_client,
-            wallets,
-            stellar_its_addr.clone(),
-            stellar_gateway_addr.clone(),
-            token_id,
-            args.destination_axelar_id.clone(),
-            dest_address_bytes.clone(),
-            stellar_xlm_addr.clone(),
-            gas_stroops,
-            tps_n,
-            duration_secs,
-            key_cycle,
-            Some(verify_tx),
-            Some(send_done),
-            spinner,
-            axelarnet_gw_addr.clone(),
+    let vconfig = args.config.clone();
+    let vsource = args.source_axelar_id.clone();
+    let vdest = args.destination_axelar_id.clone();
+    let vdest_rpc = args.destination_rpc.clone();
+    let vdone = Arc::clone(&send_done);
+    let verify_handle = tokio::spawn(async move {
+        let spinner = spinner_rx.await.expect("spinner channel dropped");
+        super::verify::verify_onchain_solana_its_streaming(
+            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
         )
-        .await;
+        .await
+    });
 
-        let mut report = sustained::build_sustained_report(
-            result,
-            src,
-            dest,
-            &sol_recipient.to_string(),
-            total_expected,
-            num_keys,
-        );
-        let (verification, timings) = verify_handle.await??;
-        for (msg_id, timing) in timings {
-            if let Some(tx) = report
-                .transactions
-                .iter_mut()
-                .find(|t| t.signature == msg_id)
-            {
-                tx.amplifier_timing = Some(timing);
-            }
+    let spinner = ui::wait_spinner(&format!(
+        "[0/{duration_secs}s] starting sustained Stellar ITS send..."
+    ));
+    let _ = spinner_tx.send(spinner.clone());
+
+    let test_start = Instant::now();
+    let result = run_sustained_loop(
+        &stellar.client,
+        wallets,
+        stellar.its_addr.clone(),
+        stellar.gateway_addr.clone(),
+        transfer.token_id,
+        args.destination_axelar_id.clone(),
+        solana.address_bytes.clone(),
+        stellar.xlm_addr.clone(),
+        transfer.gas_stroops,
+        tps_n,
+        duration_secs,
+        key_cycle,
+        Some(verify_tx),
+        Some(send_done),
+        spinner,
+        transfer.axelarnet_gw_addr.clone(),
+    )
+    .await;
+
+    let mut report = sustained::build_sustained_report(
+        result,
+        src,
+        dest,
+        &solana.recipient.to_string(),
+        sizing.total_expected,
+        sizing.num_keys,
+    );
+    let (verification, timings) = verify_handle.await??;
+    for (msg_id, timing) in timings {
+        if let Some(tx) = report
+            .transactions
+            .iter_mut()
+            .find(|t| t.signature == msg_id)
+        {
+            tx.amplifier_timing = Some(timing);
         }
-        report.verification = Some(verification);
-        return finish_report(&args, &mut report, test_start);
     }
+    report.verification = Some(verification);
+    finish_report(args, &mut report, test_start)
+}
 
-    // --- Burst mode ---
+/// Drive the burst-mode pipeline: fan out the Stellar transfers, build the
+/// load-test report, run the Solana ITS verifier on the confirmed batch, and
+/// hand off to `finish_report`.
+async fn run_burst_pipeline(
+    args: &LoadTestArgs,
+    stellar: &StellarSetup,
+    solana: &SolanaTarget,
+    wallets: Vec<StellarWallet>,
+    transfer: &ItsTransferSpec,
+    sizing: &RunSizing,
+) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let num_keys = sizing.num_keys;
+    let token_id = transfer.token_id;
+    let gas_stroops = transfer.gas_stroops;
+
     let test_start = Instant::now();
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let confirmed = Arc::new(AtomicU64::new(0));
     let spinner = ui::wait_spinner(&format!("sending (0/{num_keys} confirmed)..."));
 
-    let client = Arc::new(stellar_client.clone());
-    let stellar_its_arc = Arc::new(stellar_its_addr.clone());
-    let stellar_gw_arc = Arc::new(stellar_gateway_addr.clone());
-    let stellar_xlm_arc = Arc::new(stellar_xlm_addr.clone());
+    let client = Arc::new(stellar.client.clone());
+    let stellar_its_arc = Arc::new(stellar.its_addr.clone());
+    let stellar_gw_arc = Arc::new(stellar.gateway_addr.clone());
+    let stellar_xlm_arc = Arc::new(stellar.xlm_addr.clone());
     let dest_chain_arc = Arc::new(args.destination_axelar_id.clone());
-    let dest_addr_arc = Arc::new(dest_address_bytes.clone());
-    let axelarnet_gw_arc = Arc::new(axelarnet_gw_addr.clone());
+    let dest_addr_arc = Arc::new(solana.address_bytes.clone());
+    let axelarnet_gw_arc = Arc::new(transfer.axelarnet_gw_addr.clone());
 
     let mut tasks = Vec::with_capacity(num_keys);
     for w in wallets {
@@ -340,7 +518,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
-        destination_address: sol_recipient.to_string(),
+        destination_address: solana.recipient.to_string(),
         protocol: String::new(),
         tps: None,
         duration_secs: None,
@@ -383,14 +561,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
-        &sol_recipient.to_string(),
-        &solana_rpc_url,
+        &solana.recipient.to_string(),
+        &args.destination_rpc,
         &mut report.transactions,
     )
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &mut report, test_start)
+    finish_report(args, &mut report, test_start)
 }
 
 // ---------------------------------------------------------------------------
