@@ -14,6 +14,7 @@ use eyre::eyre;
 use futures::future::join_all;
 use rand::Rng;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signer::Signer;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
@@ -315,7 +316,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         // Create the ATA on Solana if it doesn't exist yet, so the memo program
         // can transfer tokens to it during execution.
         let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-        use solana_sdk::signer::Signer;
         let sol_rpc = solana_client::rpc_client::RpcClient::new_with_commitment(
             &args.destination_rpc,
             solana_commitment_config::CommitmentConfig::finalized(),

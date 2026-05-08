@@ -16,12 +16,14 @@ use std::time::Instant;
 use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
+    sol_types::SolValue,
 };
 use eyre::Result;
 use serde_json::json;
 
 use super::evm_sender;
 use super::helpers::list_gateway_chains;
+use super::metrics::TxMetrics;
 use super::sol_sender;
 use super::stellar_sender;
 use super::sustained;
@@ -1351,7 +1353,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         Some(hex_str) => hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))
             .map_err(|e| eyre::eyre!("invalid --payload hex: {e}"))?,
         None => {
-            use alloy::sol_types::SolValue;
             let s: String = format!(
                 "Hello from Sui axe load-test {}",
                 std::time::SystemTime::now()
@@ -1365,7 +1366,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 
     let num_txs = args.num_txs.max(1) as usize;
 
-    use crate::commands::load_test::metrics::TxMetrics;
     let test_start = Instant::now();
     let spinner = ui::wait_spinner(&format!("sending (0/{num_txs} confirmed)..."));
     let mut metrics: Vec<TxMetrics> = Vec::with_capacity(num_txs);
