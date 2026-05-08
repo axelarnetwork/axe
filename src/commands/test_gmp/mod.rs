@@ -102,18 +102,24 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     });
 
     let ctx = relay::AmplifierContext {
-        signing_key: &signing_key,
-        axelar_address: &axelar_address,
-        lcd: &lcd,
-        chain_id: &chain_id,
-        fee_denom: &fee_denom,
+        axelar_address: axelar_address.clone(),
+        lcd: lcd.clone(),
+        chain_id: chain_id.clone(),
+        fee_denom: fee_denom.clone(),
         gas_price,
-        cosm_gateway,
-        voting_verifier: Some(voting_verifier),
-        multisig_prover,
+        cosm_gateway: cosm_gateway.to_string(),
+        voting_verifier: Some(voting_verifier.to_string()),
+        multisig_prover: multisig_prover.to_string(),
     };
-    let execute_data_hex =
-        relay::run_full_sequence(&ctx, &gmp_msg, &axelar_id, &message_id, TOTAL_STEPS).await?;
+    let execute_data_hex = relay::run_full_sequence(
+        &ctx,
+        &signing_key,
+        &gmp_msg,
+        &axelar_id,
+        &message_id,
+        TOTAL_STEPS,
+    )
+    .await?;
 
     approve_and_execute_evm(
         &provider,
@@ -313,17 +319,17 @@ pub async fn run_config(
     });
 
     let ctx = relay::AmplifierContext {
-        signing_key: &signing_key,
-        axelar_address: &axelar_address,
-        lcd: &lcd,
-        chain_id: &chain_id,
-        fee_denom: &fee_denom,
+        axelar_address: axelar_address.clone(),
+        lcd: lcd.clone(),
+        chain_id: chain_id.clone(),
+        fee_denom: fee_denom.clone(),
         gas_price,
-        cosm_gateway,
-        voting_verifier,
-        multisig_prover,
+        cosm_gateway: cosm_gateway.to_string(),
+        voting_verifier: voting_verifier.map(str::to_string),
+        multisig_prover: multisig_prover.to_string(),
     };
-    let execute_data_hex = relay::run_full_sequence(&ctx, &gmp_msg, &src, &message_id, 8).await?;
+    let execute_data_hex =
+        relay::run_full_sequence(&ctx, &signing_key, &gmp_msg, &src, &message_id, 8).await?;
 
     match dst_type {
         ChainType::Svm => {

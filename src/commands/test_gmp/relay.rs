@@ -9,21 +9,20 @@ use crate::commands::test_helpers::{
 use crate::cosmos::{build_execute_msg_any, sign_and_broadcast_cosmos_tx};
 use crate::ui;
 
-/// Borrowed bundle of everything an Amplifier relay step needs to sign and
+/// Bundle of everything an Amplifier relay step needs to sign and
 /// broadcast cosmos txs against the source-chain Gateway, VotingVerifier,
 /// and destination-chain MultisigProver. `voting_verifier` is optional
 /// because some chains route through gateways without a VotingVerifier; the
 /// relay then errors only if a poll actually needs ending.
-pub struct AmplifierContext<'a> {
-    pub signing_key: &'a SigningKey,
-    pub axelar_address: &'a str,
-    pub lcd: &'a str,
-    pub chain_id: &'a str,
-    pub fee_denom: &'a str,
+pub struct AmplifierContext {
+    pub axelar_address: String,
+    pub lcd: String,
+    pub chain_id: String,
+    pub fee_denom: String,
     pub gas_price: f64,
-    pub cosm_gateway: &'a str,
-    pub voting_verifier: Option<&'a str>,
-    pub multisig_prover: &'a str,
+    pub cosm_gateway: String,
+    pub voting_verifier: Option<String>,
+    pub multisig_prover: String,
 }
 
 /// Run Steps 2-6 of the GMP test: `verify_messages` → wait for votes +
@@ -31,7 +30,8 @@ pub struct AmplifierContext<'a> {
 /// proof. Returns the `execute_data` hex from the completed proof, ready to
 /// hand to a destination-chain gateway.
 pub async fn run_full_sequence(
-    ctx: &AmplifierContext<'_>,
+    ctx: &AmplifierContext,
+    signing_key: &SigningKey,
     gmp_msg: &Value,
     source_chain: &str,
     message_id: &str,
@@ -40,13 +40,13 @@ pub async fn run_full_sequence(
     ui::step_header(2, total_steps, "verify_messages");
     let poll_id = submit_verify_messages_amplifier(
         gmp_msg,
-        ctx.signing_key,
-        ctx.axelar_address,
-        ctx.lcd,
-        ctx.chain_id,
-        ctx.fee_denom,
+        signing_key,
+        &ctx.axelar_address,
+        &ctx.lcd,
+        &ctx.chain_id,
+        &ctx.fee_denom,
         ctx.gas_price,
-        ctx.cosm_gateway,
+        &ctx.cosm_gateway,
     )
     .await?;
 
@@ -56,15 +56,16 @@ pub async fn run_full_sequence(
         ui::step_header(3, total_steps, "Wait for poll votes + end poll");
         let vv = ctx
             .voting_verifier
+            .as_deref()
             .ok_or_else(|| eyre::eyre!("voting verifier address required to end poll"))?;
-        wait_for_poll_votes(ctx.lcd, vv, &poll_id).await?;
+        wait_for_poll_votes(&ctx.lcd, vv, &poll_id).await?;
         end_poll_with_retry(
             &poll_id,
-            ctx.signing_key,
-            ctx.axelar_address,
-            ctx.lcd,
-            ctx.chain_id,
-            ctx.fee_denom,
+            signing_key,
+            &ctx.axelar_address,
+            &ctx.lcd,
+            &ctx.chain_id,
+            &ctx.fee_denom,
             ctx.gas_price,
             vv,
         )
@@ -78,18 +79,18 @@ pub async fn run_full_sequence(
     ui::step_header(4, total_steps, "route_messages");
     route_messages_with_retry(
         gmp_msg,
-        ctx.signing_key,
-        ctx.axelar_address,
-        ctx.lcd,
-        ctx.chain_id,
-        ctx.fee_denom,
+        signing_key,
+        &ctx.axelar_address,
+        &ctx.lcd,
+        &ctx.chain_id,
+        &ctx.fee_denom,
         ctx.gas_price,
-        ctx.cosm_gateway,
+        &ctx.cosm_gateway,
     )
     .await?;
 
     ui::step_header(5, total_steps, "construct_proof");
-    ui::address("multisig prover", ctx.multisig_prover);
+    ui::address("multisig prover", &ctx.multisig_prover);
     let construct_proof_msg = json!({
         "construct_proof": [{
             "source_chain": source_chain,
@@ -97,16 +98,16 @@ pub async fn run_full_sequence(
         }]
     });
     let construct_any = build_execute_msg_any(
-        ctx.axelar_address,
-        ctx.multisig_prover,
+        &ctx.axelar_address,
+        &ctx.multisig_prover,
         &construct_proof_msg,
     )?;
     let construct_resp = sign_and_broadcast_cosmos_tx(
-        ctx.signing_key,
-        ctx.axelar_address,
-        ctx.lcd,
-        ctx.chain_id,
-        ctx.fee_denom,
+        signing_key,
+        &ctx.axelar_address,
+        &ctx.lcd,
+        &ctx.chain_id,
+        &ctx.fee_denom,
         ctx.gas_price,
         vec![construct_any],
     )
@@ -116,7 +117,7 @@ pub async fn run_full_sequence(
     ui::kv("multisig_session_id", &session_id);
 
     ui::step_header(6, total_steps, "Wait for proof signing");
-    let proof = wait_for_proof(ctx.lcd, ctx.multisig_prover, &session_id).await?;
+    let proof = wait_for_proof(&ctx.lcd, &ctx.multisig_prover, &session_id).await?;
     ui::success("proof ready");
 
     proof["status"]["completed"]["execute_data"]

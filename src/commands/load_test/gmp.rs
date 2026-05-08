@@ -1380,9 +1380,9 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
             &main_wallet,
             &sui_contracts,
             &crate::sui::SuiGmpCall {
-                destination_chain: &args.destination_axelar_id,
-                destination_address: &dest_addr_str,
-                payload: &payload_bytes,
+                destination_chain: args.destination_axelar_id.clone(),
+                destination_address: dest_addr_str.clone(),
+                payload: payload_bytes.clone(),
                 gas_value_mist,
                 gas_budget_mist: SUI_DEFAULT_GAS_BUDGET_MIST,
             },

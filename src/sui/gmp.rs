@@ -14,10 +14,10 @@ use super::wallet::SuiWallet;
 /// fields + gas/budget) so `send_gmp_call` doesn't need an 8-positional-arg
 /// signature where it's easy to swap, e.g., the chain and address strings at
 /// the call site.
-pub struct SuiGmpCall<'a> {
-    pub destination_chain: &'a str,
-    pub destination_address: &'a str,
-    pub payload: &'a [u8],
+pub struct SuiGmpCall {
+    pub destination_chain: String,
+    pub destination_address: String,
+    pub payload: Vec<u8>,
     /// Cross-chain gas paid into the Sui `GasService`, in mist (1 SUI = 1e9
     /// mist). Used by the relayer to fund the destination-side `execute`.
     pub gas_value_mist: u64,
@@ -58,7 +58,7 @@ pub async fn send_gmp_call(
     client: &SuiClient,
     wallet: &SuiWallet,
     contracts: &SuiContractsConfig,
-    call: &SuiGmpCall<'_>,
+    call: &SuiGmpCall,
 ) -> Result<GmpSendResult> {
     // Fetch shared-object versions in parallel.
     let (singleton_v, gateway_v, gas_service_v) = tokio::try_join!(
@@ -74,9 +74,9 @@ pub async fn send_gmp_call(
     let singleton = b.shared_object(contracts.gmp_singleton, singleton_v, true);
     let gateway = b.shared_object(contracts.gateway_object, gateway_v, true);
     let gas_svc = b.shared_object(contracts.gas_service_object, gas_service_v, true);
-    let dest_chain_arg = b.pure_string(call.destination_chain)?;
-    let dest_addr_arg = b.pure_string(call.destination_address)?;
-    let payload_arg = b.pure_vec_u8(call.payload)?;
+    let dest_chain_arg = b.pure_string(&call.destination_chain)?;
+    let dest_addr_arg = b.pure_string(&call.destination_address)?;
+    let payload_arg = b.pure_vec_u8(&call.payload)?;
     let refund_arg = b.pure_address(wallet.address)?;
     let amt_arg = b.pure_u64(call.gas_value_mist)?;
     let coin_arg = b.split_coin(Argument::Gas, amt_arg);
