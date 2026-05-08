@@ -25,14 +25,7 @@ mod rpc;
 mod tx;
 mod wallet;
 
-#[allow(unused_imports)]
-pub use config::{SuiContractsConfig, parse_sui_addr, read_sui_chain_config, read_sui_gateway_pkg};
-#[allow(unused_imports)]
-pub use gmp::{GmpSendResult, SuiGmpCall, send_gmp_call};
+pub use config::{read_sui_chain_config, read_sui_gateway_pkg};
+pub use gmp::{SuiGmpCall, send_gmp_call};
 pub use rpc::SuiClient;
-#[allow(unused_imports)]
-pub use tx::{
-    PtbBuilder, SubmittedTx, bcs_encode_transaction, intent_message_for, sign_and_submit,
-};
-#[allow(unused_imports)]
-pub use wallet::{SuiKeypair, SuiWallet};
+pub use wallet::SuiWallet;
