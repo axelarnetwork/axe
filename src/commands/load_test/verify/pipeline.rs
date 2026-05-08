@@ -19,10 +19,10 @@ use alloy::providers::Provider;
 use eyre::Result;
 use futures::StreamExt;
 use serde_json::json;
-use solana_sdk::pubkey::Pubkey;
 use tokio::sync::mpsc;
 
 use super::PendingTx;
+use super::checks::{batch_check_solana_incoming_messages, check_evm_is_message_approved};
 use super::report::compute_peak_throughput;
 use super::state::{Phase, RealTimeStats, phase_counts};
 use super::{INACTIVITY_TIMEOUT, POLL_INTERVAL};
@@ -1617,8 +1617,6 @@ pub(super) async fn check_hub_approved(
 /// the URL, so each message adds ~500 chars. 10 keeps us under the ~8KB URL
 /// limit that most HTTP servers enforce.
 const COSMOS_BATCH_SIZE: usize = 10;
-/// Solana's getMultipleAccounts supports up to 100 accounts per call.
-const SOLANA_BATCH_SIZE: usize = 100;
 
 // ---------------------------------------------------------------------------
 // Owned-data batch helpers — chunks run concurrently via join_all
@@ -1773,110 +1771,4 @@ async fn batch_check_hub_approved_owned(
         .into_iter()
         .flatten()
         .collect()
-}
-
-/// Batch-check Solana incoming message PDAs via `getMultipleAccounts`.
-/// Returns `(tx_index, Option<status_byte>)` for each tx.
-fn batch_check_solana_incoming_messages(
-    rpc_client: &solana_client::rpc_client::RpcClient,
-    txs: &[(usize, [u8; 32])], // (tx_index, command_id)
-) -> Vec<(usize, Option<u8>)> {
-    let mut results = Vec::with_capacity(txs.len());
-    for chunk in txs.chunks(SOLANA_BATCH_SIZE) {
-        let pubkeys: Vec<Pubkey> = chunk
-            .iter()
-            .map(|(_, cmd_id)| {
-                Pubkey::find_program_address(
-                    &[b"incoming message", cmd_id],
-                    &solana_axelar_gateway::id(),
-                )
-                .0
-            })
-            .collect();
-        match rpc_client.get_multiple_accounts(&pubkeys) {
-            Ok(accounts) => {
-                for (j, maybe_account) in accounts.iter().enumerate() {
-                    if j < chunk.len() {
-                        let status = maybe_account.as_ref().and_then(|acc| {
-                            if acc.data.len() > INCOMING_MESSAGE_STATUS_OFFSET {
-                                Some(acc.data[INCOMING_MESSAGE_STATUS_OFFSET])
-                            } else {
-                                None
-                            }
-                        });
-                        results.push((chunk[j].0, status));
-                    }
-                }
-            }
-            Err(_) => {
-                for (idx, _) in chunk {
-                    results.push((*idx, None));
-                }
-            }
-        }
-    }
-    results
-}
-
-/// Check `isMessageApproved` on the EVM gateway (single attempt).
-pub(super) async fn check_evm_is_message_approved<P: Provider>(
-    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
-    source_chain: &str,
-    message_id: &str,
-    source_address: &str,
-    contract_addr: Address,
-    payload_hash: FixedBytes<32>,
-) -> Result<bool> {
-    let approved = gw_contract
-        .isMessageApproved(
-            source_chain.to_string(),
-            message_id.to_string(),
-            source_address.to_string(),
-            contract_addr,
-            payload_hash,
-        )
-        .call()
-        .await?;
-    Ok(approved)
-}
-
-// ---------------------------------------------------------------------------
-// Solana IncomingMessage PDA check
-// ---------------------------------------------------------------------------
-
-/// Incoming message account data offset for the status byte.
-/// Layout: 8 (discriminator) + 1 (bump) + 1 (signing_pda_bump) + 3 (pad) = 13
-const INCOMING_MESSAGE_STATUS_OFFSET: usize = 13;
-
-/// Check the Solana IncomingMessage PDA for a given command_id.
-/// Returns `Some(status_byte)` if the account exists, `None` otherwise.
-/// Status: 0 = approved, non-zero = executed.
-pub(super) fn check_solana_incoming_message(
-    rpc_client: &solana_client::rpc_client::RpcClient,
-    command_id: &[u8; 32],
-) -> Result<Option<u8>> {
-    let (pda, _bump) = Pubkey::find_program_address(
-        &[b"incoming message", command_id],
-        &solana_axelar_gateway::id(),
-    );
-
-    match rpc_client.get_account_data(&pda) {
-        Ok(data) => {
-            if data.len() <= INCOMING_MESSAGE_STATUS_OFFSET {
-                return Err(eyre::eyre!(
-                    "IncomingMessage account too small: {} bytes",
-                    data.len()
-                ));
-            }
-            Ok(Some(data[INCOMING_MESSAGE_STATUS_OFFSET]))
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            if err_str.contains("AccountNotFound") || err_str.contains("could not find account") {
-                Ok(None)
-            } else {
-                Err(eyre::eyre!("Solana RPC error: {e}"))
-            }
-        }
-    }
 }

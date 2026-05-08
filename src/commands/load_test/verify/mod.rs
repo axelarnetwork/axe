@@ -24,14 +24,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// Interval for recalculating rolling throughput.
 const THROUGHPUT_WINDOW: Duration = Duration::from_secs(10);
 
+mod checks;
 mod pipeline;
 mod report;
 mod state;
 
+use self::checks::{check_evm_is_message_approved, check_solana_incoming_message};
 use self::pipeline::{
-    DestinationChecker, ItsHubDest, check_cosmos_routed, check_evm_is_message_approved,
-    check_hub_approved, check_solana_incoming_message, discover_second_leg, parse_payload_hash,
-    poll_pipeline, poll_pipeline_its_hub, poll_pipeline_its_hub_evm,
+    DestinationChecker, ItsHubDest, check_cosmos_routed, check_hub_approved, discover_second_leg,
+    parse_payload_hash, poll_pipeline, poll_pipeline_its_hub, poll_pipeline_its_hub_evm,
 };
 use self::report::compute_verification_report;
 use self::state::Phase;
