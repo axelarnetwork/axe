@@ -79,3 +79,15 @@ mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet",
 # threshold (25). The pre-commit hook runs clippy with `-D warnings` so this
 # denies any regression.
 cognitive_complexity = "deny"
+
+# Warn-level scaffolding for the polish refactor plan: surface every violation
+# without blocking pre-commit. Each lint is suppressed via `-A` in the hooks
+# until its target phase finishes the cleanup; then the lint flips to `deny`
+# and the `-A` is removed (Phase 6 of the plan). Running `cargo clippy
+# --all-targets` (no `-D warnings`) shows the warn output today.
+too_many_lines         = "warn"
+too_many_arguments     = "warn"
+needless_pass_by_value = "warn"
+manual_let_else        = "warn"
+redundant_clone        = "warn"
+useless_conversion     = "warn"

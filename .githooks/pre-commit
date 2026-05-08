@@ -17,8 +17,17 @@ cd "$ROOT"
 echo "==> cargo fmt --all --check"
 cargo fmt --all --check
 
-echo "==> cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets -- -D warnings
+echo "==> cargo clippy --all-targets -- -D warnings (refactor warn lints suppressed)"
+# The lints below are warn-level scaffolding for the polish refactor plan
+# (see Cargo.toml [lints.clippy]). They are suppressed here so the hook
+# doesn't block on the existing surface; flipped to deny in Phase 6.
+cargo clippy --all-targets -- -D warnings \
+    -A clippy::too_many_lines \
+    -A clippy::too_many_arguments \
+    -A clippy::needless_pass_by_value \
+    -A clippy::manual_let_else \
+    -A clippy::redundant_clone \
+    -A clippy::useless_conversion
 
 echo "==> cargo test --all-targets"
 cargo test --all-targets --quiet
