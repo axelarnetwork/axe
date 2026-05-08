@@ -48,7 +48,7 @@ use std::time::Instant;
 
 use eyre::Result;
 
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::ui;
 
 /// Load test type (extensible for future directions).
@@ -193,16 +193,12 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
     // XRPL uses `XrplVotingVerifier` (not `VotingVerifier`), so we also accept
     // that as evidence of a verifiable source.
     let src = &args.source_chain;
-    let has_standard_vv = read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/VotingVerifier/{src}/address"),
-    )
-    .is_ok();
-    let has_xrpl_vv = read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/XrplVotingVerifier/{src}/address"),
-    )
-    .is_ok();
+    let cfg = ChainsConfig::load(&args.config)?;
+    let has_standard_vv = cfg.axelar.contract_address("VotingVerifier", src).is_ok();
+    let has_xrpl_vv = cfg
+        .axelar
+        .contract_address("XrplVotingVerifier", src)
+        .is_ok();
     // Stellar shares the `VotingVerifier` contract name in the config, so the
     // standard check above already covers it; this branch is just documentation.
     if !has_standard_vv && !has_xrpl_vv {

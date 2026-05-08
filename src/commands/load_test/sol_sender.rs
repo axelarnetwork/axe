@@ -356,14 +356,11 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let source_chain = args.source_axelar_id.clone();
 
     // Check if source chain has a voting verifier (for correct initial phase).
-    let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
-        &args.config,
-        &format!(
-            "/axelar/contracts/VotingVerifier/{}/address",
-            args.source_chain
-        ),
-    )
-    .is_ok();
+    let cfg = crate::config::ChainsConfig::load(&args.config)?;
+    let has_voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", &args.source_chain)
+        .is_ok();
 
     let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
         let kp = Arc::clone(&keypairs_pool[key_idx]);
