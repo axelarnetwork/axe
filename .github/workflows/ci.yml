@@ -19,4 +19,5 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings -A clippy::too_many_lines
+      - run: cargo test --all-targets --quiet
