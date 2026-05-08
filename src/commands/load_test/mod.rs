@@ -1,29 +1,32 @@
-pub mod evm_sender;
+mod evm_sender;
 mod gmp;
 mod helpers;
-pub mod its_evm_to_sol;
-pub mod its_evm_to_sol_with_data;
-pub mod its_evm_to_stellar;
-pub mod its_evm_to_xrpl;
-pub mod its_sol_to_evm;
-pub mod its_stellar_to_evm;
-pub mod its_stellar_to_sol;
-pub mod its_xrpl_to_evm;
-pub mod keypairs;
+mod its_evm_to_sol;
+mod its_evm_to_sol_with_data;
+mod its_evm_to_stellar;
+mod its_evm_to_xrpl;
+mod its_sol_to_evm;
+mod its_stellar_to_evm;
+mod its_stellar_to_sol;
+mod its_xrpl_to_evm;
+mod keypairs;
 pub mod metrics;
 mod resolve;
-pub mod sol_sender;
-pub mod stellar_sender;
+mod sol_sender;
+mod stellar_sender;
 mod sustained;
 mod verify;
-pub mod xrpl_sender;
+mod xrpl_sender;
 
 // Re-exports for callers outside the load_test module:
 // - `ensure_sender_receiver_on_evm_chain` is used by `commands::test_gmp`
 //   (the `test_gmp --config` flow deploys / reuses a SenderReceiver on the
 //   destination EVM chain).
+// - `make_executable_payload` / `memo_program_id` are used by
+//   `commands::test_gmp::source` to build the Solana-side memo payload.
 // - `resolve_from_config` is used by `main.rs` to resolve a chains-config
 //   JSON into a `ResolvedConfig` before dispatching to `run`.
+pub(crate) use evm_sender::{make_executable_payload, memo_program_id};
 pub(crate) use helpers::ensure_sender_receiver_on_evm_chain;
 pub(crate) use resolve::resolve_from_config;
 

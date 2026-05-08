@@ -6,7 +6,7 @@ use alloy::{
 use eyre::Result;
 use solana_sdk::{pubkey::Pubkey, signer::Signer};
 
-use crate::commands::load_test::evm_sender::{make_executable_payload, memo_program_id};
+use crate::commands::load_test::{make_executable_payload, memo_program_id};
 use crate::evm::{ContractCall, SenderReceiver};
 use crate::solana::{extract_its_message_id, load_keypair, send_call_contract};
 use crate::ui;
