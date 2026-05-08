@@ -79,6 +79,20 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Ceilings (enforced by clippy, not vibes): cognitive complexity ≤ 25, lines ≤ 100, arguments ≤ 7.
 - More than 7 arguments → group them in a struct (e.g., `PollPipelineArgs`). The struct doc replaces the argument-list comments.
 
+### Owned types in bundle structs
+
+When grouping arguments into a struct, prefer owned types (`String`, `Vec<u8>`, `T`) over borrowed types (`&str`, `&[u8]`, `&T`).
+
+Lifetime parameters force every consumer to thread `'a` through their own signatures and structs — that cognitive overhead is almost never worth the saved allocation in this codebase's call patterns (a few transactions per run, small payloads). The struct should read like pseudocode at the call site: `SuiGmpCall { destination_chain: "flow".into(), payload, gas_value_mist: 0, gas_budget_mist: 0 }` — no `<'a>`, no lifetime juggling.
+
+Exceptions:
+
+- Mutable references (`&mut Vec<...>`, `&mut Receiver<...>`) cannot be owned without moving them out of the caller. Pass these as separate arguments alongside an owned bundle struct, not as fields *in* the bundle. Example: `poll_pipeline(txs: &mut Vec<PendingTx>, rx: Option<&mut Receiver<PendingTx>>, args: PollPipelineArgs)`.
+- A struct that's genuinely a view into caller-owned data on a measured hot path (rare in this codebase).
+- `&'static str` (compile-time literals) is fine — that's not a lifetime parameter on the struct.
+
+If you find yourself reaching for `<'a>` on a bundle struct, ask: is the alloc actually measurable? If not, take the alloc and let the struct be lifetime-free.
+
 ### Business logic reads like pseudocode
 
 - The top-level orchestrator (`run`, `verify_onchain`, `relay_to_destination`) should be a sequence of named calls — a reader scanning it understands the feature without going deeper.
