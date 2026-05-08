@@ -22,7 +22,6 @@ use crate::preflight;
 use crate::state::read_state;
 use crate::types::ChainType;
 use crate::ui;
-use crate::utils::read_contract_address;
 
 const TOTAL_STEPS: usize = 8;
 
@@ -48,8 +47,16 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     preflight::check_deployer_balance(&rpc_url, deployer_address, &target_json, &axelar_id).await?;
 
-    let gateway_addr = read_contract_address(&target_json, &axelar_id, "AxelarGateway")?;
-    let gas_service_addr = read_contract_address(&target_json, &axelar_id, "AxelarGasService")?;
+    let chain_cfg = cfg
+        .chains
+        .get(&axelar_id)
+        .ok_or_else(|| eyre::eyre!("chain '{axelar_id}' not found in config"))?;
+    let gateway_addr: alloy::primitives::Address = chain_cfg
+        .contract_address("AxelarGateway", &axelar_id)?
+        .parse()?;
+    let gas_service_addr: alloy::primitives::Address = chain_cfg
+        .contract_address("AxelarGasService", &axelar_id)?
+        .parse()?;
 
     ui::section(&format!("GMP Test: {axelar_id}"));
     ui::address("gateway", &format!("{gateway_addr}"));

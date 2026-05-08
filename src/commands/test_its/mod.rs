@@ -59,7 +59,6 @@ use crate::preflight;
 use crate::state::read_state;
 use crate::types::{ChainAxelarId, ChainType};
 use crate::ui;
-use crate::utils::read_contract_address;
 
 const TOTAL_STEPS: usize = 10;
 
@@ -109,17 +108,29 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
     preflight::check_deployer_balance(&rpc_url, deployer_address, &target_json, &axelar_id).await?;
 
-    let its_factory_addr =
-        read_contract_address(&target_json, &axelar_id, "InterchainTokenFactory")?;
-    let its_proxy_addr = read_contract_address(&target_json, &axelar_id, "InterchainTokenService")?;
+    let src_cfg = cfg
+        .chains
+        .get(&axelar_id)
+        .ok_or_else(|| eyre::eyre!("chain '{axelar_id}' not found in config"))?;
+    let its_factory_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenFactory", &axelar_id)?
+        .parse()?;
+    let its_proxy_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenService", &axelar_id)?
+        .parse()?;
 
-    let dest_rpc = cfg
+    let dest_cfg = cfg
         .chains
         .get(DEST_CHAIN)
-        .and_then(|c| c.rpc.as_deref())
+        .ok_or_else(|| eyre::eyre!("destination chain '{DEST_CHAIN}' not found in config"))?;
+    let dest_rpc = dest_cfg
+        .rpc
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{DEST_CHAIN}' in target json"))?
         .to_string();
-    let dest_its_addr = read_contract_address(&target_json, DEST_CHAIN, "InterchainTokenService")?;
+    let dest_its_addr: alloy::primitives::Address = dest_cfg
+        .contract_address("InterchainTokenService", DEST_CHAIN)?
+        .parse()?;
 
     ui::section(&format!("ITS Test: {axelar_id} → {DEST_CHAIN}"));
     ui::address("deployer", &format!("{deployer_address}"));
@@ -547,8 +558,11 @@ pub async fn run_config(
         .connect_http(dst_rpc.parse()?);
 
     // --- Resolve contract addresses ---
-    let dst_its_proxy = read_contract_address(&config, &dst, "InterchainTokenService")?;
-    let dst_evm_gateway = read_contract_address(&config, &dst, "AxelarGateway")?;
+    let dst_its_proxy: alloy::primitives::Address = dst_cfg
+        .contract_address("InterchainTokenService", &dst)?
+        .parse()?;
+    let dst_evm_gateway: alloy::primitives::Address =
+        dst_cfg.contract_address("AxelarGateway", &dst)?.parse()?;
     let src_cosm_gateway = cfg
         .axelar
         .contract_address("Gateway", src_axelar_id.as_str())?
