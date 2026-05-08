@@ -98,22 +98,39 @@ impl<P: Provider> DestinationChecker<'_, P> {
 // Unified polling pipeline
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
-pub(super) async fn poll_pipeline<P: Provider>(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    cosm_gateway: Option<&str>,
-    source_chain: &str,
-    destination_chain: &str,
-    destination_address: &str,
-    checker: &DestinationChecker<'_, P>,
-    axelarnet_gateway: Option<&str>,
-    display_chain: Option<&str>,
-    mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
-    send_done: Option<&AtomicBool>,
-    external_spinner: Option<indicatif::ProgressBar>,
-) -> PeakThroughput {
+pub(super) struct PollPipelineArgs<'a, P: Provider> {
+    pub txs: &'a mut Vec<PendingTx>,
+    pub lcd: &'a str,
+    pub voting_verifier: Option<&'a str>,
+    pub cosm_gateway: Option<&'a str>,
+    pub source_chain: &'a str,
+    pub destination_chain: &'a str,
+    pub destination_address: &'a str,
+    pub checker: &'a DestinationChecker<'a, P>,
+    pub axelarnet_gateway: Option<&'a str>,
+    pub display_chain: Option<&'a str>,
+    pub rx: Option<&'a mut mpsc::UnboundedReceiver<PendingTx>>,
+    pub send_done: Option<&'a AtomicBool>,
+    pub external_spinner: Option<indicatif::ProgressBar>,
+}
+
+#[allow(clippy::cognitive_complexity)]
+pub(super) async fn poll_pipeline<P: Provider>(args: PollPipelineArgs<'_, P>) -> PeakThroughput {
+    let PollPipelineArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+        source_chain,
+        destination_chain,
+        destination_address,
+        checker,
+        axelarnet_gateway,
+        display_chain,
+        mut rx,
+        send_done,
+        external_spinner,
+    } = args;
     let spinner =
         external_spinner.unwrap_or_else(|| ui::wait_spinner("verifying pipeline (starting)..."));
     let mut last_progress = Instant::now();
@@ -695,21 +712,36 @@ pub(super) enum ItsHubDest {
     },
 }
 
+pub(super) struct PollItsHubArgs<'a> {
+    pub txs: &'a mut Vec<PendingTx>,
+    pub lcd: &'a str,
+    pub voting_verifier: Option<&'a str>,
+    pub source_chain: &'a str,
+    pub axelarnet_gateway: &'a str,
+    pub rpc: &'a str,
+    pub cosm_gateway_dest: &'a str,
+    pub dest: ItsHubDest,
+    pub rx: Option<&'a mut mpsc::UnboundedReceiver<PendingTx>>,
+    pub send_done: Option<&'a AtomicBool>,
+    pub external_spinner: Option<indicatif::ProgressBar>,
+}
+
 /// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
-#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
-pub(super) async fn poll_pipeline_its_hub(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    source_chain: &str,
-    axelarnet_gateway: &str,
-    rpc: &str,
-    cosm_gateway_dest: &str,
-    dest: ItsHubDest,
-    mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
-    send_done: Option<&AtomicBool>,
-    external_spinner: Option<indicatif::ProgressBar>,
-) -> PeakThroughput {
+#[allow(clippy::cognitive_complexity)]
+pub(super) async fn poll_pipeline_its_hub(args: PollItsHubArgs<'_>) -> PeakThroughput {
+    let PollItsHubArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        dest,
+        mut rx,
+        send_done,
+        external_spinner,
+    } = args;
     let spinner = external_spinner
         .unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
     let mut last_progress = Instant::now();
@@ -1185,23 +1217,41 @@ pub(super) async fn poll_pipeline_its_hub(
     compute_peak_throughput(txs)
 }
 
+pub(super) struct PollItsHubEvmArgs<'a, P: Provider> {
+    pub txs: &'a mut Vec<PendingTx>,
+    pub lcd: &'a str,
+    pub voting_verifier: Option<&'a str>,
+    pub source_chain: &'a str,
+    pub axelarnet_gateway: &'a str,
+    pub rpc: &'a str,
+    pub cosm_gateway_dest: &'a str,
+    pub gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+    pub _destination_chain: &'a str,
+    pub rx: Option<&'a mut mpsc::UnboundedReceiver<PendingTx>>,
+    pub send_done: Option<&'a AtomicBool>,
+    pub external_spinner: Option<indicatif::ProgressBar>,
+}
+
 /// Full ITS polling pipeline with EVM destination (batch + streaming):
 /// Voted → HubApproved → DiscoverSecondLeg → Routed → Approved(EVM) → Executed(EVM).
-#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+#[allow(clippy::cognitive_complexity)]
 pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    source_chain: &str,
-    axelarnet_gateway: &str,
-    rpc: &str,
-    cosm_gateway_dest: &str,
-    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
-    _destination_chain: &str,
-    mut rx: Option<&mut mpsc::UnboundedReceiver<PendingTx>>,
-    send_done: Option<&AtomicBool>,
-    external_spinner: Option<indicatif::ProgressBar>,
+    args: PollItsHubEvmArgs<'_, P>,
 ) -> PeakThroughput {
+    let PollItsHubEvmArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        gw_contract,
+        _destination_chain,
+        mut rx,
+        send_done,
+        external_spinner,
+    } = args;
     let spinner = external_spinner
         .unwrap_or_else(|| ui::wait_spinner("verifying ITS pipeline (starting)..."));
     let mut last_progress = Instant::now();

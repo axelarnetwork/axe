@@ -31,8 +31,8 @@ mod report;
 mod state;
 
 use self::pipeline::{
-    DestinationChecker, ItsHubDest, parse_payload_hash, poll_pipeline, poll_pipeline_its_hub,
-    poll_pipeline_its_hub_evm,
+    DestinationChecker, ItsHubDest, PollItsHubArgs, PollItsHubEvmArgs, PollPipelineArgs,
+    parse_payload_hash, poll_pipeline, poll_pipeline_its_hub, poll_pipeline_its_hub_evm,
 };
 use self::report::compute_verification_report;
 use self::state::Phase;
@@ -172,53 +172,79 @@ fn lookup_xrpl_cosm_gateway_dest(cfg: &ChainsConfig, destination_chain: &str) ->
         .to_string())
 }
 
+/// Args bundle for [`run_gmp_pipeline`].
+struct RunGmpArgs<'a, P: Provider> {
+    txs: &'a mut Vec<PendingTx>,
+    lcd: &'a str,
+    voting_verifier: Option<&'a str>,
+    cosm_gateway: &'a str,
+    source_chain: &'a str,
+    destination_chain: &'a str,
+    destination_address: &'a str,
+    checker: &'a DestinationChecker<'a, P>,
+    mode: VerifyMode<'a>,
+}
+
 /// Drive the GMP polling pipeline (both batch and streaming modes).
-#[allow(clippy::too_many_arguments)]
-async fn run_gmp_pipeline<P: Provider>(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    cosm_gateway: &str,
-    source_chain: &str,
-    destination_chain: &str,
-    destination_address: &str,
-    checker: &DestinationChecker<'_, P>,
-    mode: VerifyMode<'_>,
-) -> PeakThroughput {
-    let (rx, send_done, spinner) = mode.parts();
-    poll_pipeline(
+async fn run_gmp_pipeline<P: Provider>(args: RunGmpArgs<'_, P>) -> PeakThroughput {
+    let RunGmpArgs {
         txs,
         lcd,
         voting_verifier,
-        Some(cosm_gateway),
+        cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         checker,
-        None,
-        None,
+        mode,
+    } = args;
+    let (rx, send_done, spinner) = mode.parts();
+    poll_pipeline(PollPipelineArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        cosm_gateway: Some(cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_address,
+        checker,
+        axelarnet_gateway: None,
+        display_chain: None,
         rx,
         send_done,
-        spinner,
-    )
+        external_spinner: spinner,
+    })
     .await
 }
 
-/// Drive the ITS-via-hub polling pipeline (both batch and streaming modes).
-#[allow(clippy::too_many_arguments)]
-async fn run_its_hub_pipeline(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    source_chain: &str,
-    axelarnet_gateway: &str,
-    rpc: &str,
-    cosm_gateway_dest: &str,
+/// Args bundle for [`run_its_hub_pipeline`].
+struct RunItsHubArgs<'a> {
+    txs: &'a mut Vec<PendingTx>,
+    lcd: &'a str,
+    voting_verifier: Option<&'a str>,
+    source_chain: &'a str,
+    axelarnet_gateway: &'a str,
+    rpc: &'a str,
+    cosm_gateway_dest: &'a str,
     dest: ItsHubDest,
-    mode: VerifyMode<'_>,
-) -> PeakThroughput {
+    mode: VerifyMode<'a>,
+}
+
+/// Drive the ITS-via-hub polling pipeline (both batch and streaming modes).
+async fn run_its_hub_pipeline(args: RunItsHubArgs<'_>) -> PeakThroughput {
+    let RunItsHubArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        dest,
+        mode,
+    } = args;
     let (rx, send_done, spinner) = mode.parts();
-    poll_pipeline_its_hub(
+    poll_pipeline_its_hub(PollItsHubArgs {
         txs,
         lcd,
         voting_verifier,
@@ -229,28 +255,29 @@ async fn run_its_hub_pipeline(
         dest,
         rx,
         send_done,
-        spinner,
-    )
+        external_spinner: spinner,
+    })
     .await
+}
+
+/// Args bundle for [`run_its_hub_evm_pipeline`].
+struct RunItsHubEvmArgs<'a, P: Provider> {
+    txs: &'a mut Vec<PendingTx>,
+    lcd: &'a str,
+    voting_verifier: Option<&'a str>,
+    source_chain: &'a str,
+    axelarnet_gateway: &'a str,
+    rpc: &'a str,
+    cosm_gateway_dest: &'a str,
+    gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+    destination_chain: &'a str,
+    mode: VerifyMode<'a>,
 }
 
 /// Drive the ITS-via-hub polling pipeline with an EVM destination
 /// (both batch and streaming modes).
-#[allow(clippy::too_many_arguments)]
-async fn run_its_hub_evm_pipeline<P: Provider>(
-    txs: &mut Vec<PendingTx>,
-    lcd: &str,
-    voting_verifier: Option<&str>,
-    source_chain: &str,
-    axelarnet_gateway: &str,
-    rpc: &str,
-    cosm_gateway_dest: &str,
-    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
-    destination_chain: &str,
-    mode: VerifyMode<'_>,
-) -> PeakThroughput {
-    let (rx, send_done, spinner) = mode.parts();
-    poll_pipeline_its_hub_evm(
+async fn run_its_hub_evm_pipeline<P: Provider>(args: RunItsHubEvmArgs<'_, P>) -> PeakThroughput {
+    let RunItsHubEvmArgs {
         txs,
         lcd,
         voting_verifier,
@@ -260,10 +287,23 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
         cosm_gateway_dest,
         gw_contract,
         destination_chain,
+        mode,
+    } = args;
+    let (rx, send_done, spinner) = mode.parts();
+    poll_pipeline_its_hub_evm(PollItsHubEvmArgs {
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        gw_contract,
+        _destination_chain: destination_chain,
         rx,
         send_done,
-        spinner,
-    )
+        external_spinner: spinner,
+    })
     .await
 }
 
@@ -437,17 +477,17 @@ pub async fn verify_onchain<P: Provider>(
         gw_contract: &gw_contract,
     };
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
-        &checker,
-        VerifyMode::Batch,
-    )
+        checker: &checker,
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -483,21 +523,21 @@ pub async fn verify_onchain_evm_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
-        &checker,
-        VerifyMode::Stream {
+        checker: &checker,
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -561,17 +601,17 @@ pub async fn verify_onchain_stellar_gmp(
         _phantom: std::marker::PhantomData,
     };
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
-        destination_contract,
-        &checker,
-        VerifyMode::Batch,
-    )
+        destination_address: destination_contract,
+        checker: &checker,
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -611,21 +651,21 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
-        destination_contract,
-        &checker,
-        VerifyMode::Stream {
+        destination_address: destination_contract,
+        checker: &checker,
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -835,17 +875,17 @@ pub async fn verify_onchain_sui_gmp(
         _phantom: std::marker::PhantomData,
     };
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
-        &checker,
-        VerifyMode::Batch,
-    )
+        checker: &checker,
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -885,21 +925,21 @@ pub async fn verify_onchain_solana_streaming(
 
     let mut txs: Vec<PendingTx> = Vec::new();
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
-        &checker,
-        VerifyMode::Stream {
+        checker: &checker,
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     // Key by message_id (signature) since streaming PendingTx idx is always 0.
@@ -971,17 +1011,17 @@ pub async fn verify_onchain_solana(
             _phantom: std::marker::PhantomData,
         };
 
-    let peaks = run_gmp_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
-        &cosm_gateway,
+    let peaks = run_gmp_pipeline(RunGmpArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
+        cosm_gateway: &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
-        &checker,
-        VerifyMode::Batch,
-    )
+        checker: &checker,
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -1037,19 +1077,19 @@ pub async fn verify_onchain_solana_its(
     let rpc = read_axelar_rpc(config)?;
     let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Solana {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Solana {
             rpc_url: solana_rpc.to_string(),
         },
-        VerifyMode::Batch,
-    )
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -1079,23 +1119,23 @@ pub async fn verify_onchain_solana_its_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Solana {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Solana {
             rpc_url: solana_rpc.to_string(),
         },
-        VerifyMode::Stream {
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -1145,22 +1185,22 @@ pub async fn verify_onchain_stellar_its(
     let rpc = read_axelar_rpc(config)?;
     let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Stellar {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Stellar {
             rpc_url: stellar_rpc.to_string(),
             network_type: stellar_network_type.to_string(),
             gateway_contract: stellar_gateway_contract.to_string(),
             signer_pk,
         },
-        VerifyMode::Batch,
-    )
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -1192,26 +1232,26 @@ pub async fn verify_onchain_stellar_its_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Stellar {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Stellar {
             rpc_url: stellar_rpc.to_string(),
             network_type: stellar_network_type.to_string(),
             gateway_contract: stellar_gateway_contract.to_string(),
             signer_pk,
         },
-        VerifyMode::Stream {
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -1259,20 +1299,20 @@ pub async fn verify_onchain_xrpl_its(
     // regardless of which contract name the deployment uses.
     let cosm_gateway_dest = lookup_xrpl_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Xrpl {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Xrpl {
             rpc_url: xrpl_rpc.to_string(),
             recipient_address: xrpl_recipient.to_string(),
         },
-        VerifyMode::Batch,
-    )
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -1302,24 +1342,24 @@ pub async fn verify_onchain_xrpl_its_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_its_hub_pipeline(
-        &mut txs,
-        &lcd,
-        voting_verifier.as_deref(),
+    let peaks = run_its_hub_pipeline(RunItsHubArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: voting_verifier.as_deref(),
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        ItsHubDest::Xrpl {
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        dest: ItsHubDest::Xrpl {
             rpc_url: xrpl_rpc.to_string(),
             recipient_address: xrpl_recipient.to_string(),
         },
-        VerifyMode::Stream {
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -1376,18 +1416,18 @@ pub async fn verify_onchain_evm_its(
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
 
-    let peaks = run_its_hub_evm_pipeline(
-        &mut txs,
-        &lcd,
-        None, // skip VotingVerifier — no payload_hash for Solana ITS
+    let peaks = run_its_hub_evm_pipeline(RunItsHubEvmArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: None, // skip VotingVerifier — no payload_hash for Solana ITS
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        &gw_contract,
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        gw_contract: &gw_contract,
         destination_chain,
-        VerifyMode::Batch,
-    )
+        mode: VerifyMode::Batch,
+    })
     .await;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
@@ -1423,22 +1463,22 @@ pub async fn verify_onchain_evm_its_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = run_its_hub_evm_pipeline(
-        &mut txs,
-        &lcd,
-        None, // skip VotingVerifier — Solana ITS has no payload_hash
+    let peaks = run_its_hub_evm_pipeline(RunItsHubEvmArgs {
+        txs: &mut txs,
+        lcd: &lcd,
+        voting_verifier: None, // skip VotingVerifier — Solana ITS has no payload_hash
         source_chain,
-        &axelarnet_gateway,
-        &rpc,
-        &cosm_gateway_dest,
-        &gw_contract,
+        axelarnet_gateway: &axelarnet_gateway,
+        rpc: &rpc,
+        cosm_gateway_dest: &cosm_gateway_dest,
+        gw_contract: &gw_contract,
         destination_chain,
-        VerifyMode::Stream {
+        mode: VerifyMode::Stream {
             rx: &mut rx,
             send_done: &send_done,
             spinner,
         },
-    )
+    })
     .await;
 
     Ok(streaming_report_and_timings(&txs, peaks))
