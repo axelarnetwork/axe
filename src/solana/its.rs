@@ -8,8 +8,6 @@ use std::time::Instant;
 
 use anchor_lang::InstructionData;
 use eyre::Result;
-use solana_client::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     message::Message,
@@ -23,7 +21,7 @@ use super::encoding::{
     get_associated_token_address, interchain_token_id, mpl_token_metadata_program_id,
     spl_associated_token_account_program_id,
 };
-use super::rpc::fetch_tx_details;
+use super::rpc::{fetch_tx_details, rpc_client};
 use crate::commands::load_test::metrics::TxMetrics;
 
 /// Deploy an interchain token on Solana.
@@ -39,7 +37,7 @@ pub fn send_its_deploy_interchain_token(
     initial_supply: u64,
     minter: Option<&Pubkey>,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -129,7 +127,7 @@ pub fn send_its_deploy_remote_interchain_token(
     destination_chain: &str,
     gas_value: u64,
 ) -> Result<String> {
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
 
@@ -218,7 +216,7 @@ pub fn send_its_interchain_transfer(
     gas_value: u64,
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
-    let rpc_client = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
+    let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
 
     let (its_root_pda, _) = find_its_root_pda();
