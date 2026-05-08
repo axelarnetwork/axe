@@ -3,26 +3,80 @@
 //! discover side effects of the amplifier pipeline: proposal IDs, second-leg
 //! ITS message metadata, and routing/approval state.
 
-use eyre::Result;
+use eyre::{Result, WrapErr};
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::rpc::{lcd_cosmwasm_smart_query, rpc_tx_search_event};
 
+/// Outer envelope for an LCD `tx_response` payload (the body returned by
+/// `/cosmos/tx/v1beta1/txs/{hash}`). Only the events sub-list is needed by
+/// `extract_proposal_id`.
+#[derive(Deserialize)]
+struct TxResponseEnvelope {
+    tx_response: TxResponseBody,
+}
+
+#[derive(Deserialize)]
+struct TxResponseBody {
+    events: Vec<TmEvent>,
+}
+
+/// A single Tendermint event with a string `type` and a list of
+/// `attributes`. The attribute keys are domain-specific (e.g. `proposal_id`,
+/// `message_id`, `payload_hash`); callers iterate `attributes` and match by
+/// key, so we keep both `key` and `value` as `Option<String>` rather than
+/// modelling each variant. Both `event_type` and `attributes` default to
+/// permissive values (`""` and `[]`) so events that legacy `Value` lookups
+/// silently ignored still deserialise successfully.
+#[derive(Deserialize)]
+struct TmEvent {
+    #[serde(default, rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    attributes: Vec<TmAttribute>,
+}
+
+#[derive(Deserialize)]
+struct TmAttribute {
+    key: Option<String>,
+    value: Option<String>,
+}
+
+/// Tendermint RPC `tx_search` response envelope:
+/// `{ "result": { "txs": [{ "tx_result": { "events": [...] } }] } }`.
+/// Used by `discover_second_leg`.
+#[derive(Deserialize)]
+struct TxSearchEnvelope {
+    result: Option<TxSearchResult>,
+}
+
+#[derive(Deserialize)]
+struct TxSearchResult {
+    #[serde(default)]
+    txs: Vec<TxSearchTx>,
+}
+
+#[derive(Deserialize)]
+struct TxSearchTx {
+    tx_result: Option<TxResult>,
+}
+
+#[derive(Deserialize)]
+struct TxResult {
+    #[serde(default)]
+    events: Vec<TmEvent>,
+}
+
 /// Extract proposal_id from tx response events
 pub fn extract_proposal_id(tx_resp: &Value) -> Result<u64> {
-    let events = tx_resp
-        .pointer("/tx_response/events")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| eyre::eyre!("no events in tx response"))?;
-    for event in events {
-        let event_type = event["type"].as_str().unwrap_or("");
-        if (event_type == "submit_proposal" || event_type == "proposal_submitted")
-            && let Some(attrs) = event["attributes"].as_array()
-        {
-            for attr in attrs {
-                let key = attr["key"].as_str().unwrap_or("");
-                if key == "proposal_id" {
-                    let val = attr["value"].as_str().unwrap_or("0");
+    let envelope: TxResponseEnvelope =
+        serde_json::from_value(tx_resp.clone()).with_context(|| "no events in tx response")?;
+    for event in &envelope.tx_response.events {
+        if event.event_type == "submit_proposal" || event.event_type == "proposal_submitted" {
+            for attr in &event.attributes {
+                if attr.key.as_deref() == Some("proposal_id") {
+                    let val = attr.value.as_deref().unwrap_or("0");
                     return Ok(val.parse()?);
                 }
             }
@@ -56,42 +110,33 @@ pub async fn discover_second_leg(
     )
     .await?;
 
-    let txs = resp
-        .pointer("/result/txs")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // Permissive: the original used `.cloned().unwrap_or_default()` on the
+    // `txs` array, so any off-shape RPC response (or one carrying an `error`
+    // payload instead of `result`) was silently treated as "no txs yet".
+    let envelope: TxSearchEnvelope =
+        serde_json::from_value(resp).unwrap_or(TxSearchEnvelope { result: None });
+    let txs = envelope.result.map(|r| r.txs).unwrap_or_default();
 
     if txs.is_empty() {
         return Ok(None);
     }
 
-    let events = txs[0]
-        .pointer("/tx_result/events")
-        .and_then(|v| v.as_array());
-    let events = match events {
-        Some(e) => e,
+    let events = match txs.into_iter().next().and_then(|t| t.tx_result) {
+        Some(r) => r.events,
         None => return Ok(None),
     };
 
-    for event in events {
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if event_type != "wasm-routing" {
+    for event in &events {
+        if event.event_type != "wasm-routing" {
             continue;
         }
 
-        let attrs = match event.get("attributes").and_then(|v| v.as_array()) {
-            Some(a) => a,
-            None => continue,
-        };
+        let attrs = &event.attributes;
 
         let get_attr = |key: &str| -> Option<String> {
             attrs.iter().find_map(|a| {
-                let k = a.get("key").and_then(|v| v.as_str())?;
-                if k == key {
-                    a.get("value")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
+                if a.key.as_deref()? == key {
+                    a.value.clone()
                 } else {
                     None
                 }

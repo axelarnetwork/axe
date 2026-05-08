@@ -11,10 +11,169 @@ use alloy::{
 };
 use base64::Engine;
 use eyre::Result;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::evm::pubkey_to_address;
 use crate::ui;
+
+/// `account` sub-object inside the LCD `/cosmos/auth/v1beta1/accounts`
+/// response. The exact set of fields varies by Cosmos SDK version and signer
+/// type (BaseAccount, ModuleAccount, etc.), so only the fields we actually
+/// use are captured here.
+#[derive(Deserialize)]
+struct AccountInner {
+    #[serde(default)]
+    account_number: Option<String>,
+    #[serde(default)]
+    sequence: Option<String>,
+}
+
+/// LCD `/cosmos/bank/v1beta1/balances/{address}/by_denom` response. The
+/// `balance` field is `{ denom, amount }`, both as strings.
+#[derive(Deserialize)]
+struct BalanceResponse {
+    balance: Option<Coin>,
+}
+
+#[derive(Deserialize)]
+struct Coin {
+    #[serde(default)]
+    amount: Option<String>,
+}
+
+/// LCD `/cosmos/tx/v1beta1/simulate` response. The endpoint returns either a
+/// top-level `message` (error) or `gas_info.gas_used` (success).
+#[derive(Deserialize, Default)]
+struct SimulateResponse {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    gas_info: Option<GasInfo>,
+}
+
+#[derive(Deserialize)]
+struct GasInfo {
+    #[serde(default)]
+    gas_used: Option<String>,
+}
+
+/// LCD tx-result envelope used by both `lcd_broadcast_tx` and
+/// `lcd_wait_for_tx`: `{ "tx_response": { "code": u64, "raw_log": "..." } }`.
+/// Only the fields needed for failure detection are captured here; callers
+/// receive the raw `Value` to pluck their own fields (`txhash`, `events`,
+/// etc.).
+#[derive(Deserialize)]
+struct TxResultEnvelope {
+    tx_response: Option<TxResultBody>,
+}
+
+#[derive(Deserialize)]
+struct TxResultBody {
+    #[serde(default)]
+    code: Option<u64>,
+    #[serde(default)]
+    raw_log: Option<String>,
+}
+
+/// LCD `/cosmwasm/wasm/v1/code` paginated listing of code IDs.
+#[derive(Deserialize)]
+struct CodeListResponse {
+    code_infos: Option<Vec<CodeInfo>>,
+    #[serde(default)]
+    pagination: Option<Pagination>,
+}
+
+#[derive(Deserialize)]
+struct CodeInfo {
+    #[serde(default)]
+    code_id: Option<String>,
+    #[serde(default)]
+    data_hash: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Pagination {
+    #[serde(default)]
+    next_key: Option<String>,
+}
+
+/// `target.json` shape, narrowed to the axelar config fields read here. The
+/// MultisigProver address lookup is keyed by `chain_axelar_id` at runtime,
+/// so it stays a Value lookup inside `fetch_verifier_set`.
+#[derive(Deserialize)]
+struct AxelarTargetJson {
+    axelar: AxelarSection,
+}
+
+#[derive(Deserialize)]
+struct AxelarSection {
+    #[serde(default)]
+    rpc: Option<String>,
+    #[serde(default)]
+    lcd: Option<String>,
+    #[serde(default)]
+    contracts: Option<Value>,
+}
+
+/// Tendermint RPC `block?height=N` response. Only `header.time` is read.
+#[derive(Deserialize)]
+struct BlockResponse {
+    result: Option<BlockResult>,
+}
+
+#[derive(Deserialize)]
+struct BlockResult {
+    block: Option<BlockBody>,
+}
+
+#[derive(Deserialize)]
+struct BlockBody {
+    header: Option<BlockHeader>,
+}
+
+#[derive(Deserialize)]
+struct BlockHeader {
+    time: Option<String>,
+}
+
+/// Verifier set returned by `current_verifier_set` smart query. The signers
+/// map is keyed by an opaque participant id (e.g. consensus address). The
+/// numeric `threshold` and per-signer `weight` are kept as raw `Value` so the
+/// existing string-or-u64 polymorphism (and its silent fallback to `1` for
+/// off-shape weights) survives unchanged.
+#[derive(Deserialize)]
+struct VerifierSetResponse {
+    data: Option<VerifierSetData>,
+}
+
+#[derive(Deserialize)]
+struct VerifierSetData {
+    #[serde(default)]
+    id: Option<String>,
+    verifier_set: Option<VerifierSet>,
+}
+
+#[derive(Deserialize)]
+struct VerifierSet {
+    signers: Option<std::collections::BTreeMap<String, Signer>>,
+    #[serde(default)]
+    threshold: Value,
+    created_at: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct Signer {
+    pub_key: Option<PubKey>,
+    #[serde(default)]
+    weight: Value,
+}
+
+#[derive(Deserialize)]
+struct PubKey {
+    #[serde(default)]
+    ecdsa: Option<String>,
+}
 
 /// Parse a numeric LCD response field that comes back as a JSON string,
 /// defaulting to zero on missing/unparseable values. Many cosmos LCD endpoints
@@ -25,20 +184,34 @@ pub(super) fn parse_or_zero<T: std::str::FromStr + Default>(s: Option<&str>) -> 
 
 pub(super) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
     let url = format!("{lcd}/cosmos/auth/v1beta1/accounts/{address}");
-    let resp: Value = reqwest::get(&url).await?.json().await?;
-    let account = resp
-        .get("account")
-        .ok_or_else(|| eyre::eyre!("no account in response: {resp}"))?;
-    let account_number: u64 = parse_or_zero(account["account_number"].as_str());
-    let sequence: u64 = parse_or_zero(account["sequence"].as_str());
+    let raw: Value = reqwest::get(&url).await?.json().await?;
+    // The original errored only when the `account` field was entirely absent;
+    // any other shape (non-object, missing sub-fields) silently fell through
+    // to `parse_or_zero` → `(0, 0)`. We replicate that by checking presence
+    // first and absorbing typed-parse failures inside the account into the
+    // same zero defaults.
+    if raw.get("account").is_none() {
+        return Err(eyre::eyre!("no account in response: {raw}"));
+    }
+    let account: AccountInner =
+        serde_json::from_value(raw["account"].clone()).unwrap_or(AccountInner {
+            account_number: None,
+            sequence: None,
+        });
+    let account_number: u64 = parse_or_zero(account.account_number.as_deref());
+    let sequence: u64 = parse_or_zero(account.sequence.as_deref());
     Ok((account_number, sequence))
 }
 
 /// Query the bank balance of `address` for a single denom. Returns the amount in base units (e.g. uaxl).
 pub(super) async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
     let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{address}/by_denom?denom={denom}");
-    let resp: Value = reqwest::get(&url).await?.json().await?;
-    let amount: u128 = parse_or_zero(resp.pointer("/balance/amount").and_then(|v| v.as_str()));
+    let raw: Value = reqwest::get(&url).await?.json().await?;
+    // Permissive: original used `Value::pointer` with `.unwrap_or` defaults,
+    // so any off-shape response was silently treated as zero.
+    let resp: BalanceResponse =
+        serde_json::from_value(raw).unwrap_or(BalanceResponse { balance: None });
+    let amount: u128 = parse_or_zero(resp.balance.as_ref().and_then(|b| b.amount.as_deref()));
     Ok(amount)
 }
 
@@ -87,23 +260,28 @@ pub(super) async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
         "mode": "BROADCAST_MODE_UNSPECIFIED"
     });
     let client = reqwest::Client::new();
-    let resp: Value = client
+    let raw: Value = client
         .post(format!("{lcd}/cosmos/tx/v1beta1/simulate"))
         .json(&body)
         .send()
         .await?
         .json()
         .await?;
-    if let Some(err) = resp.get("message").and_then(|v| v.as_str())
+    // The original used `Value::pointer` lookups, which silently mapped any
+    // off-shape response to "gas_used = 0" → the existing "0 gas" error. We
+    // preserve that fallthrough by treating a deserialize failure as an
+    // empty `SimulateResponse` rather than introducing a new error path.
+    let resp: SimulateResponse = serde_json::from_value(raw.clone()).unwrap_or_default();
+    if let Some(err) = resp.message.as_deref()
         && !err.is_empty()
     {
         return Err(eyre::eyre!("simulation failed: {err}"));
     }
-    let gas_used: u64 = parse_or_zero(resp.pointer("/gas_info/gas_used").and_then(|v| v.as_str()));
+    let gas_used: u64 = parse_or_zero(resp.gas_info.as_ref().and_then(|g| g.gas_used.as_deref()));
     if gas_used == 0 {
         return Err(eyre::eyre!(
             "simulation returned 0 gas — response: {}",
-            serde_json::to_string_pretty(&resp)?
+            serde_json::to_string_pretty(&raw)?
         ));
     }
     Ok(gas_used)
@@ -123,14 +301,14 @@ pub(super) async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value
         .await?
         .json()
         .await?;
-    let code = resp
-        .pointer("/tx_response/code")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1);
+    let envelope: TxResultEnvelope =
+        serde_json::from_value(resp.clone()).unwrap_or(TxResultEnvelope { tx_response: None });
+    let tx_response = envelope.tx_response;
+    let code = tx_response.as_ref().and_then(|b| b.code).unwrap_or(1);
     if code != 0 {
-        let raw_log = resp
-            .pointer("/tx_response/raw_log")
-            .and_then(|v| v.as_str())
+        let raw_log = tx_response
+            .as_ref()
+            .and_then(|b| b.raw_log.as_deref())
             .unwrap_or("unknown error");
         return Err(eyre::eyre!("broadcast failed (code {code}): {raw_log}"));
     }
@@ -147,14 +325,14 @@ pub(super) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
             Err(_) => continue,
         };
         if resp.get("tx_response").is_some() {
-            let code = resp
-                .pointer("/tx_response/code")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1);
+            let envelope: TxResultEnvelope = serde_json::from_value(resp.clone())
+                .unwrap_or(TxResultEnvelope { tx_response: None });
+            let tx_response = envelope.tx_response;
+            let code = tx_response.as_ref().and_then(|b| b.code).unwrap_or(1);
             if code != 0 {
-                let raw_log = resp
-                    .pointer("/tx_response/raw_log")
-                    .and_then(|v| v.as_str())
+                let raw_log = tx_response
+                    .as_ref()
+                    .and_then(|b| b.raw_log.as_deref())
                     .unwrap_or("unknown");
                 return Err(eyre::eyre!("tx failed (code {code}): {raw_log}"));
             }
@@ -167,11 +345,9 @@ pub(super) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
 pub async fn lcd_query_proposal(lcd: &str, proposal_id: u64) -> Result<Value> {
     let url = format!("{lcd}/cosmos/gov/v1/proposals/{proposal_id}");
     let resp: Value = reqwest::get(&url).await?.json().await?;
-    let proposal = resp
-        .get("proposal")
+    resp.get("proposal")
         .cloned()
-        .ok_or_else(|| eyre::eyre!("no 'proposal' field in response"))?;
-    Ok(proposal)
+        .ok_or_else(|| eyre::eyre!("no 'proposal' field in response"))
 }
 
 /// Public Axelar LCD endpoints used as silent fallbacks when the primary
@@ -301,25 +477,31 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
         if let Some(ref key) = next_key {
             url.push_str(&format!("&pagination.key={key}"));
         }
-        let resp: Value = reqwest::get(&url).await?.json().await?;
-        let codes = resp["code_infos"]
-            .as_array()
+        let raw: Value = reqwest::get(&url).await?.json().await?;
+        // Permissive: original errored on `code_infos` missing/non-array via
+        // `as_array().ok_or(...)`; any other malformation (e.g. non-string
+        // `code_id`) was silently mapped to "0". We mirror that by trying a
+        // typed parse and falling back to an empty `CodeListResponse` so the
+        // existing "no code_infos" error fires for the missing-field case.
+        let resp: CodeListResponse = serde_json::from_value(raw).unwrap_or(CodeListResponse {
+            code_infos: None,
+            pagination: None,
+        });
+        let codes = resp
+            .code_infos
             .ok_or_else(|| eyre::eyre!("no code_infos in response"))?;
-        for code in codes {
-            let checksum = code["data_hash"].as_str().unwrap_or("").to_uppercase();
+        for code in &codes {
+            let checksum = code.data_hash.as_deref().unwrap_or("").to_uppercase();
             if checksum == expected {
-                let code_id: u64 = code["code_id"].as_str().unwrap_or("0").parse().unwrap_or(0);
+                let code_id: u64 = code.code_id.as_deref().unwrap_or("0").parse().unwrap_or(0);
                 return Ok(code_id);
             }
         }
-        let nk = resp
-            .pointer("/pagination/next_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let nk = resp.pagination.and_then(|p| p.next_key).unwrap_or_default();
         if nk.is_empty() {
             break;
         }
-        next_key = Some(nk.to_string());
+        next_key = Some(nk);
     }
     Err(eyre::eyre!(
         "code not found for checksum {expected_checksum}"
@@ -349,10 +531,13 @@ pub fn read_axelar_contract_field(target_json: &Path, pointer: &str) -> Result<S
 /// Read Axelar RPC url from target json (`/axelar/rpc`).
 pub fn read_axelar_rpc(target_json: &Path) -> Result<String> {
     let content = fs::read_to_string(target_json)?;
-    let root: Value = serde_json::from_str(&content)?;
-    root.pointer("/axelar/rpc")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    // Parse to `Value` first so a malformed-JSON file surfaces serde's parse
+    // error verbatim, matching the original `from_str::<Value>(&content)?`.
+    let raw: Value = serde_json::from_str(&content)?;
+    let root: AxelarTargetJson =
+        serde_json::from_value(raw).map_err(|_| eyre::eyre!("no axelar.rpc in target json"))?;
+    root.axelar
+        .rpc
         .ok_or_else(|| eyre::eyre!("no axelar.rpc in target json"))
 }
 
@@ -492,10 +677,11 @@ pub async fn rpc_tx_search(
 /// Query Tendermint RPC `block` endpoint for a given height. Returns block.header.time.
 pub async fn rpc_block_time(rpc: &str, height: u64) -> Result<String> {
     let url = format!("{rpc}/block?height={height}");
-    let resp: Value = reqwest::get(&url).await?.json().await?;
-    resp.pointer("/result/block/header/time")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    let resp: BlockResponse = reqwest::get(&url).await?.json().await?;
+    resp.result
+        .and_then(|r| r.block)
+        .and_then(|b| b.header)
+        .and_then(|h| h.time)
         .ok_or_else(|| {
             eyre::eyre!("RPC response missing /result/block/header/time at height {height}")
         })
@@ -508,17 +694,24 @@ pub async fn fetch_verifier_set(
     chain_axelar_id: &str,
 ) -> Result<(Vec<(Address, u128)>, u128, FixedBytes<32>, String)> {
     let content = fs::read_to_string(target_json)?;
-    let root: Value = serde_json::from_str(&content)?;
+    // Parse to `Value` first so a malformed-JSON file surfaces serde's parse
+    // error verbatim, matching the original `from_str::<Value>(&content)?`.
+    let raw: Value = serde_json::from_str(&content)?;
+    let root: AxelarTargetJson =
+        serde_json::from_value(raw).map_err(|_| eyre::eyre!("no axelar.lcd in target json"))?;
 
     let lcd = root
-        .pointer("/axelar/lcd")
-        .and_then(|v| v.as_str())
+        .axelar
+        .lcd
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?;
 
-    let prover_addr = root
-        .pointer(&format!(
-            "/axelar/contracts/MultisigProver/{chain_axelar_id}/address"
-        ))
+    // The MultisigProver address is keyed by `chain_axelar_id` at runtime, so
+    // its lookup stays a `Value::pointer` — the contracts map is dynamically
+    // shaped (different contracts have different per-chain layouts).
+    let contracts = root.axelar.contracts.unwrap_or(Value::Null);
+    let prover_addr = contracts
+        .pointer(&format!("/MultisigProver/{chain_axelar_id}/address"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| eyre::eyre!("no MultisigProver.{chain_axelar_id}.address in target json"))?;
 
@@ -528,50 +721,56 @@ pub async fn fetch_verifier_set(
     let url = format!("{lcd}/cosmwasm/wasm/v1/contract/{prover_addr}/smart/{query_b64}");
     ui::info(&format!("fetching verifier set from: {url}"));
 
-    let resp: Value = reqwest::get(&url).await?.json().await?;
+    let resp: VerifierSetResponse = reqwest::get(&url).await?.json().await?;
 
-    let data = &resp["data"];
-    let verifier_set_id = data["id"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no id in verifier set response"))?
-        .to_string();
+    let data = resp
+        .data
+        .ok_or_else(|| eyre::eyre!("no id in verifier set response"))?;
+    let verifier_set_id = data
+        .id
+        .ok_or_else(|| eyre::eyre!("no id in verifier set response"))?;
 
-    let verifier_set = &data["verifier_set"];
-    let signers_obj = verifier_set["signers"]
-        .as_object()
+    let verifier_set = data
+        .verifier_set
+        .ok_or_else(|| eyre::eyre!("no signers object in verifier set"))?;
+    let signers_obj = verifier_set
+        .signers
         .ok_or_else(|| eyre::eyre!("no signers object in verifier set"))?;
 
-    let threshold: u128 = verifier_set["threshold"]
+    let threshold: u128 = verifier_set
+        .threshold
         .as_str()
-        .or_else(|| verifier_set["threshold"].as_u64().map(|_| ""))
+        .or_else(|| verifier_set.threshold.as_u64().map(|_| ""))
         .ok_or_else(|| eyre::eyre!("no threshold in verifier set"))
         .and_then(|s| {
             if s.is_empty() {
-                Ok(verifier_set["threshold"].as_u64().unwrap() as u128)
+                Ok(verifier_set.threshold.as_u64().unwrap() as u128)
             } else {
                 s.parse::<u128>()
                     .map_err(|e| eyre::eyre!("invalid threshold: {e}"))
             }
         })?;
 
-    let created_at = verifier_set["created_at"]
-        .as_u64()
+    let created_at = verifier_set
+        .created_at
         .ok_or_else(|| eyre::eyre!("no created_at in verifier set"))?;
 
     let nonce = FixedBytes::<32>::from(U256::from(created_at).to_be_bytes::<32>());
 
     let mut weighted_signers: Vec<(Address, u128)> = Vec::new();
 
-    for (_key, signer) in signers_obj {
+    for signer in signers_obj.values() {
         let pubkey_hex = signer
-            .pointer("/pub_key/ecdsa")
-            .and_then(|v| v.as_str())
+            .pub_key
+            .as_ref()
+            .and_then(|p| p.ecdsa.as_deref())
             .ok_or_else(|| eyre::eyre!("no pub_key.ecdsa for signer"))?;
 
-        let weight: u128 = signer["weight"]
+        let weight: u128 = signer
+            .weight
             .as_str()
             .map(|s| s.parse::<u128>())
-            .unwrap_or_else(|| Ok(signer["weight"].as_u64().unwrap_or(1) as u128))
+            .unwrap_or_else(|| Ok(signer.weight.as_u64().unwrap_or(1) as u128))
             .map_err(|e| eyre::eyre!("invalid weight: {e}"))?;
 
         let pubkey_bytes = hex::decode(pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex))?;
