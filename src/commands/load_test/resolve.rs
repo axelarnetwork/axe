@@ -158,7 +158,7 @@ pub(crate) fn resolve_from_config(
         // Case 3: Nothing or partial → try to auto-detect everything
         (None, src_opt, dst_opt) => {
             // Try to find a valid combination from config
-            let (tt, src, dst) = auto_detect_all(chains, src_opt, dst_opt)?;
+            let (tt, src, dst) = auto_detect_all(chains, src_opt.as_ref(), dst_opt)?;
             (tt, src, dst)
         }
     };
@@ -480,11 +480,11 @@ fn auto_detect_stellar_pair(
 /// Looks at what chain types exist in the config and picks the best match.
 fn auto_detect_all(
     chains: &HashMap<String, ChainEntry>,
-    source_override: Option<String>,
+    source_override: Option<&String>,
     dest_override: Option<String>,
 ) -> Result<(TestType, String, String)> {
     // If one chain is given, figure out the other
-    if let Some(ref src) = source_override {
+    if let Some(src) = source_override {
         let src_type = chain_type(chains, src)
             .ok_or_else(|| eyre::eyre!("source chain '{src}' not found in config"))?;
         if src_type == "svm" {

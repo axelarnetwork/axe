@@ -52,18 +52,16 @@ fn discover_programs(
 
     for network in &networks {
         let config_path = config_dir.join(format!("{network}.json"));
-        let config_content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(config_content) = std::fs::read_to_string(&config_path) else {
+            continue;
         };
         let config: serde_json::Value = match serde_json::from_str(&config_content) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let chains = match config.get("chains").and_then(|v| v.as_object()) {
-            Some(c) => c,
-            None => continue,
+        let Some(chains) = config.get("chains").and_then(|v| v.as_object()) else {
+            continue;
         };
 
         // Find SVM chains and their RPC
@@ -81,9 +79,8 @@ fn discover_programs(
                 None => continue,
             };
 
-            let contracts = match chain_config.get("contracts").and_then(|v| v.as_object()) {
-                Some(c) => c,
-                None => continue,
+            let Some(contracts) = chain_config.get("contracts").and_then(|v| v.as_object()) else {
+                continue;
             };
 
             // Map contract names to our program types
@@ -167,22 +164,20 @@ pub async fn run(
     let mut all_entries: Vec<ActivityEntry> = Vec::new();
 
     for entry in &programs {
-        let pubkey = match Pubkey::from_str(&entry.address) {
-            Ok(pk) => pk,
-            Err(_) => continue,
+        let Ok(pubkey) = Pubkey::from_str(&entry.address) else {
+            continue;
         };
 
         let rpc = crate::solana::rpc_client(&entry.rpc_url);
 
-        let sigs = match rpc.get_signatures_for_address_with_config(
+        let Ok(sigs) = rpc.get_signatures_for_address_with_config(
             &pubkey,
             solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
                 limit: Some(limit),
                 ..Default::default()
             },
-        ) {
-            Ok(s) => s,
-            Err(_) => continue,
+        ) else {
+            continue;
         };
 
         if sigs.is_empty() {
@@ -280,21 +275,19 @@ fn fetch_and_decode(
     sig_str: &str,
     known: &std::collections::HashMap<Pubkey, &'static str>,
 ) -> (Option<String>, Option<serde_json::Value>, Vec<String>) {
-    let sig = match Signature::from_str(sig_str) {
-        Ok(s) => s,
-        Err(_) => return (None, None, vec![]),
+    let Ok(sig) = Signature::from_str(sig_str) else {
+        return (None, None, vec![]);
     };
 
-    let tx = match rpc.get_transaction_with_config(
+    let Ok(tx) = rpc.get_transaction_with_config(
         &sig,
         RpcTransactionConfig {
             encoding: Some(UiTransactionEncoding::Json),
             commitment: Some(CommitmentConfig::confirmed()),
             max_supported_transaction_version: Some(0),
         },
-    ) {
-        Ok(t) => t,
-        Err(_) => return (None, None, vec![]),
+    ) else {
+        return (None, None, vec![]);
     };
 
     // Extract account keys
@@ -310,7 +303,7 @@ fn fetch_and_decode(
         _ => vec![],
     };
 
-    let mut all_keys = account_keys.clone();
+    let mut all_keys = account_keys;
     if let Some(meta) = &tx.transaction.meta
         && let solana_transaction_status::option_serializer::OptionSerializer::Some(loaded) =
             &meta.loaded_addresses

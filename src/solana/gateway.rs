@@ -191,9 +191,8 @@ pub fn extract_gateway_call_contract_payload(
 
     for ii in &inner_lists {
         for (inner_pos, inst) in ii.instructions.iter().enumerate() {
-            let ix = match inst {
-                UiInstruction::Compiled(c) => c,
-                _ => continue,
+            let UiInstruction::Compiled(ix) = inst else {
+                continue;
             };
             let data = bs58::decode(&ix.data)
                 .into_vec()
@@ -580,13 +579,10 @@ pub fn approve_messages_on_gateway(
     }
 
     // Step 7c: Approve messages
-    let messages = match &execute_data.payload_items {
-        MerklizedPayload::NewMessages { messages } => messages,
-        _ => {
-            return Err(eyre::eyre!(
-                "expected NewMessages payload, got VerifierSetRotation"
-            ));
-        }
+    let MerklizedPayload::NewMessages { messages } = &execute_data.payload_items else {
+        return Err(eyre::eyre!(
+            "expected NewMessages payload, got VerifierSetRotation"
+        ));
     };
 
     ui::info(&format!("approving {} message(s)...", messages.len()));

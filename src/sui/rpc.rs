@@ -307,9 +307,8 @@ impl SuiClient {
                 .cloned()
                 .unwrap_or_default();
             for ev in &arr {
-                let pj = match ev.get("parsedJson") {
-                    Some(p) => p,
-                    None => continue,
+                let Some(pj) = ev.get("parsedJson") else {
+                    continue;
                 };
                 // Sui's `MessageApproved` events nest `{source_chain,
                 // message_id, ...}` under a `message` key. `MessageExecuted`

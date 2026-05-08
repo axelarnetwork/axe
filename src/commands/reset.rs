@@ -10,7 +10,7 @@ use crate::ui;
 pub fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
     let state = read_state(&axelar_id)?;
-    let target_json = state.target_json.clone();
+    let target_json = state.target_json;
 
     // --- Delete state file ---
     let sf = state_path(&axelar_id)?;

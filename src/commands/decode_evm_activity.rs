@@ -41,18 +41,16 @@ fn discover_contracts(
 
     for network in &networks {
         let config_path = config_dir.join(format!("{network}.json"));
-        let config_content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(config_content) = std::fs::read_to_string(&config_path) else {
+            continue;
         };
         let config: serde_json::Value = match serde_json::from_str(&config_content) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let chains = match config.get("chains").and_then(|v| v.as_object()) {
-            Some(c) => c,
-            None => continue,
+        let Some(chains) = config.get("chains").and_then(|v| v.as_object()) else {
+            continue;
         };
 
         for (chain_name, chain_config) in chains {
@@ -73,9 +71,8 @@ fn discover_contracts(
                 None => continue,
             };
 
-            let contracts = match chain_config.get("contracts").and_then(|v| v.as_object()) {
-                Some(c) => c,
-                None => continue,
+            let Some(contracts) = chain_config.get("contracts").and_then(|v| v.as_object()) else {
+                continue;
             };
 
             let contract_map = [
@@ -157,19 +154,16 @@ pub async fn run(
     for entry in &contracts {
         let provider = ProviderBuilder::new().connect_http(entry.rpc_url.parse()?);
 
-        let latest_block = match provider.get_block_number().await {
-            Ok(b) => b,
-            Err(_) => {
-                if !json_mode {
-                    eprintln!(
-                        "  {} could not reach {} ({})",
-                        "!".yellow(),
-                        entry.chain_name,
-                        entry.rpc_url
-                    );
-                }
-                continue;
+        let Ok(latest_block) = provider.get_block_number().await else {
+            if !json_mode {
+                eprintln!(
+                    "  {} could not reach {} ({})",
+                    "!".yellow(),
+                    entry.chain_name,
+                    entry.rpc_url
+                );
             }
+            continue;
         };
 
         let from_block = latest_block.saturating_sub(10000);
@@ -179,9 +173,8 @@ pub async fn run(
             .from_block(from_block)
             .to_block(latest_block);
 
-        let logs = match provider.get_logs(&filter).await {
-            Ok(l) => l,
-            Err(_) => continue,
+        let Ok(logs) = provider.get_logs(&filter).await else {
+            continue;
         };
 
         if logs.is_empty() {

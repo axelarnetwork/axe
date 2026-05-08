@@ -126,12 +126,9 @@ pub async fn run(
     }
 
     loop {
-        let (step_idx, step_ref) = match next_pending_step(&ctx.state) {
-            Some(s) => s,
-            None => {
-                print_completion_message(&ctx.axelar_id, deploy_start);
-                break;
-            }
+        let Some((step_idx, step_ref)) = next_pending_step(&ctx.state) else {
+            print_completion_message(&ctx.axelar_id, deploy_start);
+            break;
         };
 
         // Clone the step so step handlers can mutate `ctx.state` (which

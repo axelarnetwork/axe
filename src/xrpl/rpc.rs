@@ -251,9 +251,8 @@ impl XrplClient {
             }
             // We only care about Payments (the relayer broadcasts Payments).
             let common = at.tx.common();
-            let memos = match &common.memos {
-                Some(m) => m,
-                None => continue,
+            let Some(memos) = &common.memos else {
+                continue;
             };
             for m in memos {
                 let memo_type_decoded = m

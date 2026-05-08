@@ -17,14 +17,9 @@ echo "==> cargo fmt --all --check"
 cargo fmt --all --check
 
 for feature in mainnet testnet stagenet devnet-amplifier; do
-    echo "==> cargo clippy --no-default-features --features $feature --all-targets -- -D warnings (refactor warn lints suppressed)"
+    echo "==> cargo clippy --no-default-features --features $feature --all-targets -- -D warnings (too_many_lines suppressed)"
     cargo clippy --no-default-features --features "$feature" --all-targets -- -D warnings \
-        -A clippy::too_many_lines \
-        -A clippy::too_many_arguments \
-        -A clippy::needless_pass_by_value \
-        -A clippy::manual_let_else \
-        -A clippy::redundant_clone \
-        -A clippy::useless_conversion
+        -A clippy::too_many_lines
 done
 
 echo "==> cargo test --all-targets"

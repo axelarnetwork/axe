@@ -80,14 +80,20 @@ mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet",
 # denies any regression.
 cognitive_complexity = "deny"
 
-# Warn-level scaffolding for the polish refactor plan: surface every violation
-# without blocking pre-commit. Each lint is suppressed via `-A` in the hooks
-# until its target phase finishes the cleanup; then the lint flips to `deny`
-# and the `-A` is removed (Phase 6 of the plan). Running `cargo clippy
-# --all-targets` (no `-D warnings`) shows the warn output today.
+# The polish refactor plan landed in Phase 6: the warn-level scaffolding
+# below has been cleaned up across the tree, so each lint is now `deny`
+# and the corresponding `-A` flag has been dropped from the pre-commit /
+# pre-push hooks. New regressions block the gate.
+too_many_arguments     = "deny"
+needless_pass_by_value = "deny"
+manual_let_else        = "deny"
+redundant_clone        = "deny"
+useless_conversion     = "deny"
+
+# `too_many_lines` stays at warn: the load-test pipeline orchestrators
+# (`poll_pipeline`, `poll_pipeline_its_hub`, `poll_pipeline_its_hub_evm`,
+# and the burst/sustained helpers) are state machines whose body length
+# matches the inherent state count. Decomposing them further would create
+# artificial seams. The warning still surfaces in `cargo clippy` so future
+# contributors see it, but it's not gate-enforced.
 too_many_lines         = "warn"
-too_many_arguments     = "warn"
-needless_pass_by_value = "warn"
-manual_let_else        = "warn"
-redundant_clone        = "warn"
-useless_conversion     = "warn"

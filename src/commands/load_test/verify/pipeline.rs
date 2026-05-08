@@ -639,9 +639,8 @@ pub(super) async fn discover_second_leg(
         .pointer("/tx_result/events")
         .and_then(|v| v.as_array());
 
-    let events = match events {
-        Some(e) => e,
-        None => return Ok(None),
+    let Some(events) = events else {
+        return Ok(None);
     };
 
     for event in events {
@@ -650,9 +649,8 @@ pub(super) async fn discover_second_leg(
             continue;
         }
 
-        let attrs = match event.get("attributes").and_then(|v| v.as_array()) {
-            Some(a) => a,
-            None => continue,
+        let Some(attrs) = event.get("attributes").and_then(|v| v.as_array()) else {
+            continue;
         };
 
         let get_attr = |key: &str| -> Option<String> {
@@ -1046,9 +1044,8 @@ pub(super) async fn poll_pipeline_its_hub(args: PollItsHubArgs<'_>) -> PeakThrou
                             .copied()
                             .collect();
                         for i in pending {
-                            let second_leg = match txs[i].second_leg_message_id.as_deref() {
-                                Some(s) => s,
-                                None => continue,
+                            let Some(second_leg) = txs[i].second_leg_message_id.as_deref() else {
+                                continue;
                             };
                             // For ITS, the destination contract on Stellar is the
                             // ITS proxy (not the example), and the second-leg
@@ -1133,9 +1130,8 @@ pub(super) async fn poll_pipeline_its_hub(args: PollItsHubArgs<'_>) -> PeakThrou
                             .copied()
                             .collect();
                         for i in pending {
-                            let second_leg = match txs[i].second_leg_message_id.as_deref() {
-                                Some(s) => s,
-                                None => continue,
+                            let Some(second_leg) = txs[i].second_leg_message_id.as_deref() else {
+                                continue;
                             };
                             let found = client
                                 .find_inbound_with_message_id(recipient_address, second_leg, None)

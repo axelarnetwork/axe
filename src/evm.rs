@@ -337,7 +337,7 @@ pub fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
             }
         }
     }
-    debug.to_string()
+    debug
 }
 
 /// Compute CREATE address: keccak256(rlp([sender, nonce]))[12..]
