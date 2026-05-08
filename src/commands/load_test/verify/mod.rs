@@ -8,7 +8,7 @@ use alloy::providers::Provider;
 use eyre::Result;
 use tokio::sync::mpsc;
 
-use super::metrics::{AmplifierTiming, TxMetrics, VerificationReport};
+use super::metrics::{AmplifierTiming, PeakThroughput, TxMetrics, VerificationReport};
 use crate::config::ChainsConfig;
 use crate::cosmos::read_axelar_rpc;
 use crate::evm::AxelarAmplifierGateway;
@@ -41,6 +41,320 @@ use self::state::Phase;
 // runners can receive it back from the `tx_to_pending_*` constructors and
 // forward it through their verifier mpsc channels.
 pub(in crate::commands::load_test) use self::state::PendingTx;
+
+// ---------------------------------------------------------------------------
+// Shared inner helpers (private)
+// ---------------------------------------------------------------------------
+
+/// Indices of confirmed transactions in a metrics slice.
+fn confirmed_indices(metrics: &[TxMetrics]) -> Vec<usize> {
+    metrics
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.success && !m.signature.is_empty())
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Streaming or batch dispatch for the polling pipelines.
+enum VerifyMode<'a> {
+    Batch,
+    Stream {
+        rx: &'a mut mpsc::UnboundedReceiver<PendingTx>,
+        send_done: &'a AtomicBool,
+        spinner: indicatif::ProgressBar,
+    },
+}
+
+impl<'a> VerifyMode<'a> {
+    fn parts(
+        self,
+    ) -> (
+        Option<&'a mut mpsc::UnboundedReceiver<PendingTx>>,
+        Option<&'a AtomicBool>,
+        Option<indicatif::ProgressBar>,
+    ) {
+        match self {
+            VerifyMode::Batch => (None, None, None),
+            VerifyMode::Stream {
+                rx,
+                send_done,
+                spinner,
+            } => (Some(rx), Some(send_done), Some(spinner)),
+        }
+    }
+}
+
+/// Axelar config loaded for GMP verification.
+struct GmpAxelarConfig {
+    lcd: String,
+    voting_verifier: Option<String>,
+    cosm_gateway: String,
+}
+
+fn load_gmp_axelar_config(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+) -> Result<GmpAxelarConfig> {
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string();
+    Ok(GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    })
+}
+
+/// Axelar config loaded for ITS-via-hub verification. Does not include the
+/// Tendermint `rpc` field — callers fetch `read_axelar_rpc` separately at
+/// the original call site so the ordering relative to tx construction is
+/// preserved verbatim. The `cfg` field is returned so the same config object
+/// can be reused for the destination `Gateway` lookup.
+struct ItsAxelarConfig {
+    cfg: ChainsConfig,
+    lcd: String,
+    voting_verifier: Option<String>,
+    axelarnet_gateway: String,
+}
+
+fn load_its_axelar_config(config: &Path, source_chain: &str) -> Result<ItsAxelarConfig> {
+    let cfg = ChainsConfig::load(config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
+    Ok(ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    })
+}
+
+/// Look up the destination cosmos `Gateway` for a chain.
+fn lookup_cosm_gateway_dest(cfg: &ChainsConfig, destination_chain: &str) -> Result<String> {
+    Ok(cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)?
+        .to_string())
+}
+
+/// Look up the destination cosmos `Gateway` for an XRPL chain, falling back
+/// to `XrplGateway` for deployments that use that contract name.
+fn lookup_xrpl_cosm_gateway_dest(cfg: &ChainsConfig, destination_chain: &str) -> Result<String> {
+    Ok(cfg
+        .axelar
+        .contract_address("Gateway", destination_chain)
+        .or_else(|_| {
+            cfg.axelar
+                .contract_address("XrplGateway", destination_chain)
+        })?
+        .to_string())
+}
+
+/// Drive the GMP polling pipeline (both batch and streaming modes).
+#[allow(clippy::too_many_arguments)]
+async fn run_gmp_pipeline<P: Provider>(
+    txs: &mut Vec<PendingTx>,
+    lcd: &str,
+    voting_verifier: Option<&str>,
+    cosm_gateway: &str,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    checker: &DestinationChecker<'_, P>,
+    mode: VerifyMode<'_>,
+) -> PeakThroughput {
+    let (rx, send_done, spinner) = mode.parts();
+    poll_pipeline(
+        txs,
+        lcd,
+        voting_verifier,
+        Some(cosm_gateway),
+        source_chain,
+        destination_chain,
+        destination_address,
+        checker,
+        None,
+        None,
+        rx,
+        send_done,
+        spinner,
+    )
+    .await
+}
+
+/// Drive the ITS-via-hub polling pipeline (both batch and streaming modes).
+#[allow(clippy::too_many_arguments)]
+async fn run_its_hub_pipeline(
+    txs: &mut Vec<PendingTx>,
+    lcd: &str,
+    voting_verifier: Option<&str>,
+    source_chain: &str,
+    axelarnet_gateway: &str,
+    rpc: &str,
+    cosm_gateway_dest: &str,
+    dest: ItsHubDest,
+    mode: VerifyMode<'_>,
+) -> PeakThroughput {
+    let (rx, send_done, spinner) = mode.parts();
+    poll_pipeline_its_hub(
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        dest,
+        rx,
+        send_done,
+        spinner,
+    )
+    .await
+}
+
+/// Drive the ITS-via-hub polling pipeline with an EVM destination
+/// (both batch and streaming modes).
+#[allow(clippy::too_many_arguments)]
+async fn run_its_hub_evm_pipeline<P: Provider>(
+    txs: &mut Vec<PendingTx>,
+    lcd: &str,
+    voting_verifier: Option<&str>,
+    source_chain: &str,
+    axelarnet_gateway: &str,
+    rpc: &str,
+    cosm_gateway_dest: &str,
+    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
+    destination_chain: &str,
+    mode: VerifyMode<'_>,
+) -> PeakThroughput {
+    let (rx, send_done, spinner) = mode.parts();
+    poll_pipeline_its_hub_evm(
+        txs,
+        lcd,
+        voting_verifier,
+        source_chain,
+        axelarnet_gateway,
+        rpc,
+        cosm_gateway_dest,
+        gw_contract,
+        destination_chain,
+        rx,
+        send_done,
+        spinner,
+    )
+    .await
+}
+
+/// Build the `(report, timings)` tuple returned by every streaming entry.
+fn streaming_report_and_timings(
+    txs: &[PendingTx],
+    peaks: PeakThroughput,
+) -> (VerificationReport, Vec<(String, AmplifierTiming)>) {
+    let report = compute_verification_report(txs, &mut [], peaks);
+    let timings: Vec<(String, AmplifierTiming)> = txs
+        .iter()
+        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
+        .collect();
+    (report, timings)
+}
+
+/// Build a `PendingTx` for an ITS-via-hub batch entry. The four ITS batch
+/// orchestrators (`verify_onchain_{solana,stellar,xrpl,evm}_its`) share the
+/// same struct literal — only the starting `phase` differs, which the caller
+/// computes from `voting_verifier.is_some()` (or hardcodes for EVM-ITS).
+fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    PendingTx {
+        idx,
+        message_id: tx.signature.clone(),
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr: Address::ZERO,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id: None,
+        gmp_destination_chain: tx.gmp_destination_chain.clone(),
+        gmp_destination_address: tx.gmp_destination_address.clone(),
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: initial_phase,
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
+
+/// Compute the source-side `message_id` from a confirmed `TxMetrics` based on
+/// the source chain family. EVM/Stellar/Sui pre-format the id in
+/// `tx.signature`; SVM appends the `call_contract` log index.
+fn message_id_for_source(tx: &TxMetrics, source_type: SourceChainType) -> String {
+    match source_type {
+        SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
+            tx.signature.clone()
+        }
+        SourceChainType::Svm => {
+            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+        }
+    }
+}
+
+/// Build a `PendingTx` for a GMP batch entry. The four GMP batch orchestrators
+/// vary by destination chain — `contract_addr` (parsed for EVM, zero
+/// elsewhere), `command_id` (`Some` for Solana, `None` elsewhere), and the
+/// `gmp_destination_*` fields — so the caller passes those explicitly.
+#[allow(clippy::too_many_arguments)]
+fn pending_tx_for_gmp_batch(
+    tx: &TxMetrics,
+    idx: usize,
+    message_id: String,
+    contract_addr: Address,
+    command_id: Option<[u8; 32]>,
+    gmp_destination_chain: String,
+    gmp_destination_address: String,
+    initial_phase: Phase,
+) -> PendingTx {
+    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+    PendingTx {
+        idx,
+        message_id,
+        send_instant: tx.send_instant.unwrap_or_else(Instant::now),
+        source_address: tx.source_address.clone(),
+        contract_addr,
+        payload_hash,
+        payload_hash_hex: tx.payload_hash.clone(),
+        command_id,
+        gmp_destination_chain,
+        gmp_destination_address,
+        timing: AmplifierTiming::default(),
+        failed: false,
+        fail_reason: None,
+        phase: initial_phase,
+        second_leg_message_id: None,
+        second_leg_payload_hash: None,
+        second_leg_source_address: None,
+        second_leg_destination_address: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -76,31 +390,18 @@ pub async fn verify_onchain<P: Provider>(
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
+    let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
     if total == 0 {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
 
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, provider);
     let contract_addr: Address = destination_address.parse()?;
@@ -115,34 +416,16 @@ pub async fn verify_onchain<P: Provider>(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            PendingTx {
+            pending_tx_for_gmp_batch(
+                tx,
                 idx,
-                message_id: match source_type {
-                    SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
-                        tx.signature.clone()
-                    }
-                    SourceChainType::Svm => {
-                        format!("{}-{}.1", tx.signature, solana_call_contract_index())
-                    }
-                },
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
+                message_id_for_source(tx, source_type),
                 contract_addr,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None, // EVM destination, not needed
-                gmp_destination_chain: String::new(),
-                gmp_destination_address: String::new(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
+                None, // EVM destination, not needed
+                String::new(),
+                String::new(),
+                initial_phase,
+            )
         })
         .collect();
 
@@ -150,25 +433,20 @@ pub async fn verify_onchain<P: Provider>(
         gw_contract: &gw_contract,
     };
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         &checker,
-        None,
-        None,
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming version of `verify_onchain` for EVM destinations — runs
@@ -185,18 +463,11 @@ pub async fn verify_onchain_evm_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
@@ -208,29 +479,24 @@ pub async fn verify_onchain_evm_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         &checker,
-        None,
-        None,
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// GMP verification with a Stellar destination — uses Stellar's
@@ -249,28 +515,17 @@ pub async fn verify_onchain_stellar_gmp(
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
+    let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
     } else {
@@ -281,35 +536,16 @@ pub async fn verify_onchain_stellar_gmp(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
-                    tx.signature.clone()
-                }
-                SourceChainType::Svm => {
-                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
-                }
-            };
-            PendingTx {
+            pending_tx_for_gmp_batch(
+                tx,
                 idx,
-                message_id,
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: destination_contract.to_string(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
+                message_id_for_source(tx, source_type),
+                Address::ZERO,
+                None,
+                tx.gmp_destination_chain.clone(),
+                destination_contract.to_string(),
+                initial_phase,
+            )
         })
         .collect();
 
@@ -321,25 +557,20 @@ pub async fn verify_onchain_stellar_gmp(
         _phantom: std::marker::PhantomData,
     };
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_contract,
         &checker,
-        None,
-        None,
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming variant of `verify_onchain_stellar_gmp`.
@@ -359,17 +590,11 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
 
     let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
     let checker: DestinationChecker<alloy::providers::RootProvider> = DestinationChecker::Stellar {
@@ -382,29 +607,24 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_contract,
         &checker,
-        None,
-        None,
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Convert a confirmed TxMetrics into a PendingTx for Solana verification.
@@ -567,30 +787,18 @@ pub async fn verify_onchain_sui_gmp(
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
+    let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
     if total == 0 {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
     let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
     let sui_client = crate::sui::SuiClient::new(sui_rpc);
 
@@ -604,35 +812,16 @@ pub async fn verify_onchain_sui_gmp(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
-                    tx.signature.clone()
-                }
-                SourceChainType::Svm => {
-                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
-                }
-            };
-            PendingTx {
+            pending_tx_for_gmp_batch(
+                tx,
                 idx,
-                message_id,
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: destination_address.to_string(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
+                message_id_for_source(tx, source_type),
+                Address::ZERO,
+                None,
+                tx.gmp_destination_chain.clone(),
+                destination_address.to_string(),
+                initial_phase,
+            )
         })
         .collect();
 
@@ -642,20 +831,16 @@ pub async fn verify_onchain_sui_gmp(
         _phantom: std::marker::PhantomData,
     };
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         &checker,
-        None,
-        None,
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
@@ -677,18 +862,11 @@ pub async fn verify_onchain_solana_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
 
     let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -703,30 +881,25 @@ pub async fn verify_onchain_solana_streaming(
 
     let mut txs: Vec<PendingTx> = Vec::new();
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         &checker,
-        None,
-        None,
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
     // Key by message_id (signature) since streaming PendingTx idx is always 0.
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Verify EVM->Solana transactions through the Amplifier pipeline:
@@ -745,31 +918,18 @@ pub async fn verify_onchain_solana(
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
+    let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
     if total == 0 {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let cosm_gateway = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let GmpAxelarConfig {
+        lcd,
+        voting_verifier,
+        cosm_gateway,
+    } = load_gmp_axelar_config(config, source_chain, destination_chain)?;
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -781,36 +941,18 @@ pub async fn verify_onchain_solana(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            let message_id = match source_type {
-                SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
-                    tx.signature.clone()
-                }
-                SourceChainType::Svm => {
-                    format!("{}-{}.1", tx.signature, solana_call_contract_index())
-                }
-            };
+            let message_id = message_id_for_source(tx, source_type);
             let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
-            PendingTx {
+            pending_tx_for_gmp_batch(
+                tx,
                 idx,
                 message_id,
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: Some(keccak256(&cmd_input).into()),
-                gmp_destination_chain: String::new(),
-                gmp_destination_address: String::new(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
+                Address::ZERO,
+                Some(keccak256(&cmd_input).into()),
+                String::new(),
+                String::new(),
+                initial_phase,
+            )
         })
         .collect();
 
@@ -825,25 +967,20 @@ pub async fn verify_onchain_solana(
             _phantom: std::marker::PhantomData,
         };
 
-    let peaks = poll_pipeline(
+    let peaks = run_gmp_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
-        Some(&cosm_gateway),
+        &cosm_gateway,
         source_chain,
         destination_chain,
         destination_address,
         &checker,
-        None,
-        None,
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Verify EVM->Solana ITS transactions through the Amplifier pipeline.
@@ -869,31 +1006,18 @@ pub async fn verify_onchain_solana_its(
     solana_rpc: &str,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
+    let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -903,39 +1027,13 @@ pub async fn verify_onchain_solana_its(
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
-        .map(|&idx| {
-            let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            PendingTx {
-                idx,
-                message_id: tx.signature.clone(),
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: tx.gmp_destination_address.clone(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
-        })
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -946,14 +1044,11 @@ pub async fn verify_onchain_solana_its(
         ItsHubDest::Solana {
             rpc_url: solana_rpc.to_string(),
         },
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming version of `verify_onchain_solana_its` — runs concurrently with
@@ -968,30 +1063,19 @@ pub async fn verify_onchain_solana_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
-
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1002,18 +1086,15 @@ pub async fn verify_onchain_solana_its_streaming(
         ItsHubDest::Solana {
             rpc_url: solana_rpc.to_string(),
         },
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Verify EVM/Solana → Stellar ITS transactions. Mirrors
@@ -1033,28 +1114,18 @@ pub async fn verify_onchain_stellar_its(
     signer_pk: [u8; 32],
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
+    let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -1064,39 +1135,13 @@ pub async fn verify_onchain_stellar_its(
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
-        .map(|&idx| {
-            let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            PendingTx {
-                idx,
-                message_id: tx.signature.clone(),
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: tx.gmp_destination_address.clone(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
-        })
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1110,14 +1155,11 @@ pub async fn verify_onchain_stellar_its(
             gateway_contract: stellar_gateway_contract.to_string(),
             signer_pk,
         },
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming variant of `verify_onchain_stellar_its`.
@@ -1134,27 +1176,19 @@ pub async fn verify_onchain_stellar_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1168,18 +1202,15 @@ pub async fn verify_onchain_stellar_its_streaming(
             gateway_contract: stellar_gateway_contract.to_string(),
             signer_pk,
         },
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Verify EVM/Solana → XRPL ITS transactions. Polls the recipient XRPL
@@ -1194,28 +1225,18 @@ pub async fn verify_onchain_xrpl_its(
     xrpl_recipient: &str,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
+    let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
 
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
 
     let initial_phase = if voting_verifier.is_some() {
         Phase::Voted
@@ -1225,46 +1246,16 @@ pub async fn verify_onchain_xrpl_its(
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
-        .map(|&idx| {
-            let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            PendingTx {
-                idx,
-                message_id: tx.signature.clone(),
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: tx.gmp_destination_address.clone(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
-        })
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
     // XRPL's destination cosmos gateway is `XrplGateway/{chain}`, not the
     // standard `Gateway/{chain}`. Try both so the same verifier works
     // regardless of which contract name the deployment uses.
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)
-        .or_else(|_| {
-            cfg.axelar
-                .contract_address("XrplGateway", destination_chain)
-        })?
-        .to_string();
+    let cosm_gateway_dest = lookup_xrpl_cosm_gateway_dest(&cfg, destination_chain)?;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1276,14 +1267,11 @@ pub async fn verify_onchain_xrpl_its(
             rpc_url: xrpl_rpc.to_string(),
             recipient_address: xrpl_recipient.to_string(),
         },
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming variant of `verify_onchain_xrpl_its`.
@@ -1298,31 +1286,19 @@ pub async fn verify_onchain_xrpl_its_streaming(
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
 ) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
-    let cfg = ChainsConfig::load(config)?;
-    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
-    let voting_verifier = cfg
-        .axelar
-        .contract_address("VotingVerifier", source_chain)
-        .ok()
-        .map(String::from);
-    let axelarnet_gateway = cfg
-        .axelar
-        .global_contract_address("AxelarnetGateway")?
-        .to_string();
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)
-        .or_else(|_| {
-            cfg.axelar
-                .contract_address("XrplGateway", destination_chain)
-        })?
-        .to_string();
+    let cosm_gateway_dest = lookup_xrpl_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline_its_hub(
+    let peaks = run_its_hub_pipeline(
         &mut txs,
         &lcd,
         voting_verifier.as_deref(),
@@ -1334,18 +1310,15 @@ pub async fn verify_onchain_xrpl_its_streaming(
             rpc_url: xrpl_rpc.to_string(),
             recipient_address: xrpl_recipient.to_string(),
         },
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Verify Solana->EVM ITS transactions through the Amplifier pipeline.
@@ -1370,13 +1343,7 @@ pub async fn verify_onchain_evm_its(
     evm_rpc_url: &str,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
-    let confirmed: Vec<usize> = metrics
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.success && !m.signature.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-
+    let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
@@ -1396,42 +1363,16 @@ pub async fn verify_onchain_evm_its(
     let initial_phase = Phase::HubApproved;
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
-        .map(|&idx| {
-            let tx = &metrics[idx];
-            let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-            PendingTx {
-                idx,
-                message_id: tx.signature.clone(),
-                send_instant: tx.send_instant.unwrap_or_else(Instant::now),
-                source_address: tx.source_address.clone(),
-                contract_addr: Address::ZERO,
-                payload_hash,
-                payload_hash_hex: tx.payload_hash.clone(),
-                command_id: None,
-                gmp_destination_chain: tx.gmp_destination_chain.clone(),
-                gmp_destination_address: tx.gmp_destination_address.clone(),
-                timing: AmplifierTiming::default(),
-                failed: false,
-                fail_reason: None,
-                phase: initial_phase,
-                second_leg_message_id: None,
-                second_leg_payload_hash: None,
-                second_leg_source_address: None,
-                second_leg_destination_address: None,
-            }
-        })
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
         .collect();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
 
-    let peaks = poll_pipeline_its_hub_evm(
+    let peaks = run_its_hub_evm_pipeline(
         &mut txs,
         &lcd,
         None, // skip VotingVerifier — no payload_hash for Solana ITS
@@ -1441,14 +1382,11 @@ pub async fn verify_onchain_evm_its(
         &cosm_gateway_dest,
         &gw_contract,
         destination_chain,
-        None,
-        None,
-        None,
+        VerifyMode::Batch,
     )
     .await;
 
-    let report = compute_verification_report(&txs, metrics, peaks);
-    Ok(report)
+    Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
 /// Streaming version of `verify_onchain_evm_its` — runs concurrently with
@@ -1473,10 +1411,7 @@ pub async fn verify_onchain_evm_its_streaming(
         .to_string();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = cfg
-        .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
@@ -1484,7 +1419,7 @@ pub async fn verify_onchain_evm_its_streaming(
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
 
-    let peaks = poll_pipeline_its_hub_evm(
+    let peaks = run_its_hub_evm_pipeline(
         &mut txs,
         &lcd,
         None, // skip VotingVerifier — Solana ITS has no payload_hash
@@ -1494,18 +1429,15 @@ pub async fn verify_onchain_evm_its_streaming(
         &cosm_gateway_dest,
         &gw_contract,
         destination_chain,
-        Some(&mut rx),
-        Some(&send_done),
-        Some(spinner),
+        VerifyMode::Stream {
+            rx: &mut rx,
+            send_done: &send_done,
+            spinner,
+        },
     )
     .await;
 
-    let report = compute_verification_report(&txs, &mut [], peaks);
-    let timings: Vec<(String, AmplifierTiming)> = txs
-        .iter()
-        .map(|tx| (tx.message_id.clone(), tx.timing.clone()))
-        .collect();
-    Ok((report, timings))
+    Ok(streaming_report_and_timings(&txs, peaks))
 }
 
 /// Wait for an ITS remote deploy message to propagate through the hub pipeline
