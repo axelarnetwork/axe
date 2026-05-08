@@ -1,13 +1,32 @@
+use std::collections::HashMap;
 use std::fs;
 
 use comfy_table::{Cell, ContentArrangement, Table};
 use eyre::Result;
 use owo_colors::OwoColorize;
-use serde_json::Value;
+use serde::Deserialize;
 
 use crate::cli::resolve_axelar_id;
 use crate::state::{StepStatus, next_pending_step, read_state};
 use crate::ui;
+
+/// Slice of the target chains-config JSON read by the status command.
+/// Only the per-chain `contracts.<name>.address` lookup is needed; everything
+/// else stays untyped via the absence of the field on this struct.
+#[derive(Deserialize)]
+struct TargetChains {
+    chains: HashMap<String, TargetChain>,
+}
+
+#[derive(Deserialize)]
+struct TargetChain {
+    contracts: Option<HashMap<String, TargetContract>>,
+}
+
+#[derive(Deserialize)]
+struct TargetContract {
+    address: Option<String>,
+}
 
 pub fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
@@ -21,12 +40,14 @@ pub fn run(axelar_id: Option<String>) -> Result<()> {
     let target_json = &state.target_json;
     let read_addr = |contract_name: &str| -> Option<String> {
         let content = fs::read_to_string(target_json).ok()?;
-        let root: Value = serde_json::from_str(&content).ok()?;
-        root.pointer(&format!(
-            "/chains/{axelar_id}/contracts/{contract_name}/address"
-        ))
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string)
+        let root: TargetChains = serde_json::from_str(&content).ok()?;
+        root.chains
+            .get(&axelar_id)?
+            .contracts
+            .as_ref()?
+            .get(contract_name)?
+            .address
+            .clone()
     };
 
     let next_idx = next_pending_step(&state).map(|(idx, _)| idx);

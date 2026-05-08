@@ -1,5 +1,6 @@
 use cosmrs::crypto::secp256k1::SigningKey;
 use eyre::Result;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::cosmos::{
@@ -9,6 +10,37 @@ use crate::timing::{
     AMPLIFIER_POLL_ATTEMPTS_5MIN, AMPLIFIER_POLL_ATTEMPTS_10MIN, AMPLIFIER_POLL_INTERVAL,
 };
 use crate::ui;
+
+/// Subset of the VotingVerifier `poll` query response read by
+/// `wait_for_poll_votes`. Numeric fields like `quorum` and the per-vote
+/// counts arrive as JSON strings (CosmWasm Uint128 encoding), so they're
+/// kept as `Option<String>` and parsed at the call site to mirror the prior
+/// `as_str().and_then(parse).unwrap_or(0)` chain. Every field is optional so
+/// a partial response degrades gracefully the same way the old `as_*`
+/// extractors did.
+#[derive(Default, Deserialize)]
+struct PollResp {
+    #[serde(default)]
+    poll: PollData,
+}
+
+#[derive(Default, Deserialize)]
+struct PollData {
+    quorum: Option<String>,
+    finished: Option<bool>,
+    expires_at: Option<u64>,
+    tallies: Option<Vec<Tally>>,
+}
+
+#[derive(Default, Deserialize)]
+struct Tally {
+    #[serde(rename = "SucceededOnChain")]
+    succeeded_on_chain: Option<String>,
+    #[serde(rename = "FailedOnChain")]
+    failed_on_chain: Option<String>,
+    #[serde(rename = "NotFound")]
+    not_found: Option<String>,
+}
 
 /// Walk wasm event attributes in a cosmos tx response and return the first
 /// value whose key matches `attr_name`. None if the response is malformed,
@@ -95,27 +127,30 @@ pub async fn wait_for_poll_votes(lcd: &str, voting_verifier: &str, poll_id: &str
 
         let resp = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
 
-        let poll = &resp["poll"];
-        let quorum: u64 = poll["quorum"]
-            .as_str()
+        let parsed: PollResp = serde_json::from_value(resp).unwrap_or_default();
+        let poll = parsed.poll;
+        let quorum: u64 = poll
+            .quorum
+            .as_deref()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let finished = poll["finished"].as_bool().unwrap_or(false);
-        let expires_at: u64 = poll["expires_at"].as_u64().unwrap_or(0);
+        let finished = poll.finished.unwrap_or(false);
+        let expires_at: u64 = poll.expires_at.unwrap_or(0);
 
-        if let Some(tallies) = poll["tallies"].as_array()
-            && let Some(tally) = tallies.first()
-        {
-            let succeeded: u64 = tally["SucceededOnChain"]
-                .as_str()
+        if let Some(tally) = poll.tallies.and_then(|t| t.into_iter().next()) {
+            let succeeded: u64 = tally
+                .succeeded_on_chain
+                .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let failed: u64 = tally["FailedOnChain"]
-                .as_str()
+            let failed: u64 = tally
+                .failed_on_chain
+                .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let not_found: u64 = tally["NotFound"]
-                .as_str()
+            let not_found: u64 = tally
+                .not_found
+                .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
 
