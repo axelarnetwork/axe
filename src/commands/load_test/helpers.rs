@@ -5,6 +5,7 @@
 //! `ensure_sender_receiver_on_evm_chain` is `pub(crate)` because
 //! `commands::test_gmp` calls into it for the `--config` sol→evm flow.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use alloy::{
@@ -15,8 +16,9 @@ use alloy::{
     signers::local::PrivateKeySigner,
     sol_types::SolValue,
 };
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use owo_colors::OwoColorize;
+use serde::Deserialize;
 use serde_json::json;
 
 use super::metrics::LoadTestReport;
@@ -25,6 +27,31 @@ use super::{LoadTestArgs, read_cache, save_cache};
 use crate::config::ChainsConfig;
 use crate::evm::read_artifact_bytecode;
 use crate::ui;
+
+/// Subset of the chains-config JSON read by the per-chain helpers in this
+/// module. Each helper picks one field; fields stay `Option<T>` because not
+/// every chain entry carries every key (e.g. only Stellar entries set
+/// `tokenAddress`).
+#[derive(Deserialize)]
+struct ChainsFile {
+    chains: HashMap<String, ChainEntry>,
+}
+
+#[derive(Deserialize)]
+struct ChainEntry {
+    #[serde(rename = "axelarId")]
+    axelar_id: Option<String>,
+    #[serde(rename = "networkType")]
+    network_type: Option<String>,
+    #[serde(rename = "tokenAddress")]
+    token_address: Option<String>,
+    contracts: Option<HashMap<String, ContractEntry>>,
+}
+
+#[derive(Deserialize)]
+struct ContractEntry {
+    address: Option<String>,
+}
 
 pub(crate) async fn ensure_sender_receiver_on_evm_chain(
     chain: &str,
@@ -505,12 +532,13 @@ pub(crate) fn print_final_report(report: &LoadTestReport) {
 pub(crate) fn axelar_id_for_chain(config: &std::path::Path, chain_id: &str) -> Result<String> {
     let content =
         std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    Ok(root
-        .pointer(&format!("/chains/{chain_id}/axelarId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(chain_id)
-        .to_string())
+    let file: ChainsFile = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", config.display()))?;
+    Ok(file
+        .chains
+        .get(chain_id)
+        .and_then(|c| c.axelar_id.clone())
+        .unwrap_or_else(|| chain_id.to_string()))
 }
 
 pub(crate) fn read_stellar_network_type(
@@ -519,12 +547,13 @@ pub(crate) fn read_stellar_network_type(
 ) -> Result<String> {
     let content =
         std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    Ok(root
-        .pointer(&format!("/chains/{chain_id}/networkType"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("testnet")
-        .to_string())
+    let file: ChainsFile = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", config.display()))?;
+    Ok(file
+        .chains
+        .get(chain_id)
+        .and_then(|c| c.network_type.clone())
+        .unwrap_or_else(|| "testnet".to_string()))
 }
 
 pub(crate) fn read_stellar_token_address(
@@ -533,10 +562,11 @@ pub(crate) fn read_stellar_token_address(
 ) -> Result<String> {
     let content =
         std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    root.pointer(&format!("/chains/{chain_id}/tokenAddress"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    let file: ChainsFile = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", config.display()))?;
+    file.chains
+        .get(chain_id)
+        .and_then(|c| c.token_address.clone())
         .ok_or_else(|| {
             eyre::eyre!("no tokenAddress (XLM Soroban contract) for Stellar chain {chain_id}")
         })
@@ -549,10 +579,13 @@ pub(crate) fn read_stellar_contract_address(
 ) -> Result<String> {
     let content =
         std::fs::read_to_string(config).map_err(|e| eyre::eyre!("failed to read config: {e}"))?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    root.pointer(&format!("/chains/{chain_id}/contracts/{contract}/address"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    let file: ChainsFile = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse config {}", config.display()))?;
+    file.chains
+        .get(chain_id)
+        .and_then(|c| c.contracts.as_ref())
+        .and_then(|cs| cs.get(contract))
+        .and_then(|c| c.address.clone())
         .ok_or_else(|| eyre::eyre!("no Stellar contract {contract} for chain {chain_id}"))
 }
 

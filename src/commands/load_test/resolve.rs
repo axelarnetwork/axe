@@ -3,13 +3,32 @@
 //! heuristics that pick a `(source, destination)` pair when the user only
 //! supplies `--config`, and the cargo-feature-driven network sanity check.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use eyre::Result;
+use eyre::{Result, WrapErr};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::TestType;
 use crate::ui;
+
+/// Subset of the chains-config JSON read by the resolver. The map is keyed by
+/// the JSON-side chain id (e.g. `"avalanche"`); each entry's `axelarId` may
+/// differ from that key (e.g. `"Avalanche"` for consensus chains).
+#[derive(Deserialize)]
+struct ConfigRoot {
+    chains: HashMap<String, ChainEntry>,
+}
+
+#[derive(Deserialize)]
+struct ChainEntry {
+    #[serde(rename = "axelarId")]
+    axelar_id: Option<String>,
+    #[serde(rename = "chainType")]
+    chain_type: Option<String>,
+    rpc: Option<String>,
+}
 
 pub(crate) fn cache_path(axelar_id: &str) -> PathBuf {
     let data_dir = dirs::data_dir()
@@ -34,27 +53,20 @@ pub(crate) fn save_cache(axelar_id: &str, cache: &serde_json::Value) -> Result<(
     std::fs::write(&path, serde_json::to_string_pretty(cache)?)?;
     Ok(())
 }
-pub(crate) fn chain_type(
-    chains: &serde_json::Map<String, serde_json::Value>,
-    chain_id: &str,
-) -> Option<String> {
-    chains
-        .get(chain_id)?
-        .get("chainType")?
-        .as_str()
-        .map(String::from)
+fn chain_type(chains: &HashMap<String, ChainEntry>, chain_id: &str) -> Option<String> {
+    chains.get(chain_id)?.chain_type.clone()
 }
 
 /// Find chains by chainType, optionally skipping core-* prefixed chains.
-pub(crate) fn find_chains_by_type(
-    chains: &serde_json::Map<String, serde_json::Value>,
+fn find_chains_by_type(
+    chains: &HashMap<String, ChainEntry>,
     chain_type_filter: &str,
     skip_core: bool,
 ) -> Vec<String> {
     chains
         .iter()
         .filter(|(k, v)| {
-            v.get("chainType").and_then(|t| t.as_str()) == Some(chain_type_filter)
+            v.chain_type.as_deref() == Some(chain_type_filter)
                 && !(skip_core && k.starts_with("core-"))
         })
         .map(|(k, _)| k.clone())
@@ -118,12 +130,9 @@ pub(crate) fn resolve_from_config(
 ) -> Result<ResolvedConfig> {
     let config_content = std::fs::read_to_string(config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
-    let config_root: serde_json::Value = serde_json::from_str(&config_content)?;
-
-    let chains = config_root
-        .get("chains")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| eyre::eyre!("no 'chains' object in config"))?;
+    let config_root: ConfigRoot = serde_json::from_str(&config_content)
+        .with_context(|| format!("no 'chains' object in config {}", config.display()))?;
+    let chains = &config_root.chains;
 
     // --- Resolve test type + chains ---
     let (test_type, source_chain, destination_chain) = match (
@@ -159,32 +168,24 @@ pub(crate) fn resolve_from_config(
     // key for contract lookups but store the axelarId for verification queries.
     let source_axelar_id = chains
         .get(&source_chain)
-        .and_then(|v| v.get("axelarId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&source_chain)
-        .to_string();
+        .and_then(|c| c.axelar_id.clone())
+        .unwrap_or_else(|| source_chain.clone());
     let destination_axelar_id = chains
         .get(&destination_chain)
-        .and_then(|v| v.get("axelarId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&destination_chain)
-        .to_string();
+        .and_then(|c| c.axelar_id.clone())
+        .unwrap_or_else(|| destination_chain.clone());
 
     // --- Read RPCs ---
     let source_rpc = chains
         .get(&source_chain)
-        .and_then(|v| v.get("rpc"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no RPC URL for source chain '{source_chain}' in config"))?
-        .to_string();
+        .and_then(|c| c.rpc.clone())
+        .ok_or_else(|| eyre::eyre!("no RPC URL for source chain '{source_chain}' in config"))?;
     let destination_rpc = chains
         .get(&destination_chain)
-        .and_then(|v| v.get("rpc"))
-        .and_then(|v| v.as_str())
+        .and_then(|c| c.rpc.clone())
         .ok_or_else(|| {
             eyre::eyre!("no RPC URL for destination chain '{destination_chain}' in config")
-        })?
-        .to_string();
+        })?;
 
     let resolved_source_rpc = source_rpc_override.unwrap_or(source_rpc);
     let resolved_destination_rpc = destination_rpc_override.unwrap_or(destination_rpc);
@@ -204,8 +205,8 @@ pub(crate) fn resolve_from_config(
 }
 
 /// Auto-detect source/destination chains for a known test type.
-pub(crate) fn auto_detect_chains(
-    chains: &serde_json::Map<String, serde_json::Value>,
+fn auto_detect_chains(
+    chains: &HashMap<String, ChainEntry>,
     test_type: TestType,
     source_override: Option<String>,
     dest_override: Option<String>,
@@ -436,8 +437,8 @@ pub(crate) fn auto_detect_chains(
     }
 }
 
-pub(crate) fn auto_detect_stellar_pair(
-    chains: &serde_json::Map<String, serde_json::Value>,
+fn auto_detect_stellar_pair(
+    chains: &HashMap<String, ChainEntry>,
     tt: TestType,
     src_override: Option<String>,
     dst_override: Option<String>,
@@ -477,8 +478,8 @@ pub(crate) fn auto_detect_stellar_pair(
 
 /// Auto-detect test type and chains when nothing is specified.
 /// Looks at what chain types exist in the config and picks the best match.
-pub(crate) fn auto_detect_all(
-    chains: &serde_json::Map<String, serde_json::Value>,
+fn auto_detect_all(
+    chains: &HashMap<String, ChainEntry>,
     source_override: Option<String>,
     dest_override: Option<String>,
 ) -> Result<(TestType, String, String)> {
