@@ -1,31 +1,30 @@
-//! Stellar/Soroban client primitives used by the load-test tool.
-//!
-//! Wraps `stellar-rpc-client` + manual `stellar-xdr` transaction construction
-//! so `axe` can sign and submit Soroban `InvokeHostFunction` operations
-//! (mainly `AxelarGateway.call_contract` and ITS methods).
-//!
-//! References:
-//! - TypeScript: `axelar-contract-deployments/stellar/gateway.js`, `its.js`
-//! - Soroban submission flow: build → `simulate_transaction` → merge footprint
-//!   + auth + min_resource_fee → sign → `send_transaction` → poll
-
-#![allow(dead_code)]
+//! `StellarClient` — the JSON-RPC + simulate + submit + poll wrapper used by
+//! axe to drive Soroban `InvokeHostFunction` operations (`AxelarGateway.call_contract`,
+//! ITS deploys/transfers, SAC token ops). Also houses the response-parsing
+//! helpers that walk `GetTransactionResponse.result_meta` to recover Soroban
+//! return values and contract-event indices.
 
 use std::time::{Duration, Instant};
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::Signer;
 use eyre::{Result, eyre};
 use sha2::{Digest, Sha256};
 use stellar_rpc_client::Client as RpcClient;
-use stellar_strkey::{Contract as StrContract, ed25519::PublicKey as StrPubKey};
 use stellar_xdr::curr::{
-    AccountId, BytesM, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
+    BytesM, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
     InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
-    PublicKey, ScAddress, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint,
-    SorobanAuthorizationEntry, StringM, Transaction, TransactionEnvelope, TransactionExt,
-    TransactionMeta, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
-    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    ScAddress, ScVal, SequenceNumber, Signature, SorobanAuthorizationEntry, Transaction,
+    TransactionEnvelope, TransactionExt, TransactionMeta, TransactionSignaturePayload,
+    TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
+
+use super::scval::{
+    parse_contract_id, scval_address_account, scval_address_from_str, scval_bytes,
+    scval_i128_from_u128, scval_string, scval_symbol, scval_to_address_string, scval_to_bytes32,
+    scval_to_u128, scval_token, scval_token_metadata, scval_void,
+};
+use super::tx::InvokedTx;
+use super::wallet::{StellarWallet, network_passphrase_for};
 
 /// Default poll cadence after submit.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -47,251 +46,6 @@ const BASE_FEE_DEPLOY: u32 = 500;
 /// time is ~5s; a generous window protects against RPC lag without hiding
 /// real failures.
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// Well-known network passphrases — Stellar does NOT put these in chain
-/// config, but they're stable per-network. SHA256(passphrase) becomes the
-/// `network_id` used as the signing domain.
-pub fn network_passphrase_for(network_type: &str) -> &'static str {
-    match network_type {
-        "testnet" => "Test SDF Network ; September 2015",
-        "futurenet" => "Test SDF Future Network ; October 2022",
-        "mainnet" => "Public Global Stellar Network ; September 2015",
-        _ => "Test SDF Network ; September 2015",
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Wallet
-// ---------------------------------------------------------------------------
-
-/// Stellar wallet: an Ed25519 keypair plus the derived G-address.
-#[derive(Clone)]
-pub struct StellarWallet {
-    pub signing_key: SigningKey,
-    pub public_key_bytes: [u8; 32],
-}
-
-impl StellarWallet {
-    /// Build a wallet from a raw 32-byte Ed25519 seed.
-    pub fn from_seed(seed: &[u8; 32]) -> Self {
-        let signing_key = SigningKey::from_bytes(seed);
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-        Self {
-            signing_key,
-            public_key_bytes,
-        }
-    }
-
-    /// Parse a Stellar secret key string (`S...`, base32-encoded) into a
-    /// wallet.
-    pub fn from_secret_str(secret: &str) -> Result<Self> {
-        let sk = stellar_strkey::ed25519::PrivateKey::from_string(secret)
-            .map_err(|e| eyre!("invalid Stellar secret key: {e}"))?;
-        Ok(Self::from_seed(&sk.0))
-    }
-
-    /// Accept a hex-encoded 32-byte seed (convenience for CLIs that share
-    /// env vars across chains).
-    pub fn from_hex_seed(hex_str: &str) -> Result<Self> {
-        let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-            .map_err(|e| eyre!("invalid Stellar hex seed: {e}"))?;
-        let bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| eyre!("Stellar seed must be exactly 32 bytes"))?;
-        Ok(Self::from_seed(&bytes))
-    }
-
-    /// Stellar G-address (base32-encoded with checksum).
-    pub fn address(&self) -> String {
-        StrPubKey(self.public_key_bytes).to_string()
-    }
-
-    pub fn account_id(&self) -> AccountId {
-        AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
-            self.public_key_bytes,
-        )))
-    }
-
-    pub fn muxed_account(&self) -> MuxedAccount {
-        MuxedAccount::Ed25519(Uint256(self.public_key_bytes))
-    }
-
-    /// Last 4 bytes of public key — required in each DecoratedSignature.
-    pub fn signature_hint(&self) -> SignatureHint {
-        let mut hint = [0u8; 4];
-        hint.copy_from_slice(&self.public_key_bytes[28..32]);
-        SignatureHint(hint)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ScVal helpers — thin, correct encodings matching the JS reference
-// ---------------------------------------------------------------------------
-
-pub fn scval_address_account(pk: &[u8; 32]) -> ScVal {
-    ScVal::Address(ScAddress::Account(AccountId(
-        PublicKey::PublicKeyTypeEd25519(Uint256(*pk)),
-    )))
-}
-
-pub fn scval_address_from_str(addr: &str) -> Result<ScVal> {
-    // G... = account, C... = contract
-    if addr.starts_with('G') {
-        let pk = StrPubKey::from_string(addr)
-            .map_err(|e| eyre!("invalid Stellar account address {addr:?}: {e}"))?;
-        Ok(scval_address_account(&pk.0))
-    } else if addr.starts_with('C') {
-        let c = StrContract::from_string(addr)
-            .map_err(|e| eyre!("invalid Stellar contract address {addr:?}: {e}"))?;
-        Ok(ScVal::Address(ScAddress::Contract(
-            stellar_xdr::curr::ContractId(Hash(c.0)),
-        )))
-    } else {
-        Err(eyre!("Stellar address must start with G or C: {addr}"))
-    }
-}
-
-pub fn scval_string(s: &str) -> Result<ScVal> {
-    let sm: StringM = s
-        .try_into()
-        .map_err(|e| eyre!("string too long for ScVal::String: {e}"))?;
-    Ok(ScVal::String(stellar_xdr::curr::ScString(sm)))
-}
-
-pub fn scval_symbol(s: &str) -> Result<ScSymbol> {
-    let sm: StringM<32> = s
-        .try_into()
-        .map_err(|e| eyre!("symbol too long (max 32): {e}"))?;
-    Ok(ScSymbol(sm))
-}
-
-pub fn scval_bytes(b: &[u8]) -> Result<ScVal> {
-    let v: BytesM = b
-        .to_vec()
-        .try_into()
-        .map_err(|e| eyre!("bytes too long for ScVal::Bytes: {e}"))?;
-    Ok(ScVal::Bytes(stellar_xdr::curr::ScBytes(v)))
-}
-
-/// ScVal::I128 from a u64 (amounts are always non-negative for our use).
-pub fn scval_i128_from_u64(n: u64) -> ScVal {
-    ScVal::I128(stellar_xdr::curr::Int128Parts { hi: 0, lo: n })
-}
-
-/// Build the `{ address: Address, amount: i128 }` ScVal::Map struct that
-/// Soroban contracts expect for a gas-token arg (e.g., `AxelarExample.send`'s
-/// `gas_token` parameter). Matches `tokenToScVal` in the TS reference.
-pub fn scval_token(token_contract: &str, amount: u64) -> Result<ScVal> {
-    let addr_val = scval_address_from_str(token_contract)?;
-    let entries: VecM<stellar_xdr::curr::ScMapEntry> = vec![
-        stellar_xdr::curr::ScMapEntry {
-            key: ScVal::Symbol(scval_symbol("address")?),
-            val: addr_val,
-        },
-        stellar_xdr::curr::ScMapEntry {
-            key: ScVal::Symbol(scval_symbol("amount")?),
-            val: scval_i128_from_u64(amount),
-        },
-    ]
-    .try_into()
-    .map_err(|e| eyre!("token map too long: {e}"))?;
-    Ok(ScVal::Map(Some(stellar_xdr::curr::ScMap(entries))))
-}
-
-/// Build the `{ decimal: u32, name: String, symbol: String }` ScVal::Map
-/// struct that `InterchainTokenService.deploy_interchain_token` expects for
-/// its `metadata` parameter. Matches `tokenMetadataToScVal` in the TS
-/// reference. Soroban map keys are sorted by symbol-name when serialized;
-/// the entries here are already in lexicographic order (decimal < name <
-/// symbol).
-pub fn scval_token_metadata(decimal: u32, name: &str, symbol: &str) -> Result<ScVal> {
-    let entries: VecM<stellar_xdr::curr::ScMapEntry> = vec![
-        stellar_xdr::curr::ScMapEntry {
-            key: ScVal::Symbol(scval_symbol("decimal")?),
-            val: ScVal::U32(decimal),
-        },
-        stellar_xdr::curr::ScMapEntry {
-            key: ScVal::Symbol(scval_symbol("name")?),
-            val: scval_string(name)?,
-        },
-        stellar_xdr::curr::ScMapEntry {
-            key: ScVal::Symbol(scval_symbol("symbol")?),
-            val: scval_string(symbol)?,
-        },
-    ]
-    .try_into()
-    .map_err(|e| eyre!("metadata map too long: {e}"))?;
-    Ok(ScVal::Map(Some(stellar_xdr::curr::ScMap(entries))))
-}
-
-/// `ScVal::I128` from a non-negative `u128`.
-pub fn scval_i128_from_u128(n: u128) -> ScVal {
-    ScVal::I128(stellar_xdr::curr::Int128Parts {
-        hi: (n >> 64) as i64,
-        lo: (n & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-    })
-}
-
-/// `ScVal::Void`/null literal.
-pub fn scval_void() -> ScVal {
-    ScVal::Void
-}
-
-/// Convert a raw `ContractId` byte array back into the user-facing C-address
-/// (base32-encoded with checksum).
-pub fn contract_id_to_address(id: &[u8; 32]) -> String {
-    StrContract(*id).to_string()
-}
-
-/// Decode an `ScVal::Bytes` of exactly 32 bytes into a `[u8; 32]` (e.g.,
-/// the `tokenId` returned by `deploy_interchain_token`).
-pub fn scval_to_bytes32(v: &ScVal) -> Option<[u8; 32]> {
-    if let ScVal::Bytes(b) = v {
-        let bytes = b.0.as_slice();
-        if bytes.len() == 32 {
-            let mut out = [0u8; 32];
-            out.copy_from_slice(bytes);
-            return Some(out);
-        }
-    }
-    None
-}
-
-/// Decode an `ScVal::Address` into its user-facing string form
-/// (`G...` for accounts, `C...` for contracts).
-pub fn scval_to_address_string(v: &ScVal) -> Option<String> {
-    if let ScVal::Address(addr) = v {
-        match addr {
-            ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(k))) => {
-                Some(StrPubKey(k.0).to_string())
-            }
-            ScAddress::Contract(c) => Some(StrContract(c.0.0).to_string()),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
-/// Decode `ScVal::I128` (assumed non-negative) into `u128`.
-pub fn scval_to_u128(v: &ScVal) -> Option<u128> {
-    if let ScVal::I128(parts) = v
-        && parts.hi >= 0
-    {
-        return Some(((parts.hi as u128) << 64) | (parts.lo as u128));
-    }
-    None
-}
-
-pub fn parse_contract_id(addr: &str) -> Result<Hash> {
-    let c = StrContract::from_string(addr)
-        .map_err(|e| eyre!("invalid Stellar contract address {addr:?}: {e}"))?;
-    Ok(Hash(c.0))
-}
-
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct StellarClient {
@@ -861,19 +615,6 @@ impl StellarClient {
             signatures: sigs,
         }))
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct InvokedTx {
-    pub tx_hash_hex: String,
-    pub success: bool,
-    /// Flat index (across all ops) of the ContractEvent emitted by the filter
-    /// contract. `None` if no filter provided or no matching event.
-    pub event_index: Option<u32>,
-    /// The Soroban contract's return value, if any. Populated for SUCCESS
-    /// responses on `TransactionMeta::V3` (testnet) and `V4`. Used to read
-    /// out e.g. the token_id returned by `deploy_interchain_token`.
-    pub return_value: Option<ScVal>,
 }
 
 // `GetTransactionResponse.status` is a plain `String` ("SUCCESS" / "FAILED"
