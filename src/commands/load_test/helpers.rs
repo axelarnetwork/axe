@@ -149,10 +149,6 @@ pub(crate) fn finish_report(
     report.tps = args.tps;
     report.duration_secs = args.duration_secs;
     print_final_report(report);
-    ui::success(&format!(
-        "load test complete ({})",
-        ui::format_elapsed(run_start)
-    ));
 
     // Write full JSON report to a timestamped file so failures can be inspected afterwards.
     let ts = std::time::SystemTime::now()
@@ -161,10 +157,14 @@ pub(crate) fn finish_report(
         .as_secs();
     let log_dir = std::path::Path::new("axe-load-test-logs");
     let log_path = log_dir.join(format!("axe-load-test-{ts}.json"));
+    let mut report_written = false;
     match std::fs::create_dir_all(log_dir) {
         Ok(()) => match serde_json::to_string_pretty(report) {
             Ok(json) => match std::fs::write(&log_path, &json) {
-                Ok(()) => ui::info(&format!("report written to {}", log_path.display())),
+                Ok(()) => {
+                    report_written = true;
+                    ui::info(&format!("report written to {}", log_path.display()));
+                }
                 Err(e) => ui::warn(&format!(
                     "could not write report to {}: {e}",
                     log_path.display()
@@ -177,6 +177,25 @@ pub(crate) fn finish_report(
             log_dir.display()
         )),
     }
+
+    let source_failures = report.total_failed;
+    let verification_failures = report.verification.as_ref().map_or(0, |v| v.failed);
+    if source_failures > 0 || verification_failures > 0 {
+        let report_hint = if report_written {
+            format!("; report written to {}", log_path.display())
+        } else {
+            String::new()
+        };
+        return Err(eyre::eyre!(
+            "load test failed: {source_failures} source tx failures, \
+             {verification_failures} verification failures{report_hint}"
+        ));
+    }
+
+    ui::success(&format!(
+        "load test complete ({})",
+        ui::format_elapsed(run_start)
+    ));
 
     Ok(())
 }

@@ -501,7 +501,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let result =
+                let mut result =
                     execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
                 // Stream successful txs to the concurrent verification pipeline.
                 if result.success
@@ -509,15 +509,24 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 {
                     // Use signature length as a proxy for idx — the verify task
                     // will overwrite idx from the timings vec anyway.
-                    let pending = super::verify::tx_to_pending_solana(
+                    match super::verify::tx_to_pending_solana(
                         &result,
                         0,
                         &sc,
                         has_vv,
                         super::verify::SourceChainType::Evm,
-                    );
-                    if tx_sender.send(pending).is_err() {
-                        eprintln!("warning: verification channel closed, tx won't be verified");
+                    ) {
+                        Ok(pending) => {
+                            if tx_sender.send(pending).is_err() {
+                                eprintln!(
+                                    "warning: verification channel closed, tx won't be verified"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            result.success = false;
+                            result.error = Some(format!("failed to build verification state: {e}"));
+                        }
                     }
                 }
                 result

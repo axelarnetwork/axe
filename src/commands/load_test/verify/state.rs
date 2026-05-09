@@ -34,7 +34,7 @@ pub(in crate::commands::load_test) struct PendingTx {
     pub(super) send_instant: Instant,
     pub(super) source_address: String,
     pub(super) contract_addr: Address,
-    pub(super) payload_hash: FixedBytes<32>,
+    pub(super) payload_hash: Option<FixedBytes<32>>,
     pub(super) payload_hash_hex: String,
     /// Pre-computed command ID for Solana destination checks.
     pub(super) command_id: Option<[u8; 32]>,

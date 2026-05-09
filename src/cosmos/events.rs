@@ -87,6 +87,7 @@ pub fn extract_proposal_id(tx_resp: &Value) -> Result<u64> {
 
 /// Second-leg message info extracted from a hub execution tx that consumed
 /// the first-leg message. Set by parsing the `wasm-routing` event.
+#[derive(Debug)]
 pub struct SecondLegInfo {
     pub message_id: String,
     pub source_chain: String,
@@ -110,12 +111,16 @@ pub async fn discover_second_leg(
     )
     .await?;
 
-    // Permissive: the original used `.cloned().unwrap_or_default()` on the
-    // `txs` array, so any off-shape RPC response (or one carrying an `error`
-    // payload instead of `result`) was silently treated as "no txs yet".
+    parse_second_leg_from_tx_search(resp)
+}
+
+fn parse_second_leg_from_tx_search(resp: Value) -> Result<Option<SecondLegInfo>> {
     let envelope: TxSearchEnvelope =
-        serde_json::from_value(resp).unwrap_or(TxSearchEnvelope { result: None });
-    let txs = envelope.result.map(|r| r.txs).unwrap_or_default();
+        serde_json::from_value(resp).wrap_err("invalid tx_search response")?;
+    let txs = envelope
+        .result
+        .ok_or_else(|| eyre::eyre!("tx_search response missing result"))?
+        .txs;
 
     if txs.is_empty() {
         return Ok(None);
@@ -123,7 +128,7 @@ pub async fn discover_second_leg(
 
     let events = match txs.into_iter().next().and_then(|t| t.tx_result) {
         Some(r) => r.events,
-        None => return Ok(None),
+        None => return Err(eyre::eyre!("tx_search result missing tx_result")),
     };
 
     for event in &events {
@@ -143,31 +148,18 @@ pub async fn discover_second_leg(
             })
         };
 
-        if let (Some(msg_id), Some(src), Some(dst), Some(ph)) = (
-            get_attr("message_id"),
-            get_attr("source_chain"),
-            get_attr("destination_chain"),
-            get_attr("payload_hash"),
-        ) {
-            // source_address and destination_address are required — they're
-            // used downstream by the EVM approval check. An empty fallback
-            // would silently make `isContractCallApproved` return false
-            // forever. If the wasm-routing event is missing them, fail loud.
-            let source_address = get_attr("source_address").ok_or_else(|| {
-                eyre::eyre!("wasm-routing event missing 'source_address' attribute")
-            })?;
-            let destination_address = get_attr("destination_address").ok_or_else(|| {
-                eyre::eyre!("wasm-routing event missing 'destination_address' attribute")
-            })?;
-            return Ok(Some(SecondLegInfo {
-                message_id: msg_id,
-                source_chain: src,
-                destination_chain: dst,
-                payload_hash: ph,
-                source_address,
-                destination_address,
-            }));
-        }
+        let require_attr = |key: &str| -> Result<String> {
+            get_attr(key).ok_or_else(|| eyre::eyre!("wasm-routing event missing '{key}' attribute"))
+        };
+
+        return Ok(Some(SecondLegInfo {
+            message_id: require_attr("message_id")?,
+            source_chain: require_attr("source_chain")?,
+            destination_chain: require_attr("destination_chain")?,
+            payload_hash: require_attr("payload_hash")?,
+            source_address: require_attr("source_address")?,
+            destination_address: require_attr("destination_address")?,
+        }));
     }
 
     Ok(None)
@@ -218,7 +210,92 @@ pub async fn check_hub_approved(
         }
     });
 
-    let resp = lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &query).await?;
+    let resp = match lcd_cosmwasm_smart_query(lcd, axelarnet_gateway, &query).await {
+        Ok(resp) => resp,
+        Err(e) if is_hub_not_approved_error(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
     let resp_str = serde_json::to_string(&resp)?;
     Ok(!resp_str.contains("null") && resp_str.contains(message_id))
+}
+
+fn is_hub_not_approved_error(error: &eyre::Report) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("not approved") || message.contains("failed to query executable messages")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::parse_second_leg_from_tx_search;
+
+    fn tx_search_with_attrs(attrs: &serde_json::Value) -> serde_json::Value {
+        json!({
+            "result": {
+                "txs": [{
+                    "tx_result": {
+                        "events": [{
+                            "type": "wasm-routing",
+                            "attributes": attrs
+                        }]
+                    }
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn second_leg_parser_returns_none_when_no_txs() {
+        let parsed = parse_second_leg_from_tx_search(json!({
+            "result": { "txs": [] }
+        }))
+        .unwrap();
+
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn second_leg_parser_requires_routing_addresses() {
+        let err = parse_second_leg_from_tx_search(tx_search_with_attrs(&json!([
+            { "key": "message_id", "value": "0xabc-1" },
+            { "key": "source_chain", "value": "axelar" },
+            { "key": "destination_chain", "value": "ethereum" },
+            { "key": "payload_hash", "value": "0x1234" }
+        ])))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("source_address"));
+    }
+
+    #[test]
+    fn second_leg_parser_rejects_malformed_tx_search() {
+        let err = parse_second_leg_from_tx_search(json!({ "error": "bad query" })).unwrap_err();
+
+        assert!(err.to_string().contains("missing result"));
+    }
+
+    #[test]
+    fn second_leg_parser_extracts_required_fields() {
+        let parsed = parse_second_leg_from_tx_search(tx_search_with_attrs(&json!([
+            { "key": "message_id", "value": "0xabc-1" },
+            { "key": "source_chain", "value": "axelar" },
+            { "key": "destination_chain", "value": "ethereum" },
+            { "key": "payload_hash", "value": "0x1234" },
+            { "key": "source_address", "value": "hub" },
+            { "key": "destination_address", "value": "0x0000000000000000000000000000000000000001" }
+        ])))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(parsed.message_id, "0xabc-1");
+        assert_eq!(parsed.source_chain, "axelar");
+        assert_eq!(parsed.destination_chain, "ethereum");
+        assert_eq!(parsed.payload_hash, "0x1234");
+        assert_eq!(parsed.source_address, "hub");
+        assert_eq!(
+            parsed.destination_address,
+            "0x0000000000000000000000000000000000000001"
+        );
+    }
 }

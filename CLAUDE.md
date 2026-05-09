@@ -62,7 +62,17 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ---
 
-## 5. Rust-Specific Guidelines
+## 5. Commits
+
+**Use short Conventional Commit messages.**
+
+- Format commit subjects as `type(scope): summary` where the scope is useful.
+- Keep the summary short and concrete.
+- Do not add long commit descriptions unless the change genuinely needs one.
+
+---
+
+## 6. Rust-Specific Guidelines
 
 **Use the type system. Keep functions small. Make business logic read like pseudocode.**
 

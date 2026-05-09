@@ -549,13 +549,20 @@ async fn run_sustained_pipeline(
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let result = super::its_evm_to_sol::execute_interchain_transfer(
+                let mut result = super::its_evm_to_sol::execute_interchain_transfer(
                     &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
                 )
                 .await;
                 if result.success {
-                    let pending = super::verify::tx_to_pending_its(&result, has_vv);
-                    let _ = vtx.send(pending);
+                    match super::verify::tx_to_pending_its(&result, has_vv) {
+                        Ok(pending) => {
+                            let _ = vtx.send(pending);
+                        }
+                        Err(e) => {
+                            result.success = false;
+                            result.error = Some(format!("failed to build verification state: {e}"));
+                        }
+                    }
                 }
                 result
             })

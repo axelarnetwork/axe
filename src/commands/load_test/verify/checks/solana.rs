@@ -13,7 +13,7 @@ const INCOMING_MESSAGE_STATUS_OFFSET: usize = 13;
 pub(in super::super) fn batch_check_solana_incoming_messages(
     rpc_client: &solana_client::rpc_client::RpcClient,
     txs: &[(usize, [u8; 32])], // (tx_index, command_id)
-) -> Vec<(usize, Option<u8>)> {
+) -> Result<Vec<(usize, Option<u8>)>> {
     let mut results = Vec::with_capacity(txs.len());
     for chunk in txs.chunks(SOLANA_BATCH_SIZE) {
         let pubkeys: Vec<Pubkey> = chunk
@@ -26,29 +26,31 @@ pub(in super::super) fn batch_check_solana_incoming_messages(
                 .0
             })
             .collect();
-        match rpc_client.get_multiple_accounts(&pubkeys) {
-            Ok(accounts) => {
-                for (j, maybe_account) in accounts.iter().enumerate() {
-                    if j < chunk.len() {
-                        let status = maybe_account.as_ref().and_then(|acc| {
-                            if acc.data.len() > INCOMING_MESSAGE_STATUS_OFFSET {
-                                Some(acc.data[INCOMING_MESSAGE_STATUS_OFFSET])
-                            } else {
-                                None
-                            }
-                        });
-                        results.push((chunk[j].0, status));
+        let accounts = rpc_client.get_multiple_accounts(&pubkeys)?;
+        if accounts.len() != chunk.len() {
+            return Err(eyre::eyre!(
+                "Solana getMultipleAccounts returned {} accounts for {} PDAs",
+                accounts.len(),
+                chunk.len()
+            ));
+        }
+        for (j, maybe_account) in accounts.iter().enumerate() {
+            let status = match maybe_account {
+                Some(acc) => {
+                    if acc.data.len() <= INCOMING_MESSAGE_STATUS_OFFSET {
+                        return Err(eyre::eyre!(
+                            "IncomingMessage account too small: {} bytes",
+                            acc.data.len()
+                        ));
                     }
+                    Some(acc.data[INCOMING_MESSAGE_STATUS_OFFSET])
                 }
-            }
-            Err(_) => {
-                for (idx, _) in chunk {
-                    results.push((*idx, None));
-                }
-            }
+                None => None,
+            };
+            results.push((chunk[j].0, status));
         }
     }
-    results
+    Ok(results)
 }
 
 /// Check the Solana IncomingMessage PDA for a given command_id.

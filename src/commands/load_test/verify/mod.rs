@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, keccak256};
 use alloy::providers::Provider;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use tokio::sync::mpsc;
 
 use super::metrics::{AmplifierTiming, PeakThroughput, TxMetrics, VerificationReport};
@@ -188,7 +188,7 @@ async fn run_gmp_pipeline<P: Provider>(
     checker: &DestinationChecker<'_, P>,
     mode: VerifyMode<'_>,
     args: RunGmpArgs,
-) -> PeakThroughput {
+) -> Result<PeakThroughput> {
     let RunGmpArgs {
         lcd,
         voting_verifier,
@@ -234,7 +234,7 @@ async fn run_its_hub_pipeline(
     txs: &mut Vec<PendingTx>,
     mode: VerifyMode<'_>,
     args: RunItsHubArgs,
-) -> PeakThroughput {
+) -> Result<PeakThroughput> {
     let RunItsHubArgs {
         lcd,
         voting_verifier,
@@ -281,7 +281,7 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
     gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
     mode: VerifyMode<'_>,
     args: RunItsHubEvmArgs,
-) -> PeakThroughput {
+) -> Result<PeakThroughput> {
     let RunItsHubEvmArgs {
         lcd,
         voting_verifier,
@@ -324,13 +324,31 @@ fn streaming_report_and_timings(
     (report, timings)
 }
 
+fn parse_first_leg_payload_hash(
+    tx: &TxMetrics,
+    required: bool,
+) -> Result<Option<alloy::primitives::FixedBytes<32>>> {
+    if tx.payload_hash.is_empty() {
+        if required {
+            return Err(eyre::eyre!(
+                "missing payload_hash for confirmed tx {}",
+                tx.signature
+            ));
+        }
+        return Ok(None);
+    }
+    parse_payload_hash(&tx.payload_hash)
+        .map(Some)
+        .wrap_err_with(|| format!("invalid payload_hash for confirmed tx {}", tx.signature))
+}
+
 /// Build a `PendingTx` for an ITS-via-hub batch entry. The four ITS batch
 /// orchestrators (`verify_onchain_{solana,stellar,xrpl,evm}_its`) share the
 /// same struct literal — only the starting `phase` differs, which the caller
 /// computes from `voting_verifier.is_some()` (or hardcodes for EVM-ITS).
-fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    PendingTx {
+fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, initial_phase == Phase::Voted)?;
+    Ok(PendingTx {
         idx,
         message_id: tx.signature.clone(),
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -349,7 +367,7 @@ fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) ->
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 /// Compute the source-side `message_id` from a confirmed `TxMetrics` based on
@@ -380,9 +398,9 @@ fn pending_tx_for_gmp_batch(
     gmp_destination_chain: String,
     gmp_destination_address: String,
     initial_phase: Phase,
-) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    PendingTx {
+) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, true)?;
+    Ok(PendingTx {
         idx,
         message_id,
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -401,7 +419,7 @@ fn pending_tx_for_gmp_batch(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +493,7 @@ pub async fn verify_onchain<P: Provider>(
                 initial_phase,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let checker = DestinationChecker::Evm {
         gw_contract: &gw_contract,
@@ -494,7 +512,7 @@ pub async fn verify_onchain<P: Provider>(
             destination_address: destination_address.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -546,7 +564,7 @@ pub async fn verify_onchain_evm_streaming(
             destination_address: destination_address.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }
@@ -599,7 +617,7 @@ pub async fn verify_onchain_stellar_gmp(
                 initial_phase,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, stellar_network_type)?;
     let checker: DestinationChecker<alloy::providers::RootProvider> = DestinationChecker::Stellar {
@@ -622,7 +640,7 @@ pub async fn verify_onchain_stellar_gmp(
             destination_address: destination_contract.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -678,7 +696,7 @@ pub async fn verify_onchain_stellar_gmp_streaming(
             destination_address: destination_contract.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }
@@ -690,8 +708,8 @@ pub(super) fn tx_to_pending_solana(
     source_chain: &str,
     has_voting_verifier: bool,
     source_type: SourceChainType,
-) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
+) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, true)?;
     let message_id = match source_type {
         SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
@@ -701,7 +719,7 @@ pub(super) fn tx_to_pending_solana(
         }
     };
     let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
-    PendingTx {
+    Ok(PendingTx {
         idx,
         message_id,
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -724,7 +742,7 @@ pub(super) fn tx_to_pending_solana(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 /// Convert a confirmed TxMetrics into a PendingTx for Stellar-sourced GMP.
@@ -735,9 +753,9 @@ pub(super) fn tx_to_pending_stellar(
     tx: &TxMetrics,
     has_voting_verifier: bool,
     contract_addr: Address,
-) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    PendingTx {
+) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, true)?;
+    Ok(PendingTx {
         idx: 0,
         message_id: tx.signature.clone(),
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -760,16 +778,16 @@ pub(super) fn tx_to_pending_stellar(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 /// Convert a confirmed TxMetrics into a PendingTx for XRPL-sourced ITS
 /// verification. The `signature` field on the input is the already-formatted
 /// XRPL message id (`0x{lowercase_hex_tx_hash}`), which is what the
 /// `XrplVotingVerifier` / `XrplGateway` expect.
-pub(super) fn tx_to_pending_xrpl(tx: &TxMetrics, has_voting_verifier: bool) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    PendingTx {
+pub(super) fn tx_to_pending_xrpl(tx: &TxMetrics, has_voting_verifier: bool) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, has_voting_verifier)?;
+    Ok(PendingTx {
         idx: 0,
         message_id: tx.signature.clone(),
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -792,15 +810,15 @@ pub(super) fn tx_to_pending_xrpl(tx: &TxMetrics, has_voting_verifier: bool) -> P
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 /// Convert a confirmed TxMetrics into a PendingTx for ITS hub verification.
 /// ITS messages route through the hub, so gmp_destination_chain/address are
 /// set from the TxMetrics (typically "axelar" / AxelarnetGateway).
-pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> PendingTx {
-    let payload_hash = parse_payload_hash(&tx.payload_hash).unwrap_or_default();
-    PendingTx {
+pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Result<PendingTx> {
+    let payload_hash = parse_first_leg_payload_hash(tx, has_voting_verifier)?;
+    Ok(PendingTx {
         idx: 0,
         message_id: tx.signature.clone(),
         send_instant: tx.send_instant.unwrap_or_else(Instant::now),
@@ -823,7 +841,7 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Pe
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -878,7 +896,7 @@ pub async fn verify_onchain_sui_gmp(
                 initial_phase,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> = DestinationChecker::Sui {
         client: sui_client,
@@ -899,7 +917,7 @@ pub async fn verify_onchain_sui_gmp(
             destination_address: destination_address.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -955,7 +973,7 @@ pub async fn verify_onchain_solana_streaming(
             destination_address: destination_address.to_string(),
         },
     )
-    .await;
+    .await?;
 
     // Key by message_id (signature) since streaming PendingTx idx is always 0.
     Ok(streaming_report_and_timings(&txs, peaks))
@@ -1012,7 +1030,7 @@ pub async fn verify_onchain_solana(
                 initial_phase,
             )
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
         solana_rpc,
@@ -1038,7 +1056,7 @@ pub async fn verify_onchain_solana(
             destination_address: destination_address.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -1087,7 +1105,7 @@ pub async fn verify_onchain_solana_its(
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let rpc = read_axelar_rpc(config)?;
     let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
@@ -1107,7 +1125,7 @@ pub async fn verify_onchain_solana_its(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -1154,7 +1172,7 @@ pub async fn verify_onchain_solana_its_streaming(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }
@@ -1198,7 +1216,7 @@ pub async fn verify_onchain_stellar_its(
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let rpc = read_axelar_rpc(config)?;
     let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
@@ -1221,7 +1239,7 @@ pub async fn verify_onchain_stellar_its(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -1274,7 +1292,7 @@ pub async fn verify_onchain_stellar_its_streaming(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }
@@ -1312,7 +1330,7 @@ pub async fn verify_onchain_xrpl_its(
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let rpc = read_axelar_rpc(config)?;
     // XRPL's destination cosmos gateway is `XrplGateway/{chain}`, not the
@@ -1336,7 +1354,7 @@ pub async fn verify_onchain_xrpl_its(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -1385,7 +1403,7 @@ pub async fn verify_onchain_xrpl_its_streaming(
             },
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }
@@ -1432,7 +1450,7 @@ pub async fn verify_onchain_evm_its(
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
         .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let rpc = read_axelar_rpc(config)?;
     let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
@@ -1454,7 +1472,7 @@ pub async fn verify_onchain_evm_its(
             destination_chain: destination_chain.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
@@ -1507,7 +1525,7 @@ pub async fn verify_onchain_evm_its_streaming(
             destination_chain: destination_chain.to_string(),
         },
     )
-    .await;
+    .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
 }

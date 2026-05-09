@@ -907,7 +907,7 @@ async fn run_sustained_loop(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
-            let m = submit_its_transfer(
+            let mut m = submit_its_transfer(
                 &c,
                 wallet,
                 &its,
@@ -925,8 +925,15 @@ async fn run_sustained_loop(
                 && let Some(ref tx_sender) = vtx
             {
                 // ITS pipeline: starts at Voted (Stellar VotingVerifier).
-                let pending = super::verify::tx_to_pending_its(&m, true);
-                let _ = tx_sender.send(pending);
+                match super::verify::tx_to_pending_its(&m, true) {
+                    Ok(pending) => {
+                        let _ = tx_sender.send(pending);
+                    }
+                    Err(e) => {
+                        m.success = false;
+                        m.error = Some(format!("failed to build verification state: {e}"));
+                    }
+                }
             }
             m
         })

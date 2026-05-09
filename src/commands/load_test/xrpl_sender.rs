@@ -342,7 +342,7 @@ pub(super) async fn run_sustained(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
-            let m = submit_single(
+            let mut m = submit_single(
                 &c,
                 wallet,
                 &multisig,
@@ -360,8 +360,15 @@ pub(super) async fn run_sustained(
             if m.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_xrpl(&m, has_vv);
-                let _ = tx_sender.send(pending);
+                match super::verify::tx_to_pending_xrpl(&m, has_vv) {
+                    Ok(pending) => {
+                        let _ = tx_sender.send(pending);
+                    }
+                    Err(e) => {
+                        m.success = false;
+                        m.error = Some(format!("failed to build verification state: {e}"));
+                    }
+                }
             }
             m
         })

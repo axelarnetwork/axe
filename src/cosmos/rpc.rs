@@ -10,7 +10,7 @@ use alloy::{
     primitives::{Address, FixedBytes, U256},
 };
 use base64::Engine;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -175,31 +175,30 @@ struct PubKey {
     ecdsa: Option<String>,
 }
 
-/// Parse a numeric LCD response field that comes back as a JSON string,
-/// defaulting to zero on missing/unparseable values. Many cosmos LCD endpoints
-/// represent u64/u128 as strings (e.g. `"sequence": "42"`).
-pub(super) fn parse_or_zero<T: std::str::FromStr + Default>(s: Option<&str>) -> T {
-    s.and_then(|x| x.parse().ok()).unwrap_or_default()
+/// Parse a numeric LCD response field that comes back as a JSON string.
+/// Cosmos LCD endpoints often represent u64/u128 as strings (for example,
+/// `"sequence": "42"`), and missing or malformed values are response errors.
+pub(super) fn parse_required<T>(field: &str, s: Option<&str>) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let raw = s.ok_or_else(|| eyre::eyre!("missing numeric LCD field {field}"))?;
+    raw.parse()
+        .map_err(|e| eyre::eyre!("invalid numeric LCD field {field}={raw}: {e}"))
 }
 
 pub(super) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
     let url = format!("{lcd}/cosmos/auth/v1beta1/accounts/{address}");
     let raw: Value = reqwest::get(&url).await?.json().await?;
-    // The original errored only when the `account` field was entirely absent;
-    // any other shape (non-object, missing sub-fields) silently fell through
-    // to `parse_or_zero` → `(0, 0)`. We replicate that by checking presence
-    // first and absorbing typed-parse failures inside the account into the
-    // same zero defaults.
     if raw.get("account").is_none() {
         return Err(eyre::eyre!("no account in response: {raw}"));
     }
     let account: AccountInner =
-        serde_json::from_value(raw["account"].clone()).unwrap_or(AccountInner {
-            account_number: None,
-            sequence: None,
-        });
-    let account_number: u64 = parse_or_zero(account.account_number.as_deref());
-    let sequence: u64 = parse_or_zero(account.sequence.as_deref());
+        serde_json::from_value(raw["account"].clone()).wrap_err("invalid account response")?;
+    let account_number: u64 =
+        parse_required("account.account_number", account.account_number.as_deref())?;
+    let sequence: u64 = parse_required("account.sequence", account.sequence.as_deref())?;
     Ok((account_number, sequence))
 }
 
@@ -207,11 +206,11 @@ pub(super) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, 
 pub(super) async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
     let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{address}/by_denom?denom={denom}");
     let raw: Value = reqwest::get(&url).await?.json().await?;
-    // Permissive: original used `Value::pointer` with `.unwrap_or` defaults,
-    // so any off-shape response was silently treated as zero.
-    let resp: BalanceResponse =
-        serde_json::from_value(raw).unwrap_or(BalanceResponse { balance: None });
-    let amount: u128 = parse_or_zero(resp.balance.as_ref().and_then(|b| b.amount.as_deref()));
+    let resp: BalanceResponse = serde_json::from_value(raw).wrap_err("invalid balance response")?;
+    let balance = resp
+        .balance
+        .ok_or_else(|| eyre::eyre!("balance response missing balance"))?;
+    let amount: u128 = parse_required("balance.amount", balance.amount.as_deref())?;
     Ok(amount)
 }
 
@@ -224,10 +223,18 @@ pub async fn check_axelar_balance(
     fee_denom: &str,
     min_amount: u128,
 ) -> Result<()> {
-    let account_exists = lcd_query_account(lcd, address).await.is_ok();
-    let balance = lcd_query_balance(lcd, address, fee_denom)
-        .await
-        .unwrap_or(0);
+    let account_exists = match lcd_query_account(lcd, address).await {
+        Ok(_) => true,
+        Err(e) if e.to_string().contains("no account in response") => false,
+        Err(e) => return Err(e.wrap_err("failed to query Axelar relayer account")),
+    };
+    let balance = if account_exists {
+        lcd_query_balance(lcd, address, fee_denom)
+            .await
+            .wrap_err("failed to query Axelar relayer balance")?
+    } else {
+        0
+    };
 
     let display = balance as f64 / 1_000_000.0;
     let min_display = min_amount as f64 / 1_000_000.0;
@@ -267,17 +274,17 @@ pub(super) async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
         .await?
         .json()
         .await?;
-    // The original used `Value::pointer` lookups, which silently mapped any
-    // off-shape response to "gas_used = 0" → the existing "0 gas" error. We
-    // preserve that fallthrough by treating a deserialize failure as an
-    // empty `SimulateResponse` rather than introducing a new error path.
-    let resp: SimulateResponse = serde_json::from_value(raw.clone()).unwrap_or_default();
+    let resp: SimulateResponse =
+        serde_json::from_value(raw.clone()).wrap_err("invalid simulation response")?;
     if let Some(err) = resp.message.as_deref()
         && !err.is_empty()
     {
         return Err(eyre::eyre!("simulation failed: {err}"));
     }
-    let gas_used: u64 = parse_or_zero(resp.gas_info.as_ref().and_then(|g| g.gas_used.as_deref()));
+    let gas_info = resp
+        .gas_info
+        .ok_or_else(|| eyre::eyre!("simulation response missing gas_info"))?;
+    let gas_used: u64 = parse_required("gas_info.gas_used", gas_info.gas_used.as_deref())?;
     if gas_used == 0 {
         return Err(eyre::eyre!(
             "simulation returned 0 gas — response: {}",
@@ -302,14 +309,15 @@ pub(super) async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value
         .json()
         .await?;
     let envelope: TxResultEnvelope =
-        serde_json::from_value(resp.clone()).unwrap_or(TxResultEnvelope { tx_response: None });
-    let tx_response = envelope.tx_response;
-    let code = tx_response.as_ref().and_then(|b| b.code).unwrap_or(1);
+        serde_json::from_value(resp.clone()).wrap_err("invalid broadcast response")?;
+    let tx_response = envelope
+        .tx_response
+        .ok_or_else(|| eyre::eyre!("broadcast response missing tx_response"))?;
+    let code = tx_response
+        .code
+        .ok_or_else(|| eyre::eyre!("broadcast response missing tx_response.code"))?;
     if code != 0 {
-        let raw_log = tx_response
-            .as_ref()
-            .and_then(|b| b.raw_log.as_deref())
-            .unwrap_or("unknown error");
+        let raw_log = tx_response.raw_log.as_deref().unwrap_or("unknown error");
         return Err(eyre::eyre!("broadcast failed (code {code}): {raw_log}"));
     }
     Ok(resp)
@@ -321,19 +329,20 @@ pub(super) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
         tokio::time::sleep(crate::timing::LCD_WAIT_RETRY_INTERVAL).await;
         let url = format!("{lcd}/cosmos/tx/v1beta1/txs/{tx_hash}");
         let resp: Value = match reqwest::get(&url).await {
-            Ok(r) => r.json().await.unwrap_or(serde_json::json!({})),
+            Ok(r) => r.json().await.wrap_err("invalid tx lookup response")?,
             Err(_) => continue,
         };
         if resp.get("tx_response").is_some() {
-            let envelope: TxResultEnvelope = serde_json::from_value(resp.clone())
-                .unwrap_or(TxResultEnvelope { tx_response: None });
-            let tx_response = envelope.tx_response;
-            let code = tx_response.as_ref().and_then(|b| b.code).unwrap_or(1);
+            let envelope: TxResultEnvelope =
+                serde_json::from_value(resp.clone()).wrap_err("invalid tx lookup response")?;
+            let tx_response = envelope
+                .tx_response
+                .ok_or_else(|| eyre::eyre!("tx lookup response missing tx_response"))?;
+            let code = tx_response
+                .code
+                .ok_or_else(|| eyre::eyre!("tx lookup response missing tx_response.code"))?;
             if code != 0 {
-                let raw_log = tx_response
-                    .as_ref()
-                    .and_then(|b| b.raw_log.as_deref())
-                    .unwrap_or("unknown");
+                let raw_log = tx_response.raw_log.as_deref().unwrap_or("unknown");
                 return Err(eyre::eyre!("tx failed (code {code}): {raw_log}"));
             }
             return Ok(resp);
@@ -358,6 +367,10 @@ const LCD_FALLBACKS_MAINNET: &[&str] = &[
     "https://rest.lavenderfive.com/axelar",
     "https://axelar-rest.publicnode.com",
 ];
+
+fn is_non_mainnet_axelar_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("testnet") || endpoint.contains("stagenet") || endpoint.contains("devnet")
+}
 
 /// `OnceLock` flag for the LCD fallback warning. We emit one ui::warn the
 /// first time the primary LCD goes unhealthy in a process, then stay quiet
@@ -404,7 +417,7 @@ pub async fn lcd_cosmwasm_smart_query(
     // endpoints. Only the user-set AXELAR_LCD_URL skips fallback — we honor
     // their explicit choice and surface the error directly.
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() {
+    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
         for fb in LCD_FALLBACKS_MAINNET {
             if *fb != primary {
                 candidates.push((*fb).to_string());
@@ -433,8 +446,22 @@ pub async fn lcd_cosmwasm_smart_query(
                         }
                         match serde_json::from_str::<Value>(&body) {
                             Ok(resp) => {
+                                let data = resp.get("data").cloned().ok_or_else(|| {
+                                    eyre::eyre!(
+                                        "LCD {endpoint} response missing data field. \
+                                         First 200 chars: {}",
+                                        body.chars().take(200).collect::<String>()
+                                    )
+                                });
+                                let data = match data {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        last_err = Some(e);
+                                        continue;
+                                    }
+                                };
                                 note_lcd_fallback_use(idx, endpoint, last_err.as_ref());
-                                return Ok(resp["data"].clone());
+                                return Ok(data);
                             }
                             Err(e) => {
                                 last_err = Some(eyre::eyre!(
@@ -478,22 +505,15 @@ pub async fn lcd_fetch_code_id(lcd: &str, expected_checksum: &str) -> Result<u64
             url.push_str(&format!("&pagination.key={key}"));
         }
         let raw: Value = reqwest::get(&url).await?.json().await?;
-        // Permissive: original errored on `code_infos` missing/non-array via
-        // `as_array().ok_or(...)`; any other malformation (e.g. non-string
-        // `code_id`) was silently mapped to "0". We mirror that by trying a
-        // typed parse and falling back to an empty `CodeListResponse` so the
-        // existing "no code_infos" error fires for the missing-field case.
-        let resp: CodeListResponse = serde_json::from_value(raw).unwrap_or(CodeListResponse {
-            code_infos: None,
-            pagination: None,
-        });
+        let resp: CodeListResponse =
+            serde_json::from_value(raw).wrap_err("invalid code list response")?;
         let codes = resp
             .code_infos
             .ok_or_else(|| eyre::eyre!("no code_infos in response"))?;
         for code in &codes {
             let checksum = code.data_hash.as_deref().unwrap_or("").to_uppercase();
             if checksum == expected {
-                let code_id: u64 = code.code_id.as_deref().unwrap_or("0").parse().unwrap_or(0);
+                let code_id: u64 = parse_required("code_infos[].code_id", code.code_id.as_deref())?;
                 return Ok(code_id);
             }
         }
@@ -585,7 +605,7 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
         .to_string();
 
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() {
+    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
         for fb in RPC_FALLBACKS_MAINNET {
             if *fb != primary {
                 candidates.push((*fb).to_string());
@@ -671,7 +691,9 @@ pub async fn rpc_tx_search(
         .await?
         .json::<Value>()
         .await?;
-    Ok(resp.get("result").cloned().unwrap_or(Value::Null))
+    resp.get("result")
+        .cloned()
+        .ok_or_else(|| eyre::eyre!("tx_search response missing result"))
 }
 
 /// Query Tendermint RPC `block` endpoint for a given height. Returns block.header.time.
@@ -766,12 +788,14 @@ pub async fn fetch_verifier_set(
             .and_then(|p| p.ecdsa.as_deref())
             .ok_or_else(|| eyre::eyre!("no pub_key.ecdsa for signer"))?;
 
-        let weight: u128 = signer
-            .weight
-            .as_str()
-            .map(|s| s.parse::<u128>())
-            .unwrap_or_else(|| Ok(signer.weight.as_u64().unwrap_or(1) as u128))
-            .map_err(|e| eyre::eyre!("invalid weight: {e}"))?;
+        let weight: u128 = if let Some(raw) = signer.weight.as_str() {
+            raw.parse::<u128>()
+                .map_err(|e| eyre::eyre!("invalid weight {raw}: {e}"))?
+        } else if let Some(raw) = signer.weight.as_u64() {
+            raw as u128
+        } else {
+            return Err(eyre::eyre!("missing or invalid verifier signer weight"));
+        };
 
         let pubkey_bytes = hex::decode(pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex))?;
         let addr = pubkey_to_address(&pubkey_bytes)?;

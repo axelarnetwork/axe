@@ -290,7 +290,7 @@ impl SuiClient {
         const MAX_PAGES: usize = 20; // 20 × 100 = 2000 newest events scanned
         let mut cursor: Value = Value::Null;
         for _ in 0..MAX_PAGES {
-            let r = self
+            let r = match self
                 .call(
                     "suix_queryEvents",
                     json!([
@@ -300,7 +300,12 @@ impl SuiClient {
                         true,
                     ]),
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(err) if is_query_events_indexer_pending(&err) => return Ok(false),
+                Err(err) => return Err(err),
+            };
             let arr = r
                 .get("data")
                 .and_then(|v| v.as_array())
@@ -340,6 +345,12 @@ impl SuiClient {
         }
         Ok(false)
     }
+}
+
+fn is_query_events_indexer_pending(error: &eyre::Report) -> bool {
+    let message = error.to_string();
+    message.contains("Could not find the referenced transaction events")
+        && message.contains("TransactionDigest")
 }
 
 fn owner_addr_hex(a: &SuiAddress) -> String {

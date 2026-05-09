@@ -341,12 +341,20 @@ pub(super) async fn run_sustained(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
-            let m = submit_single(&c, wallet, &ex, &gw, &dc, &da, &payload, &gas_token, gas).await;
+            let mut m =
+                submit_single(&c, wallet, &ex, &gw, &dc, &da, &payload, &gas_token, gas).await;
             if m.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_stellar(&m, has_vv, contract_addr);
-                let _ = tx_sender.send(pending);
+                match super::verify::tx_to_pending_stellar(&m, has_vv, contract_addr) {
+                    Ok(pending) => {
+                        let _ = tx_sender.send(pending);
+                    }
+                    Err(e) => {
+                        m.success = false;
+                        m.error = Some(format!("failed to build verification state: {e}"));
+                    }
+                }
             }
             m
         })

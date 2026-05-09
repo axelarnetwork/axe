@@ -376,7 +376,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         let has_vv = has_voting_verifier;
 
         Box::pin(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let mut result = tokio::task::spawn_blocking(move || {
                 send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
             })
             .await
@@ -401,15 +401,22 @@ pub(super) async fn run_sustained_load_test_with_metrics(
             if result.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_solana(
+                match super::verify::tx_to_pending_solana(
                     &result,
                     0,
                     &sc,
                     has_vv,
                     super::verify::SourceChainType::Svm,
-                );
-                if tx_sender.send(pending).is_err() {
-                    eprintln!("warning: verification channel closed, tx won't be verified");
+                ) {
+                    Ok(pending) => {
+                        if tx_sender.send(pending).is_err() {
+                            eprintln!("warning: verification channel closed, tx won't be verified");
+                        }
+                    }
+                    Err(e) => {
+                        result.success = false;
+                        result.error = Some(format!("failed to build verification state: {e}"));
+                    }
                 }
             }
             result

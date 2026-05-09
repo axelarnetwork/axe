@@ -7,15 +7,13 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, keccak256};
-use eyre::Result;
+use eyre::{Result, WrapErr};
 
 use super::POLL_INTERVAL;
 use super::checks::{check_evm_is_message_approved, check_solana_incoming_message};
-use super::pipeline::{
-    check_cosmos_routed, check_hub_approved, discover_second_leg, parse_payload_hash,
-};
+use super::pipeline::{check_cosmos_routed, check_hub_approved, parse_payload_hash};
 use crate::config::ChainsConfig;
-use crate::cosmos::read_axelar_rpc;
+use crate::cosmos::{discover_second_leg, read_axelar_rpc};
 use crate::evm::AxelarAmplifierGateway;
 use crate::ui;
 
@@ -94,7 +92,7 @@ pub async fn wait_for_its_remote_deploy(
                     // VotingVerifier just needs the message to exist
                     if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
                         .await
-                        .unwrap_or(false)
+                        .wrap_err("remote deploy hub approval check failed")?
                     {
                         spinner.set_message("remote deploy: hub approved");
                         phase = DeployPhase::DiscoverSecondLeg;
@@ -109,7 +107,7 @@ pub async fn wait_for_its_remote_deploy(
             DeployPhase::HubApproved => {
                 if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
                     .await
-                    .unwrap_or(false)
+                    .wrap_err("remote deploy hub approval check failed")?
                 {
                     spinner.set_message("remote deploy: hub approved");
                     phase = DeployPhase::DiscoverSecondLeg;
@@ -132,16 +130,16 @@ pub async fn wait_for_its_remote_deploy(
                     Ok(None) => {
                         spinner.set_message("remote deploy: discovering second leg...");
                     }
-                    Err(e) => {
-                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
-                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy second-leg discovery failed")),
                 }
             }
             DeployPhase::Routed => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let sl_id = second_leg_id
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
                 if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
                     .await
-                    .unwrap_or(false)
+                    .wrap_err("remote deploy routing check failed")?
                 {
                     spinner.set_message("remote deploy: routed to destination");
                     phase = DeployPhase::Approved;
@@ -150,9 +148,14 @@ pub async fn wait_for_its_remote_deploy(
                 spinner.set_message("remote deploy: waiting for routing...");
             }
             DeployPhase::Approved => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
-                let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
-                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                let sl_id = second_leg_id
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
+                let sl_ph_str = second_leg_ph
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg payload_hash"))?;
+                let ph = parse_payload_hash(sl_ph_str)
+                    .wrap_err("remote deploy second-leg payload_hash is invalid")?;
                 match check_evm_is_message_approved(
                     &gw_contract,
                     "axelar",
@@ -173,15 +176,18 @@ pub async fn wait_for_its_remote_deploy(
                         phase = DeployPhase::Executed;
                         continue;
                     }
-                    Err(_) => {
-                        spinner.set_message("remote deploy: waiting for EVM approval...");
-                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy EVM approval check failed")),
                 }
             }
             DeployPhase::Executed => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
-                let sl_ph_str = second_leg_ph.as_deref().unwrap_or("");
-                let ph = parse_payload_hash(sl_ph_str).unwrap_or_default();
+                let sl_id = second_leg_id
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
+                let sl_ph_str = second_leg_ph
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg payload_hash"))?;
+                let ph = parse_payload_hash(sl_ph_str)
+                    .wrap_err("remote deploy second-leg payload_hash is invalid")?;
                 match check_evm_is_message_approved(
                     &gw_contract,
                     "axelar",
@@ -200,9 +206,7 @@ pub async fn wait_for_its_remote_deploy(
                     Ok(true) => {
                         spinner.set_message("remote deploy: waiting for EVM execution...");
                     }
-                    Err(_) => {
-                        spinner.set_message("remote deploy: waiting for EVM execution...");
-                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy EVM execution check failed")),
                 }
             }
             DeployPhase::Done => break,
@@ -280,7 +284,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
             DeployPhase::HubApproved => {
                 if check_hub_approved(&lcd, &axelarnet_gateway, source_chain, deploy_message_id)
                     .await
-                    .unwrap_or(false)
+                    .wrap_err("remote deploy hub approval check failed")?
                 {
                     spinner.set_message("remote deploy: hub approved");
                     phase = DeployPhase::DiscoverSecondLeg;
@@ -302,16 +306,16 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                     Ok(None) => {
                         spinner.set_message("remote deploy: discovering second leg...");
                     }
-                    Err(e) => {
-                        spinner.set_message(format!("remote deploy: second leg error: {e}"));
-                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy second-leg discovery failed")),
                 }
             }
             DeployPhase::Routed => {
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let sl_id = second_leg_id
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
                 if check_cosmos_routed(&lcd, &cosm_gateway_dest, "axelar", sl_id)
                     .await
-                    .unwrap_or(false)
+                    .wrap_err("remote deploy routing check failed")?
                 {
                     spinner.set_message("remote deploy: routed to Solana");
                     phase = DeployPhase::Approved;
@@ -323,7 +327,9 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                 // Check if the Solana gateway has the incoming message.
                 // The PDA may be absent if the message was already executed and
                 // the account was closed, so after enough retries we assume done.
-                let sl_id = second_leg_id.as_deref().unwrap_or("");
+                let sl_id = second_leg_id
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
                 let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
                 let cmd_id: [u8; 32] = keccak256(&input).into();
                 match check_solana_incoming_message(&sol_rpc_client, &cmd_id) {
@@ -343,9 +349,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                         }
                         spinner.set_message("remote deploy: waiting for Solana approval...");
                     }
-                    Err(_) => {
-                        spinner.set_message("remote deploy: waiting for Solana approval...");
-                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy Solana approval check failed")),
                 }
             }
             DeployPhase::Done => break,

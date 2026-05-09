@@ -407,8 +407,16 @@ async fn run_sustained_pipeline(
                         metrics.gmp_destination_address = gmp_dest;
                         // Stream to concurrent verification
                         if metrics.success {
-                            let pending = super::verify::tx_to_pending_its(&metrics, false);
-                            let _ = vtx.send(pending);
+                            match super::verify::tx_to_pending_its(&metrics, false) {
+                                Ok(pending) => {
+                                    let _ = vtx.send(pending);
+                                }
+                                Err(e) => {
+                                    metrics.success = false;
+                                    metrics.error =
+                                        Some(format!("failed to build verification state: {e}"));
+                                }
+                            }
                         }
                         metrics
                     }
