@@ -13,9 +13,11 @@
 //! - [`helpers`]: small free-standing helpers (`parse_address`,
 //!   `account_id_to_hex`, `faucet_url_for_network`, `signed_tx_hash_hex`).
 
-// Several helpers here are used only by the forthcoming EVM → XRPL
-// destination verifier; keep them reachable but silence dead-code lints
-// until the second direction lands.
+// XRPL route support is split between the current load-test sender/verifier
+// code and reusable client primitives here. The unused items are the generic
+// client helpers for submitting/polling XRPL transactions and destination
+// verification plumbing; remove this once all XRPL routes use those helpers or
+// the duplicate route-local code is deleted.
 #![allow(dead_code)]
 
 mod helpers;

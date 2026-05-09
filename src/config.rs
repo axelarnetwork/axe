@@ -11,9 +11,12 @@
 //! whole load. Callers that *require* a field should `?` it explicitly with
 //! a clear error message instead of silently defaulting.
 
-// Many fields are typed for completeness but only become live once the
-// Phase 1b/1c readers and command call-sites are migrated; allow dead code
-// at module scope for now and revisit once migration is complete.
+// This module intentionally types more of the deployments JSON schema than
+// callers read today. Serde still needs those fields to preserve the shape and
+// absorb unknown data via `extra`; runtime callers currently read only a subset
+// such as RPC URLs, Axelar IDs, contract addresses, and gas price fields.
+// Keeping this allow at module scope is less noisy than annotating every
+// schema field that exists for JSON compatibility rather than direct reads.
 #![allow(dead_code)]
 
 use std::collections::HashMap;

@@ -5,7 +5,7 @@
 use ed25519_dalek::SigningKey;
 use eyre::{Result, eyre};
 use stellar_strkey::ed25519::PublicKey as StrPubKey;
-use stellar_xdr::curr::{AccountId, MuxedAccount, PublicKey, SignatureHint, Uint256};
+use stellar_xdr::curr::{MuxedAccount, SignatureHint, Uint256};
 
 /// Well-known network passphrases — Stellar does NOT put these in chain
 /// config, but they're stable per-network. SHA256(passphrase) becomes the
@@ -59,12 +59,6 @@ impl StellarWallet {
     /// Stellar G-address (base32-encoded with checksum).
     pub fn address(&self) -> String {
         StrPubKey(self.public_key_bytes).to_string()
-    }
-
-    pub fn account_id(&self) -> AccountId {
-        AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
-            self.public_key_bytes,
-        )))
     }
 
     pub fn muxed_account(&self) -> MuxedAccount {

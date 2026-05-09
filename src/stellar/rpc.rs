@@ -50,7 +50,6 @@ const VALIDATE_TIMEOUT: Duration = Duration::from_secs(180);
 #[derive(Clone)]
 pub struct StellarClient {
     pub rpc: RpcClient,
-    pub network_passphrase: String,
     pub network_id: [u8; 32],
 }
 
@@ -58,13 +57,9 @@ impl StellarClient {
     pub fn new(rpc_url: &str, network_type: &str) -> Result<Self> {
         let rpc = RpcClient::new(rpc_url)
             .map_err(|e| eyre!("failed to build Stellar RPC client: {e}"))?;
-        let network_passphrase = network_passphrase_for(network_type).to_string();
+        let network_passphrase = network_passphrase_for(network_type);
         let network_id: [u8; 32] = Sha256::digest(network_passphrase.as_bytes()).into();
-        Ok(Self {
-            rpc,
-            network_passphrase,
-            network_id,
-        })
+        Ok(Self { rpc, network_id })
     }
 
     /// Fetch the current account sequence number. Returns `None` if the

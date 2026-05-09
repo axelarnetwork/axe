@@ -117,12 +117,6 @@ pub fn scval_void() -> ScVal {
     ScVal::Void
 }
 
-/// Convert a raw `ContractId` byte array back into the user-facing C-address
-/// (base32-encoded with checksum).
-pub fn contract_id_to_address(id: &[u8; 32]) -> String {
-    StrContract(*id).to_string()
-}
-
 /// Decode an `ScVal::Bytes` of exactly 32 bytes into a `[u8; 32]` (e.g.,
 /// the `tokenId` returned by `deploy_interchain_token`).
 pub fn scval_to_bytes32(v: &ScVal) -> Option<[u8; 32]> {

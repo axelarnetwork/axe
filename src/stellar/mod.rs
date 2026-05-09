@@ -8,7 +8,7 @@
 //! - [`wallet`]: `network_passphrase_for`, `StellarWallet` (Ed25519 keypair +
 //!   G-address derivation).
 //! - [`scval`]: `scval_*` builders and extractors that bridge Rust values
-//!   and Soroban `ScVal`s, plus `parse_contract_id` / `contract_id_to_address`.
+//!   and Soroban `ScVal`s, plus `parse_contract_id`.
 //! - [`rpc`]: `StellarClient` (JSON-RPC client) and the response-parsing
 //!   helpers that walk `GetTransactionResponse.result_meta`.
 //! - [`tx`]: `InvokedTx` — the submit + poll result.
@@ -17,8 +17,6 @@
 //! - TypeScript: `axelar-contract-deployments/stellar/gateway.js`, `its.js`
 //! - Soroban submission flow: build → `simulate_transaction` → merge footprint
 //!   + auth + min_resource_fee → sign → `send_transaction` → poll
-
-#![allow(dead_code)]
 
 mod rpc;
 mod scval;
