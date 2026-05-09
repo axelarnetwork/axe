@@ -10,3 +10,4 @@ bench-results/
 # Kept on disk for re-use, not pushed.
 scripts/run-baseline-matrix.sh
 scripts/compare-load-test-baseline.sh
+scripts/plot_load_tests.py
