@@ -409,6 +409,38 @@ impl StellarClient {
             .and_then(scval_to_address_string))
     }
 
+    /// Simulate `InterchainTokenService.registered_token_address(token_id)`.
+    ///
+    /// `interchain_token_address` is deterministic and can return an address
+    /// before the token is actually registered. This view proves the token ID
+    /// is present in ITS storage.
+    pub async fn its_registered_token_address_view(
+        &self,
+        signer_account_pk: &[u8; 32],
+        its_contract: &str,
+        token_id: [u8; 32],
+    ) -> Result<Option<String>> {
+        let token_id_v = scval_bytes(&token_id)?;
+        let ret = match self
+            .simulate_view(
+                signer_account_pk,
+                its_contract,
+                "registered_token_address",
+                vec![token_id_v],
+            )
+            .await
+        {
+            Ok(ret) => ret,
+            Err(e) if is_unregistered_stellar_token_error(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+
+        let ret = ret.ok_or_else(|| eyre!("registered_token_address returned no result"))?;
+        scval_to_address_string(&ret)
+            .map(Some)
+            .ok_or_else(|| eyre!("registered_token_address returned non-address result"))
+    }
+
     /// Standard SAC `transfer(from, to, amount)`. Used to distribute the AXE
     /// load-test token from the deployer to ephemeral wallets.
     pub async fn token_transfer(
@@ -621,6 +653,14 @@ impl StellarClient {
 // trimmed) so minor format changes don't break the caller.
 fn extract_status(resp: &stellar_rpc_client::GetTransactionResponse) -> Option<String> {
     Some(resp.status.trim().to_uppercase())
+}
+
+fn is_unregistered_stellar_token_error(error: &eyre::Report) -> bool {
+    let message = error.to_string();
+    message.contains("registered_token_address")
+        && (message.contains("InvalidTokenId")
+            || message.contains("InvalidAction")
+            || message.contains("UnreachableCodeReached"))
 }
 
 /// Extract the Soroban contract's return value from a validated tx, if any.

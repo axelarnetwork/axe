@@ -26,20 +26,6 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenService};
 use crate::ui;
 
-/// Default gas value for ITS cross-chain transfers.
-#[cfg(feature = "devnet-amplifier")]
-fn default_gas_value_wei(_source_chain: &str) -> u128 {
-    0
-}
-#[cfg(not(feature = "devnet-amplifier"))]
-fn default_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        300_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
-    }
-}
-
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
@@ -60,16 +46,35 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let evm_src = init_evm_source_context(args.private_key.as_deref(), evm_rpc_url.clone()).await?;
     let evm_targets = resolve_evm_targets(&cfg, src)?;
     let stellar = resolve_stellar_targets(&args, evm_src.deployer_address)?;
-    let gas_value_wei = parse_gas_value_wei(args.gas_value.as_deref(), src)?;
+    let gas_value_wei = parse_gas_value_wei(args.gas_value.as_deref())?;
     let gas_value = U256::from(gas_value_wei);
     let sizing = compute_run_sizing(&args);
 
-    let (token_id, token_addr) =
-        resolve_or_deploy_token(&args, &evm_src, &evm_targets, dest, src, gas_value, &sizing)
+    let token =
+        resolve_or_deploy_token(&args, &evm_src, &evm_targets, &stellar, gas_value, &sizing)
             .await?;
 
+    if let Some(ref deploy_msg_id) = token.deploy_message_id {
+        let source_axelar_id = super::axelar_id_for_chain(&args.config, src)?;
+        super::verify::wait_for_its_remote_deploy_to_stellar(
+            super::verify::StellarRemoteDeployWait {
+                config: args.config.clone(),
+                source_chain: source_axelar_id,
+                destination_chain: dest.to_string(),
+                deploy_message_id: deploy_msg_id.clone(),
+                stellar_rpc: stellar.rpc.clone(),
+                network_type: stellar.network_type.clone(),
+                gateway_contract: stellar.gateway_addr.clone(),
+                its_contract: stellar.its_addr.clone(),
+                signer_pk: stellar.signer_pk,
+                token_id: token.token_id.0,
+            },
+        )
+        .await?;
+    }
+
     let derived = derive_and_fund_signers(&args, &evm_src, &sizing, gas_value_wei).await?;
-    distribute_axe_tokens(&evm_src, token_addr, &derived, sizing.amount_per_key).await?;
+    distribute_axe_tokens(&evm_src, token.token_addr, &derived, sizing.amount_per_key).await?;
 
     let (stellar_recipient_addr, receiver_bytes) =
         load_stellar_recipient(args.private_key.as_deref())?;
@@ -78,7 +83,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         rpc_url: evm_rpc_url,
         derived,
         its_proxy_addr: evm_targets.its_proxy_addr,
-        token_id,
+        token_id: token.token_id,
         receiver_bytes,
         amount_per_tx: sizing.amount_per_tx,
         gas_value,
@@ -120,6 +125,7 @@ struct StellarTargets {
     rpc: String,
     network_type: String,
     gateway_addr: String,
+    its_addr: String,
     signer_pk: [u8; 32],
 }
 
@@ -146,6 +152,14 @@ struct TransferContext {
     receiver_bytes: Bytes,
     amount_per_tx: U256,
     gas_value: U256,
+}
+
+/// ITS token identity on the EVM source plus the remote-deploy message if this
+/// run had to create/register a fresh token.
+struct TokenIdentity {
+    token_id: FixedBytes<32>,
+    token_addr: Address,
+    deploy_message_id: Option<String>,
 }
 
 /// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
@@ -230,9 +244,12 @@ fn resolve_stellar_targets(
     let stellar_network_type = super::read_stellar_network_type(&args.config, dest)?;
     let stellar_gateway_addr =
         super::read_stellar_contract_address(&args.config, dest, "AxelarGateway")?;
+    let stellar_its_addr =
+        super::read_stellar_contract_address(&args.config, dest, "InterchainTokenService")?;
     let stellar_example_addr =
         super::read_stellar_contract_address(&args.config, dest, "AxelarExample")?;
     ui::address("Stellar AxelarGateway", &stellar_gateway_addr);
+    ui::address("Stellar ITS", &stellar_its_addr);
     ui::address("Stellar AxelarExample", &stellar_example_addr);
 
     // For the simulate-only view calls, we need a 32-byte source pubkey but
@@ -246,16 +263,22 @@ fn resolve_stellar_targets(
         rpc: stellar_rpc,
         network_type: stellar_network_type,
         gateway_addr: stellar_gateway_addr,
+        its_addr: stellar_its_addr,
         signer_pk,
     })
 }
 
-/// Parse the user-supplied gas value (wei), defaulting to
-/// `default_gas_value_wei(src)`, and emit the matching UI line.
-fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<u128> {
+/// Parse the user-supplied gas value (wei). EVM→Stellar ITS has no reliable
+/// route-wide default yet: underfunding the remote token deploy leaves the
+/// destination token unregistered, so require the caller to be explicit.
+fn parse_gas_value_wei(gas_value: Option<&str>) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => default_gas_value_wei(src),
+        None => {
+            eyre::bail!(
+                "EVM→Stellar ITS requires explicit --gas-value; testnet smoke passed with 1000000000000000000 wei"
+            )
+        }
     };
     {
         ui::kv(
@@ -298,41 +321,35 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     }
 }
 
-/// Resolve the ITS token to use: either the user-supplied `--token-id`, the
-/// cached deployment if its balance still covers the planned run, or a fresh
-/// `deploy_its_token` call. The `_deploy_message_id` returned by the deploy
-/// helper is intentionally discarded — it's not consulted further down.
-///
-/// Note: we deliberately do NOT call `wait_for_its_remote_deploy` here —
-/// that helper is hardcoded to poll an EVM destination gateway. For
-/// Stellar destinations we trust the deploy_remote will eventually land
-/// (interchainTransfer calls retry on 429s and the verify pipeline picks
-/// them up regardless). On a fresh first run, the first few transfers
-/// may stall at "approved" on Stellar until the remote token is registered;
-/// they'll progress as soon as the registration completes.
+/// Resolve the ITS token to use: either the user-supplied `--token-id`, a
+/// cached deployment that still has source balance and is registered on
+/// Stellar, or a fresh `deploy_its_token` call.
 async fn resolve_or_deploy_token(
     args: &LoadTestArgs,
     evm_src: &EvmSourceContext,
     evm_targets: &EvmTargets,
-    dest: &str,
-    src: &str,
+    stellar: &StellarTargets,
     gas_value: U256,
     sizing: &RunSizing,
-) -> eyre::Result<(FixedBytes<32>, Address)> {
+) -> eyre::Result<TokenIdentity> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
     let write_provider = ProviderBuilder::new()
         .wallet(evm_src.signer.clone())
         .connect_http(evm_src.rpc_url.parse()?);
     let its_service = InterchainTokenService::new(evm_targets.its_proxy_addr, &write_provider);
 
-    let (token_id, token_addr, _deploy_message_id) = if let Some(ref tid) = args.token_id {
+    let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
             .interchainTokenAddress(token_id)
             .call()
             .await
             .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
+        let stellar_token_addr = require_registered_stellar_token(stellar, token_id).await?;
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
+        ui::address("Stellar token", &stellar_token_addr);
         (token_id, addr, None::<String>)
     } else {
         let cache = read_its_cache(src, dest);
@@ -356,9 +373,26 @@ async fn resolve_or_deploy_token(
                 .await
                 .unwrap_or_default();
             if balance >= needed {
-                ui::info(&format!("reusing cached ITS token: {addr}"));
-                ui::kv("token ID (cached)", &format!("{tid}"));
-                (tid, addr, None)
+                if let Some(stellar_token_addr) =
+                    registered_stellar_token_address(stellar, tid).await?
+                {
+                    ui::info(&format!("reusing cached ITS token: {addr}"));
+                    ui::kv("token ID (cached)", &format!("{tid}"));
+                    ui::address("Stellar token", &stellar_token_addr);
+                    (tid, addr, None)
+                } else {
+                    ui::warn("cached token is not registered on Stellar, deploying fresh...");
+                    super::its_evm_to_sol::deploy_its_token(
+                        &write_provider,
+                        evm_targets.its_factory_addr,
+                        evm_src.deployer_address,
+                        dest,
+                        sizing.total_supply,
+                        src,
+                        gas_value,
+                    )
+                    .await?
+                }
             } else {
                 ui::warn(&format!(
                     "cached token has insufficient supply ({balance} < {needed}), deploying fresh..."
@@ -388,7 +422,30 @@ async fn resolve_or_deploy_token(
         }
     };
 
-    Ok((token_id, token_addr))
+    Ok(TokenIdentity {
+        token_id,
+        token_addr,
+        deploy_message_id,
+    })
+}
+
+async fn require_registered_stellar_token(
+    stellar: &StellarTargets,
+    token_id: FixedBytes<32>,
+) -> eyre::Result<String> {
+    registered_stellar_token_address(stellar, token_id)
+        .await?
+        .ok_or_else(|| eyre!("token ID {token_id} is not registered on Stellar ITS"))
+}
+
+async fn registered_stellar_token_address(
+    stellar: &StellarTargets,
+    token_id: FixedBytes<32>,
+) -> eyre::Result<Option<String>> {
+    let client = crate::stellar::StellarClient::new(&stellar.rpc, &stellar.network_type)?;
+    client
+        .its_registered_token_address_view(&stellar.signer_pk, &stellar.its_addr, token_id.0)
+        .await
 }
 
 /// Derive ephemeral EVM signers from the main key and ensure each is funded

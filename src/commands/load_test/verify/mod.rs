@@ -44,7 +44,10 @@ pub(in crate::commands::load_test) use self::state::PendingTx;
 
 // Re-export the ITS remote-deploy waiters so callers can keep using them as
 // `super::verify::wait_for_its_remote_deploy*` after the move.
-pub use self::its_deploy::{wait_for_its_remote_deploy, wait_for_its_remote_deploy_to_solana};
+pub use self::its_deploy::{
+    StellarRemoteDeployWait, wait_for_its_remote_deploy, wait_for_its_remote_deploy_to_solana,
+    wait_for_its_remote_deploy_to_stellar,
+};
 
 // ---------------------------------------------------------------------------
 // Shared inner helpers (private)

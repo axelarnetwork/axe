@@ -3,7 +3,7 @@
 //! propagates through the Axelar hub to the destination chain, so that
 //! subsequent ITS transfers find the token already registered.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, keccak256};
@@ -13,9 +13,29 @@ use super::POLL_INTERVAL;
 use super::checks::{check_evm_is_message_approved, check_solana_incoming_message};
 use super::pipeline::{check_cosmos_routed, check_hub_approved, parse_payload_hash};
 use crate::config::ChainsConfig;
-use crate::cosmos::{discover_second_leg, read_axelar_rpc};
+use crate::cosmos::{SecondLegInfo, discover_second_leg, read_axelar_rpc};
 use crate::evm::AxelarAmplifierGateway;
+use crate::stellar::StellarClient;
 use crate::ui;
+
+pub struct StellarRemoteDeployWait {
+    pub config: PathBuf,
+    pub source_chain: String,
+    pub destination_chain: String,
+    pub deploy_message_id: String,
+    pub stellar_rpc: String,
+    pub network_type: String,
+    pub gateway_contract: String,
+    pub its_contract: String,
+    pub signer_pk: [u8; 32],
+    pub token_id: [u8; 32],
+}
+
+enum StellarRemoteApproval {
+    Pending,
+    Approved,
+    Executed,
+}
 
 /// Wait for an ITS remote deploy message to propagate through the hub pipeline
 /// and execute on the EVM destination. The deploy message ID is `{sig}-1.3`.
@@ -218,6 +238,219 @@ pub async fn wait_for_its_remote_deploy(
     spinner.finish_and_clear();
     ui::success("remote token deployed on destination chain");
     Ok(())
+}
+
+/// Wait for a remote ITS token deploy to propagate through the hub and execute
+/// on Stellar. This proves the token is registered before EVM→Stellar
+/// transfers are sent.
+pub async fn wait_for_its_remote_deploy_to_stellar(args: StellarRemoteDeployWait) -> Result<()> {
+    let cfg = ChainsConfig::load(&args.config)?;
+    let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
+    let rpc = read_axelar_rpc(&args.config)?;
+
+    let axelarnet_gateway = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
+
+    let cosm_gateway_dest = cfg
+        .axelar
+        .contract_address("Gateway", &args.destination_chain)?
+        .to_string();
+
+    let stellar_client = StellarClient::new(&args.stellar_rpc, &args.network_type)?;
+
+    ui::kv("deploy message ID", &args.deploy_message_id);
+    let spinner =
+        ui::wait_spinner("waiting for remote deploy to propagate through hub to Stellar...");
+    let start = Instant::now();
+    let timeout = Duration::from_secs(300);
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DeployPhase {
+        HubApproved,
+        DiscoverSecondLeg,
+        Routed,
+        Approved,
+        Executed,
+        Registered,
+        Done,
+    }
+
+    let mut phase = DeployPhase::HubApproved;
+    let mut second_leg: Option<SecondLegInfo> = None;
+
+    loop {
+        if start.elapsed() >= timeout {
+            spinner.finish_and_clear();
+            eyre::bail!(
+                "remote deploy timed out after {}s at phase {phase:?}",
+                timeout.as_secs()
+            );
+        }
+
+        match phase {
+            DeployPhase::HubApproved => {
+                if check_hub_approved(
+                    &lcd,
+                    &axelarnet_gateway,
+                    &args.source_chain,
+                    &args.deploy_message_id,
+                )
+                .await
+                .wrap_err("remote deploy hub approval check failed")?
+                {
+                    spinner.set_message("remote deploy: hub approved");
+                    phase = DeployPhase::DiscoverSecondLeg;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for hub approval...");
+            }
+            DeployPhase::DiscoverSecondLeg => {
+                match discover_second_leg(&rpc, &args.deploy_message_id).await {
+                    Ok(Some(info)) => {
+                        spinner.set_message(format!(
+                            "remote deploy: second leg discovered ({})",
+                            info.message_id
+                        ));
+                        second_leg = Some(info);
+                        phase = DeployPhase::Routed;
+                        continue;
+                    }
+                    Ok(None) => {
+                        spinner.set_message("remote deploy: discovering second leg...");
+                    }
+                    Err(e) => return Err(e.wrap_err("remote deploy second-leg discovery failed")),
+                }
+            }
+            DeployPhase::Routed => {
+                let info = require_second_leg(&second_leg)?;
+                if check_cosmos_routed(
+                    &lcd,
+                    &cosm_gateway_dest,
+                    &info.source_chain,
+                    &info.message_id,
+                )
+                .await
+                .wrap_err("remote deploy routing check failed")?
+                {
+                    spinner.set_message("remote deploy: routed to Stellar");
+                    phase = DeployPhase::Approved;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for routing...");
+            }
+            DeployPhase::Approved => {
+                let info = require_second_leg(&second_leg)?;
+                match check_stellar_remote_deploy_approval(&stellar_client, &args, info).await? {
+                    StellarRemoteApproval::Approved => {
+                        spinner.set_message("remote deploy: approved on Stellar");
+                        phase = DeployPhase::Executed;
+                        continue;
+                    }
+                    StellarRemoteApproval::Executed => {
+                        spinner.set_message("remote deploy: executed on Stellar");
+                        phase = DeployPhase::Registered;
+                        continue;
+                    }
+                    StellarRemoteApproval::Pending => {
+                        spinner.set_message("remote deploy: waiting for Stellar approval...");
+                    }
+                }
+            }
+            DeployPhase::Executed => {
+                let info = require_second_leg(&second_leg)?;
+                if check_stellar_remote_deploy_executed(&stellar_client, &args, info).await? {
+                    spinner.set_message("remote deploy: executed on Stellar");
+                    phase = DeployPhase::Registered;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for Stellar execution...");
+            }
+            DeployPhase::Registered => {
+                match stellar_client
+                    .its_registered_token_address_view(
+                        &args.signer_pk,
+                        &args.its_contract,
+                        args.token_id,
+                    )
+                    .await
+                    .wrap_err("remote deploy Stellar token registration check failed")?
+                {
+                    Some(token_address) => {
+                        ui::address("Stellar token", &token_address);
+                        phase = DeployPhase::Done;
+                        continue;
+                    }
+                    None => {
+                        spinner.set_message(
+                            "remote deploy: waiting for Stellar token registration...",
+                        );
+                    }
+                }
+            }
+            DeployPhase::Done => break,
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    spinner.finish_and_clear();
+    ui::success("remote token deployed on Stellar");
+    Ok(())
+}
+
+fn require_second_leg(second_leg: &Option<SecondLegInfo>) -> Result<&SecondLegInfo> {
+    second_leg
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg metadata"))
+}
+
+async fn check_stellar_remote_deploy_approval(
+    client: &StellarClient,
+    args: &StellarRemoteDeployWait,
+    info: &SecondLegInfo,
+) -> Result<StellarRemoteApproval> {
+    let payload_hash = parse_payload_hash(&info.payload_hash)
+        .wrap_err("remote deploy second-leg payload_hash is invalid")?;
+    let approved = client
+        .gateway_is_message_approved(
+            &args.signer_pk,
+            &args.gateway_contract,
+            &info.source_chain,
+            &info.message_id,
+            &info.source_address,
+            &info.destination_address,
+            payload_hash.0,
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("Stellar gateway returned non-bool approval result"))?;
+
+    if approved {
+        return Ok(StellarRemoteApproval::Approved);
+    }
+
+    if check_stellar_remote_deploy_executed(client, args, info).await? {
+        return Ok(StellarRemoteApproval::Executed);
+    }
+
+    Ok(StellarRemoteApproval::Pending)
+}
+
+async fn check_stellar_remote_deploy_executed(
+    client: &StellarClient,
+    args: &StellarRemoteDeployWait,
+    info: &SecondLegInfo,
+) -> Result<bool> {
+    client
+        .gateway_is_message_executed(
+            &args.signer_pk,
+            &args.gateway_contract,
+            &info.source_chain,
+            &info.message_id,
+        )
+        .await?
+        .ok_or_else(|| eyre::eyre!("Stellar gateway returned non-bool execution result"))
 }
 
 /// Wait for a remote ITS token deploy to propagate through the hub and reach Solana.
