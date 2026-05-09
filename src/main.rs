@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod cosmos;
+mod error;
 mod evm;
 mod preflight;
 mod solana;

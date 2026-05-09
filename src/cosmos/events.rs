@@ -7,6 +7,8 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::error::{AxeError, AxeResult};
+
 use super::rpc::{lcd_cosmwasm_smart_query, rpc_tx_search_event};
 
 /// Outer envelope for an LCD `tx_response` payload (the body returned by
@@ -115,12 +117,15 @@ pub async fn discover_second_leg(
 }
 
 fn parse_second_leg_from_tx_search(resp: Value) -> Result<Option<SecondLegInfo>> {
+    parse_second_leg_from_tx_search_typed(resp).map_err(eyre::Report::new)
+}
+
+fn parse_second_leg_from_tx_search_typed(resp: Value) -> AxeResult<Option<SecondLegInfo>> {
     let envelope: TxSearchEnvelope =
-        serde_json::from_value(resp).wrap_err("invalid tx_search response")?;
-    let txs = envelope
-        .result
-        .ok_or_else(|| eyre::eyre!("tx_search response missing result"))?
-        .txs;
+        serde_json::from_value(resp).map_err(|err| AxeError::InvalidTxSearch {
+            reason: err.to_string(),
+        })?;
+    let txs = envelope.result.ok_or(AxeError::TxSearchMissingResult)?.txs;
 
     if txs.is_empty() {
         return Ok(None);
@@ -128,7 +133,7 @@ fn parse_second_leg_from_tx_search(resp: Value) -> Result<Option<SecondLegInfo>>
 
     let events = match txs.into_iter().next().and_then(|t| t.tx_result) {
         Some(r) => r.events,
-        None => return Err(eyre::eyre!("tx_search result missing tx_result")),
+        None => return Err(AxeError::TxSearchMissingTxResult),
     };
 
     for event in &events {
@@ -148,8 +153,10 @@ fn parse_second_leg_from_tx_search(resp: Value) -> Result<Option<SecondLegInfo>>
             })
         };
 
-        let require_attr = |key: &str| -> Result<String> {
-            get_attr(key).ok_or_else(|| eyre::eyre!("wasm-routing event missing '{key}' attribute"))
+        let require_attr = |key: &str| -> AxeResult<String> {
+            get_attr(key).ok_or_else(|| AxeError::MissingWasmRoutingAttribute {
+                field: key.to_string(),
+            })
         };
 
         return Ok(Some(SecondLegInfo {
