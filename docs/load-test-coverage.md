@@ -37,7 +37,7 @@ XRPL has no contract execution model — it can only carry token payments via IT
 
 ¹ Module `its_stellar_to_sol` exists and the dispatch is wired, but the **Stellar testnet ITS contract** (`CC7L…M5YP`) has not added `solana` to its trusted-chains list. The run reaches Stellar simulation and reverts with `Contract Error #7 (UntrustedChain)`. The fix is upstream: the contract owner runs `ts-node stellar/its.js add-trusted-chains solana` from `axelar-contract-deployments`. Once that's in, this pair starts working with no code changes here.
 
-² `stellar-2026-q1-2 → flow` ITS passed in a one-transaction testnet smoke run. `flow → stellar-2026-q1-2` ITS also passed with `--gas-value 1000000000000000000` after the runner verified the remote token deploy executed and the token was registered on Stellar before sending transfers. The runner now fails before transfer if a provided/cached token ID is not registered on Stellar ITS, and EVM→Stellar ITS requires an explicit `--gas-value` until a reliable route-wide default is established.
+² `stellar-2026-q1-2 → flow` ITS passed in a one-transaction testnet smoke run. `flow → stellar-2026-q1-2` ITS also passed after the runner verified the remote token deploy executed and the token was registered on Stellar before sending transfers. The Flow→Stellar default gas value is inferred as `1000000000000000000` wei; override it with `--gas-value` only when testing a different funding assumption. The runner fails before transfer if a provided/cached token ID is not registered on Stellar ITS.
 
 ## Outstanding Sui implementation work
 

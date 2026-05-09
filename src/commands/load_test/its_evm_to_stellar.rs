@@ -29,6 +29,20 @@ use crate::ui;
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
+#[cfg(feature = "devnet-amplifier")]
+fn default_gas_value_wei(_source_chain: &str) -> u128 {
+    0
+}
+
+#[cfg(not(feature = "devnet-amplifier"))]
+fn default_gas_value_wei(source_chain: &str) -> u128 {
+    if source_chain.starts_with("flow") {
+        1_000_000_000_000_000_000
+    } else {
+        10_000_000_000_000_000
+    }
+}
+
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
@@ -46,7 +60,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let evm_src = init_evm_source_context(args.private_key.as_deref(), evm_rpc_url.clone()).await?;
     let evm_targets = resolve_evm_targets(&cfg, src)?;
     let stellar = resolve_stellar_targets(&args, evm_src.deployer_address)?;
-    let gas_value_wei = parse_gas_value_wei(args.gas_value.as_deref())?;
+    let gas_value_wei = parse_gas_value_wei(args.gas_value.as_deref(), src)?;
     let gas_value = U256::from(gas_value_wei);
     let sizing = compute_run_sizing(&args);
 
@@ -268,17 +282,13 @@ fn resolve_stellar_targets(
     })
 }
 
-/// Parse the user-supplied gas value (wei). EVM→Stellar ITS has no reliable
-/// route-wide default yet: underfunding the remote token deploy leaves the
-/// destination token unregistered, so require the caller to be explicit.
-fn parse_gas_value_wei(gas_value: Option<&str>) -> eyre::Result<u128> {
+/// Parse the user-supplied gas value (wei), defaulting per source chain. The
+/// Flow default is higher than other EVM routes because the remote Stellar
+/// deploy needs enough gas to register the token before transfers are sent.
+fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => {
-            eyre::bail!(
-                "EVM→Stellar ITS requires explicit --gas-value; testnet smoke passed with 1000000000000000000 wei"
-            )
-        }
+        None => default_gas_value_wei(src),
     };
     {
         ui::kv(
