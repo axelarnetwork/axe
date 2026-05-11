@@ -6,8 +6,8 @@ use eyre::{Result, eyre};
 use serde_json::Value;
 use sui_sdk_types::{
     Address as SuiAddress, Argument, Command, GasPayment, Identifier, Input, MoveCall,
-    ProgrammableTransaction, SharedInput, SplitCoins, Transaction, TransactionExpiration,
-    TransactionKind, TypeTag,
+    ObjectReference, ProgrammableTransaction, SharedInput, SplitCoins, Transaction,
+    TransactionExpiration, TransactionKind, TypeTag,
 };
 
 use super::rpc::SuiClient;
@@ -90,6 +90,23 @@ impl PtbBuilder {
             mutable,
         )));
         Argument::Input(idx)
+    }
+
+    /// Add an owned- (or immutable-) object input. Used when a Move call needs
+    /// a `Coin<T>` (or similar) object the sender owns at a specific version.
+    pub fn owned_object(&mut self, obj_ref: ObjectReference) -> Argument {
+        let idx = self.inputs.len() as u16;
+        self.inputs.push(Input::ImmutableOrOwned(obj_ref));
+        Argument::Input(idx)
+    }
+
+    /// Consume the builder into a `TransactionKind::ProgrammableTransaction`,
+    /// for callers that need to BCS-encode it directly (e.g. dev-inspect).
+    pub fn into_transaction_kind(self) -> TransactionKind {
+        TransactionKind::ProgrammableTransaction(ProgrammableTransaction {
+            inputs: self.inputs,
+            commands: self.commands,
+        })
     }
 
     pub fn split_coin(&mut self, coin: Argument, amount: Argument) -> Argument {

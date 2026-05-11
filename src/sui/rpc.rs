@@ -353,11 +353,11 @@ fn is_query_events_indexer_pending(error: &eyre::Report) -> bool {
         && message.contains("TransactionDigest")
 }
 
-fn owner_addr_hex(a: &SuiAddress) -> String {
+pub(super) fn owner_addr_hex(a: &SuiAddress) -> String {
     format!("0x{}", hex::encode(a.as_bytes()))
 }
 
-fn object_ref_from_json(v: &Value) -> Result<ObjectReference> {
+pub(super) fn object_ref_from_json(v: &Value) -> Result<ObjectReference> {
     let id = v["coinObjectId"]
         .as_str()
         .or_else(|| v["objectId"].as_str())

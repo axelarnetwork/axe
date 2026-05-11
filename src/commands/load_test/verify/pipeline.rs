@@ -674,6 +674,18 @@ pub(super) enum ItsHubDest {
         rpc_url: String,
         recipient_address: String,
     },
+    /// Sui destination — query Sui's AxelarGateway event stream for
+    /// `MessageApproved` / `MessageExecuted` matching the second-leg
+    /// `(source_chain="axelar", message_id)`.
+    ///
+    /// Currently unused — wired in `verify_onchain_sui_its{,_streaming}` for
+    /// the day a `*_to_sui` ITS runner ships. Kept here so adding one is a
+    /// single-line dispatch change.
+    #[allow(dead_code)]
+    Sui {
+        rpc_url: String,
+        gateway_pkg: String,
+    },
 }
 
 impl ItsHubDest {
@@ -682,6 +694,7 @@ impl ItsHubDest {
             Self::Solana { .. } => "Solana approval",
             Self::Stellar { .. } => "Stellar approval",
             Self::Xrpl { .. } => "XRPL approval",
+            Self::Sui { .. } => "Sui approval",
         }
     }
 
@@ -690,6 +703,7 @@ impl ItsHubDest {
             Self::Solana { .. } => "Solana execution",
             Self::Stellar { .. } => "Stellar execution",
             Self::Xrpl { .. } => "XRPL execution",
+            Self::Sui { .. } => "Sui execution",
         }
     }
 }
@@ -754,6 +768,10 @@ pub(super) async fn poll_pipeline_its_hub(
     .flatten();
     let xrpl_client = match &dest {
         ItsHubDest::Xrpl { rpc_url, .. } => Some(crate::xrpl::XrplClient::new(rpc_url)),
+        _ => None,
+    };
+    let sui_client = match &dest {
+        ItsHubDest::Sui { rpc_url, .. } => Some(crate::sui::SuiClient::new(rpc_url)),
         _ => None,
     };
 
@@ -1165,6 +1183,70 @@ pub(super) async fn poll_pipeline_its_hub(
                                 txs[i].timing.executed_ok = Some(true);
                                 txs[i].phase = Phase::Done;
                                 last_progress = Instant::now();
+                            }
+                        }
+                    }
+                }
+                ItsHubDest::Sui { gateway_pkg, .. } => {
+                    if let Some(client) = sui_client.as_ref() {
+                        let approved_event_type = format!("{gateway_pkg}::events::MessageApproved");
+                        let executed_event_type = format!("{gateway_pkg}::events::MessageExecuted");
+                        let pending: Vec<usize> = approved_indices
+                            .iter()
+                            .chain(executed_indices.iter())
+                            .copied()
+                            .collect();
+                        for i in pending {
+                            let second_leg = match txs[i].second_leg_message_id.as_deref() {
+                                Some(s) => s.to_string(),
+                                None => continue,
+                            };
+                            // The hub forwards messages to Sui with
+                            // `source_chain = "axelar"`. Check executed
+                            // first because it implies approved.
+                            let executed = client
+                                .has_message_executed(&executed_event_type, "axelar", &second_leg)
+                                .await
+                                .unwrap_or(false);
+                            let approved = if executed {
+                                true
+                            } else {
+                                client
+                                    .has_message_approved(
+                                        &approved_event_type,
+                                        "axelar",
+                                        &second_leg,
+                                    )
+                                    .await
+                                    .unwrap_or(false)
+                            };
+
+                            let phase = txs[i].phase;
+                            match phase {
+                                Phase::Approved if executed => {
+                                    let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                    if txs[i].timing.approved_secs.is_none() {
+                                        txs[i].timing.approved_secs = Some(elapsed);
+                                    }
+                                    txs[i].timing.executed_secs = Some(elapsed);
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                Phase::Approved if approved => {
+                                    txs[i].timing.approved_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].phase = Phase::Executed;
+                                    last_progress = Instant::now();
+                                }
+                                Phase::Executed if executed => {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                _ => {}
                             }
                         }
                     }

@@ -1246,10 +1246,10 @@ pub(super) async fn run_sol_to_stellar(args: LoadTestArgs, _run_start: Instant) 
 /// Cross-chain gas attached to a Sui GMP send. Empirically the relayer's
 /// base fee for sui→xrpl-evm hits ~0.06 SUI, so 0.1 SUI gives a 1.5×
 /// safety margin while staying cheap. Override per-run with `--gas-value`.
-const SUI_DEFAULT_GAS_VALUE_MIST: u64 = 100_000_000;
+pub(super) const SUI_DEFAULT_GAS_VALUE_MIST: u64 = 100_000_000;
 /// On-chain Sui gas budget for executing the PTB itself (separate from the
 /// cross-chain gas payment).
-const SUI_DEFAULT_GAS_BUDGET_MIST: u64 = 50_000_000;
+pub(super) const SUI_DEFAULT_GAS_BUDGET_MIST: u64 = 50_000_000;
 
 /// Sui source -> any EVM destination, GMP only (sequential burst).
 pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> Result<()> {

@@ -172,11 +172,16 @@ fn resolve_evm_targets(cfg: &ChainsConfig, dest: &str) -> Result<EvmTargets> {
 
 /// Parse the user-supplied gas fee (XRP drops), defaulting to
 /// `xrpl_sender::DEFAULT_GAS_FEE_DROPS`, and emit the matching UI line.
+/// ITS routes via the hub (two commands: source→hub, hub→destination), so
+/// we pay 2× the per-command gas value.
 fn parse_gas_fee_drops(gas_value: Option<&str>) -> Result<u64> {
     let gas_fee_drops: u64 = match gas_value {
-        Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => xrpl_sender::DEFAULT_GAS_FEE_DROPS,
-    };
+    }
+    .saturating_mul(2);
     ui::kv(
         "gas fee",
         &format!(
@@ -227,11 +232,13 @@ async fn fund_ephemeral_wallets(
     sizing: &RunSizing,
     gas_fee_drops: u64,
 ) -> Result<Vec<XrplWallet>> {
-    // Each wallet needs: base reserve (~10 XRP) + txs_per_key * (transfer + gas + base fee)
+    // Each wallet needs: base reserve (~10 XRP) + txs_per_key * (gas + net transfer + base fee).
+    // The on-wire payment is `gas_fee_drops + NET_TRANSFER_DROPS` (relayer subtracts
+    // `gas_fee_drops` and forwards the remainder); +100 covers the XRPL base txn fee.
     let per_wallet_drops: u64 = 10_000_000u64
         + sizing
             .txs_per_key
-            .saturating_mul(xrpl_sender::TRANSFER_AMOUNT_DROPS + gas_fee_drops + 100);
+            .saturating_mul(gas_fee_drops + xrpl_sender::NET_TRANSFER_DROPS + 100);
 
     // Pass RPC URL so devnet vs testnet vs mainnet is inferred from the
     // actual endpoint (devnet-amplifier mislabels its xrpl networkType).

@@ -29,7 +29,7 @@ const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
 /// Distribute 100x per key so cached tokens last across many runs.
 const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
 
-/// Default gas value for an ITS *transfer* on Solana (in lamports).
+/// Default gas value (per command) for an ITS *transfer* on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
 ///
 /// 500k lamports (~0.0005 SOL) covers the destination-side
@@ -47,6 +47,12 @@ fn default_gas_value() -> u64 {
     {
         500_000
     }
+}
+
+/// ITS routes via the hub, so two commands are created (source→hub and
+/// hub→destination). The gas payment must cover both legs.
+fn hub_gas_value(per_command: u64) -> u64 {
+    per_command.saturating_mul(2)
 }
 
 /// Multiplier applied to the per-tx gas value for the one-time `deployRemote`
@@ -372,7 +378,7 @@ async fn run_sustained_pipeline(
             let rpc = rpc_s.clone();
             let tid = token_id;
             let m = mint;
-            let gv = gas_value;
+            let gv = hub_gas_value(gas_value);
             let gmp_dest = axelarnet_gw_s.clone();
             let vtx = verify_tx.clone();
 
@@ -813,7 +819,7 @@ async fn setup_its_token(
         keypair,
         &salt,
         dest,
-        deploy_gas_value,
+        hub_gas_value(deploy_gas_value),
     )?;
     ui::tx_hash("remote deploy tx", &remote_sig);
     ui::success("remote deploy tx confirmed on Solana");

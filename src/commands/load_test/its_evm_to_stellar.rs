@@ -473,13 +473,15 @@ async fn derive_and_fund_signers(
     let funding_provider = ProviderBuilder::new()
         .wallet(evm_src.signer.clone())
         .connect_http(evm_src.rpc_url.parse()?);
+    // ITS hub routing pays 2× gas_value per transfer (two commands).
+    let hub_gas_value_wei = gas_value_wei.saturating_mul(2);
     let gas_extra_per_key = if sizing.burst_mode {
-        gas_value_wei
+        hub_gas_value_wei
     } else {
         let dur = sizing.sustained_params.expect("burst_mode is false").1;
         let rounds = dur.div_ceil(args.key_cycle);
         let buffered = rounds + rounds / 5 + 1;
-        gas_value_wei.saturating_mul(buffered as u128)
+        hub_gas_value_wei.saturating_mul(buffered as u128)
     };
     keypairs::ensure_funded_evm_with_extra(
         &funding_provider,

@@ -508,15 +508,17 @@ fn setup_extra_accounts_ata(
 }
 
 /// Per-key extra gas budget: 1x in burst mode, buffered rounds-per-key in
-/// sustained mode.
+/// sustained mode. ITS hub routing pays 2× gas_value per transfer (two
+/// commands).
 fn compute_gas_extra_per_key(sizing: &RunSizing, args: &LoadTestArgs, gas_value_wei: u128) -> u128 {
+    let hub_gas_value_wei = gas_value_wei.saturating_mul(2);
     if sizing.burst_mode {
-        gas_value_wei
+        hub_gas_value_wei
     } else {
         let dur = sizing.sustained_params.expect("burst_mode is false").1;
         let rounds = dur.div_ceil(args.key_cycle);
         let buffered = rounds + rounds / 5 + 1;
-        gas_value_wei.saturating_mul(buffered as u128)
+        hub_gas_value_wei.saturating_mul(buffered as u128)
     }
 }
 
@@ -921,9 +923,12 @@ async fn deploy_its_token<P: Provider>(
 
     ui::info(&format!("deploying remote token to {dest_chain}..."));
 
+    // ITS routes via the hub, so two commands are created (source→hub and
+    // hub→destination). Pay 2× gas_value so both legs are covered.
+    let hub_gas = gas_value * U256::from(2);
     let remote_call = factory
-        .deployRemoteInterchainToken(salt, dest_chain.to_string(), gas_value)
-        .value(gas_value);
+        .deployRemoteInterchainToken(salt, dest_chain.to_string(), hub_gas)
+        .value(hub_gas);
 
     let pending = remote_call.send().await?;
     let tx_hash = *pending.tx_hash();
@@ -981,6 +986,9 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
         token_mint_ata,
     ));
 
+    // ITS routes via the hub, so two commands are created (source→hub and
+    // hub→destination). Pay 2× gas_value so both legs are covered.
+    let hub_gas = gas_value * U256::from(2);
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
         .interchainTransfer(
@@ -989,9 +997,9 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
             receiver_bytes.clone(),
             amount,
             metadata,
-            gas_value,
+            hub_gas,
         )
-        .value(gas_value);
+        .value(hub_gas);
     let call = match explicit_nonce {
         Some(n) => base_call.nonce(n),
         None => base_call,
