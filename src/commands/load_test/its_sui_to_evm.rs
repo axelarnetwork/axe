@@ -30,30 +30,27 @@ use super::metrics::{LoadTestReport, TxMetrics};
 use super::{
     LoadTestArgs, finish_report, load_sui_main_wallet, resolve_sui_axe_token, validate_evm_rpc,
 };
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::ui;
-use crate::utils::read_contract_address;
 
 const AMOUNT_PER_TX: u64 = 1; // ITS amounts are in token sub-units; 1 is fine for a load test.
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
 
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
     }
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
         .is_err()
     {
         eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
@@ -125,8 +122,15 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("Coin<T> balance", &coin_balance.to_string());
 
     // --- EVM ITS proxy + gateway (for verification + dest_address) ---
-    let evm_its_addr = read_contract_address(&args.config, dest, "InterchainTokenService")?;
-    let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let dest_cfg = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre!("destination chain '{dest}' not found in config"))?;
+    let evm_its_addr: alloy::primitives::Address = dest_cfg
+        .contract_address("InterchainTokenService", dest)?
+        .parse()?;
+    let evm_gateway_addr: alloy::primitives::Address =
+        dest_cfg.contract_address("AxelarGateway", dest)?.parse()?;
     ui::address("destination ITS", &format!("{evm_its_addr}"));
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
     let dest_address_bytes = evm_its_addr.as_slice().to_vec();
@@ -154,8 +158,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     }
 
     // --- Cosmos hub address (for `gmp_destination_*` book-keeping) ---
-    let axelarnet_gw_addr =
-        read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gw_addr = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
     // --- Sequential burst loop ---
     let num_txs = args.num_txs.max(1) as usize;

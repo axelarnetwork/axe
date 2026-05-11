@@ -814,12 +814,17 @@ async fn setup_its_token(
     ui::info(&format!(
         "deploying remote token to {dest} (gas: {deploy_gas_value} lamports)..."
     ));
+    // Pass `deploy_gas_value` (= gas_value × DEPLOY_GAS_MULTIPLIER) directly,
+    // without an additional `hub_gas_value` doubling. The 10× multiplier was
+    // calibrated for the post-hub world the relayer presents — it already
+    // covers the destination-side CREATE2 deploy, which dominates the cost.
+    // Doubling on top would overpay by ~10×.
     let remote_sig = solana::send_its_deploy_remote_interchain_token(
         solana_rpc,
         keypair,
         &salt,
         dest,
-        hub_gas_value(deploy_gas_value),
+        deploy_gas_value,
     )?;
     ui::tx_hash("remote deploy tx", &remote_sig);
     ui::success("remote deploy tx confirmed on Solana");
