@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: fmt + clippy + tests on the default feature flag.
+#
+# This is the *fast* gate (~30s). The full matrix across all four feature
+# flags runs in the pre-push hook (~2-3 min).
+#
+# Enable for this clone:
+#   git config core.hooksPath .githooks
+#
+set -euo pipefail
+
+# Find the repo root so the hook works regardless of how git invokes it.
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+echo "==> cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "==> cargo clippy --all-targets -- -D warnings (too_many_lines suppressed)"
+# `too_many_lines` is intentionally left at warn in Cargo.toml — the
+# load-test pipeline orchestrators are legitimately long state machines
+# (see the comment in [lints.clippy]). All other polish-refactor lints
+# are now deny-level and gate-enforced.
+cargo clippy --all-targets -- -D warnings \
+    -A clippy::too_many_lines
+
+echo "==> cargo test --all-targets"
+cargo test --all-targets --quiet
+
+echo "pre-commit OK"

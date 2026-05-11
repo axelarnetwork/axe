@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -6,7 +7,8 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::cosmos::{derive_axelar_wallet, read_axelar_config};
-use crate::state::{data_dir, default_steps, save_state, state_path};
+use crate::state::{State, data_dir, default_steps, save_state, state_path};
+use crate::types::{ChainKey, Network};
 use crate::ui;
 
 pub async fn run() -> Result<()> {
@@ -83,69 +85,85 @@ pub async fn run() -> Result<()> {
     // --- State file ---
     let dir = data_dir()?;
     fs::create_dir_all(&dir)?;
-    let mut state = json!({
-        "axelarId": axelar_id,
-        "rpcUrl": rpc_url,
-        "targetJson": target_json.to_string_lossy(),
-        "steps": default_steps(),
-        "mnemonic": mnemonic,
-        "env": env,
-        "cosmSalt": salt,
-    });
+
+    let env_parsed: Network = env
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid ENV value '{env}': {e}"))?;
+
+    let mut state = State {
+        axelar_id: ChainKey::new(axelar_id.clone()),
+        rpc_url: rpc_url.clone(),
+        target_json: target_json.clone(),
+        mnemonic: mnemonic.clone(),
+        env: env_parsed,
+        cosm_salt: salt,
+        admin_mnemonic: None,
+        deployer_private_key: None,
+        gateway_deployer_private_key: None,
+        gateway_deployer: None,
+        gas_service_deployer_private_key: None,
+        its_deployer_private_key: None,
+        its_salt: None,
+        its_proxy_salt: None,
+        predicted_gateway_address: None,
+        sender_receiver_address: None,
+        proposals: BTreeMap::new(),
+        steps: default_steps(),
+    };
 
     ui::section("Deployer Addresses");
 
     let (_, axelar_address) = derive_axelar_wallet(&mnemonic)?;
     ui::address("axelar deployer", &axelar_address);
 
-    if let Some(ref admin_mn) = admin_mnemonic {
-        let (_, admin_address) = derive_axelar_wallet(admin_mn)?;
+    if let Some(admin_mn) = admin_mnemonic {
+        let (_, admin_address) = derive_axelar_wallet(&admin_mn)?;
         ui::address("prover admin", &admin_address);
-        state["adminMnemonic"] = json!(admin_mn);
+        state.admin_mnemonic = Some(admin_mn);
     }
 
-    if let Some(ref pk) = deployer_private_key {
+    if let Some(pk) = deployer_private_key {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid deployer private key: {e}"))?;
         ui::address("deployer", &format!("{}", signer.address()));
-        state["deployerPrivateKey"] = json!(pk);
+        state.deployer_private_key = Some(pk);
     }
-    if let Some(ref pk) = gateway_deployer_private_key {
+    if let Some(pk) = gateway_deployer_private_key {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid gateway deployer private key: {e}"))?;
         let gw_addr = signer.address();
         ui::address("gateway deployer", &format!("{gw_addr}"));
-        state["gatewayDeployerPrivateKey"] = json!(pk);
-        state["gatewayDeployer"] = json!(format!("{gw_addr}"));
+        state.gateway_deployer_private_key = Some(pk);
+        state.gateway_deployer = Some(gw_addr);
     }
-    if let Some(ref pk) = gas_service_deployer_private_key {
+    if let Some(pk) = gas_service_deployer_private_key {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid gas service deployer private key: {e}"))?;
         ui::address("gas service deployer", &format!("{}", signer.address()));
-        state["gasServiceDeployerPrivateKey"] = json!(pk);
+        state.gas_service_deployer_private_key = Some(pk);
     }
-    if let Some(ref pk) = its_deployer_private_key {
+    if let Some(pk) = its_deployer_private_key {
         let signer: PrivateKeySigner = pk
             .parse()
             .map_err(|e| eyre::eyre!("invalid ITS deployer private key: {e}"))?;
         ui::address("ITS deployer", &format!("{}", signer.address()));
-        state["itsDeployerPrivateKey"] = json!(pk);
+        state.its_deployer_private_key = Some(pk);
     }
-    if let Some(ref s) = its_salt {
-        state["itsSalt"] = json!(s);
-        ui::kv("ITS salt", s);
+    if let Some(s) = its_salt {
+        ui::kv("ITS salt", &s);
+        state.its_salt = Some(s);
     }
-    if let Some(ref s) = its_proxy_salt {
-        state["itsProxySalt"] = json!(s);
-        ui::kv("ITS proxy salt", s);
+    if let Some(s) = its_proxy_salt {
+        ui::kv("ITS proxy salt", &s);
+        state.its_proxy_salt = Some(s);
     }
 
     ui::section("State");
     let state_file = state_path(&axelar_id)?;
-    save_state(&axelar_id, &state)?;
+    save_state(&state)?;
     ui::kv("state file", &state_file.display().to_string());
     ui::success(&format!("init complete for '{axelar_id}' (env={env})"));
 

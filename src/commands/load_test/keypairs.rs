@@ -1,6 +1,8 @@
+use alloy::network::TransactionBuilder;
 use alloy::primitives::U256;
 use alloy::primitives::keccak256;
 use alloy::providers::Provider;
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use anchor_lang::prelude::system_instruction;
 use eyre::{Result, eyre};
@@ -49,10 +51,11 @@ pub fn derive_keypairs(main: &Keypair, count: usize) -> Result<Vec<Keypair>> {
 /// Check that all derived keypairs are funded, and fund any that aren't.
 ///
 /// Shows a progress bar during funding. Returns the per-key balance after funding.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Result<Vec<u64>> {
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
-    let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
+    let main_balance = rpc
+        .get_balance(&main.pubkey())
+        .map_err(|e| eyre!("failed to read main Solana wallet balance: {e}"))?;
 
     // Check which keys need funding
     let mut balances: Vec<u64> = Vec::with_capacity(derived.len());
@@ -65,7 +68,9 @@ pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Resu
             .progress_chars("=> "),
     );
     for (i, kp) in derived.iter().enumerate() {
-        let balance = rpc.get_balance(&kp.pubkey()).unwrap_or(0);
+        let balance = rpc
+            .get_balance(&kp.pubkey())
+            .map_err(|e| eyre!("failed to read derived Solana key {i} balance: {e}"))?;
         balances.push(balance);
         if balance < MIN_LAMPORTS_PER_KEY {
             to_fund.push((i, TARGET_LAMPORTS_PER_KEY - balance));
@@ -132,7 +137,6 @@ pub fn ensure_funded(rpc_url: &str, main: &Keypair, derived: &[Keypair]) -> Resu
 
 /// Like `ensure_funded`, but targets a balance that covers `fires_per_key`
 /// transactions, each costing `gas_lamports` on top of the base tx fee.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub fn ensure_funded_for_sustained(
     rpc_url: &str,
     main: &Keypair,
@@ -147,7 +151,9 @@ pub fn ensure_funded_for_sustained(
     let min_needed = target / 2; // top up when below half
 
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
-    let main_balance = rpc.get_balance(&main.pubkey()).unwrap_or(0);
+    let main_balance = rpc
+        .get_balance(&main.pubkey())
+        .map_err(|e| eyre!("failed to read main Solana wallet balance: {e}"))?;
 
     let mut balances: Vec<u64> = Vec::with_capacity(derived.len());
     let mut to_fund: Vec<(usize, u64)> = Vec::new();
@@ -159,7 +165,9 @@ pub fn ensure_funded_for_sustained(
             .progress_chars("=> "),
     );
     for (i, kp) in derived.iter().enumerate() {
-        let balance = rpc.get_balance(&kp.pubkey()).unwrap_or(0);
+        let balance = rpc
+            .get_balance(&kp.pubkey())
+            .map_err(|e| eyre!("failed to read derived Solana key {i} balance: {e}"))?;
         balances.push(balance);
         if balance < min_needed {
             to_fund.push((i, target.saturating_sub(balance)));
@@ -249,16 +257,12 @@ const TARGET_WEI_PER_KEY: u128 = 10_000_000_000_000_000; // 0.01 ETH
 /// Check that all derived EVM signers are funded, and fund any that aren't.
 /// Each key needs gas + `extra_wei` (e.g. for cross-chain gas value).
 /// (e.g. for `msg.value` in cross-chain gas payment).
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub async fn ensure_funded_evm_with_extra<P: Provider>(
     provider: &P,
     main_signer: &PrivateKeySigner,
     derived: &[PrivateKeySigner],
     extra_wei: u128,
 ) -> Result<()> {
-    use alloy::network::TransactionBuilder;
-    use alloy::rpc::types::TransactionRequest;
-
     let min_needed = MIN_WEI_PER_KEY + extra_wei;
     let target = TARGET_WEI_PER_KEY + extra_wei;
 
@@ -271,10 +275,11 @@ pub async fn ensure_funded_evm_with_extra<P: Provider>(
             .progress_chars("=> "),
     );
     for (i, signer) in derived.iter().enumerate() {
+        let address = signer.address();
         let balance = provider
-            .get_balance(signer.address())
+            .get_balance(address)
             .await
-            .unwrap_or_default();
+            .map_err(|e| eyre!("failed to read derived EVM key {i} balance ({address}): {e}"))?;
         let bal: u128 = balance.to();
         if bal < min_needed {
             let deficit = target.saturating_sub(bal);
@@ -391,7 +396,6 @@ pub fn derive_xrpl_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<Xrp
 ///
 /// The XRPL base reserve (~10 XRP) is implicitly part of `target_drops` —
 /// callers should include it when deciding how much to request.
-#[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
 pub async fn ensure_funded_xrpl(
     client: &XrplClient,
     main_wallet: Option<&XrplWallet>,
@@ -466,7 +470,9 @@ pub async fn ensure_funded_xrpl(
         (None, Some(main)) => {
             // Ensure main has enough (+ small fee buffer per tx).
             let main_info = client.account_info(&main.address()).await?;
-            let main_balance = main_info.map(|i| i.balance_drops).unwrap_or(0);
+            let main_balance = main_info
+                .map(|i| i.balance_drops)
+                .ok_or_else(|| eyre!("XRPL main wallet {} is not activated", main.address()))?;
             let fee_buffer = 1_000u64.saturating_mul(to_fund.len() as u64); // ~100 drops/tx overhead
             if main_balance < total_needed + fee_buffer {
                 return Err(eyre!(

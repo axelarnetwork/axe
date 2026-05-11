@@ -1,6 +1,6 @@
-# axe — LLM Debugging Guide
+# axe — Axelar Debugging Guide
 
-This guide is for AI assistants (Claude, GPT, etc.) helping debug Axelar cross-chain infrastructure. It explains how to use `axe` commands to investigate stuck messages, decode transactions, and inspect on-chain state.
+This guide explains how to use `axe` commands to investigate stuck Axelar cross-chain messages, decode transactions, and inspect on-chain state.
 
 ## Quick Reference
 
@@ -11,7 +11,7 @@ This guide is for AI assistants (Claude, GPT, etc.) helping debug Axelar cross-c
 | Decode raw calldata | `cargo r -- decode calldata 0x...` |
 | Recent Solana gateway activity | `cargo r -- decode sol-activity --program gateway --network devnet-amplifier --limit 10` |
 | Recent EVM gateway events | `cargo r -- decode evm-activity --contract gateway --network devnet-amplifier --chain avalanche-fuji --limit 10` |
-| Solana gateway/ITS on-chain state | `cargo r -- decode sol-state` |
+| Recent Solana ITS activity | `cargo r -- decode sol-activity --program its --network devnet-amplifier --limit 10` |
 | Run a GMP test (Solana, no relayer) | `cargo r --no-default-features --features testnet -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana` |
 
 ## Debugging a Stuck Message
@@ -98,13 +98,13 @@ cargo r -- decode evm-activity --contract gateway --network devnet-amplifier --c
 # Query AxelarnetGateway executable_messages or use tx_search for wasm-message_executed
 ```
 
-### Step 5: Check Solana gateway state
+### Step 5: Check recent Solana gateway activity
 
 ```bash
-cargo r -- decode sol-state
+cargo r -- decode sol-activity --program gateway --network devnet-amplifier --limit 20
 ```
 
-Shows: epoch, verifier set hashes, ITS hub address, trusted chains, paused status.
+Shows recent Gateway instructions and events for read-only diagnostics.
 
 ## Network → Feature Flag Mapping
 

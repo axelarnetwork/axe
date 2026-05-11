@@ -1507,6 +1507,7 @@ dependencies = [
  "stellar-xdr",
  "sui-sdk-types",
  "tendermint-proto",
+ "thiserror 2.0.18",
  "tokio",
  "xrpl_api",
  "xrpl_binary_codec",

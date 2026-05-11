@@ -15,14 +15,14 @@ use serde_json::{Value, json};
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::fetch_verifier_set;
 use crate::evm::{decode_evm_error, encode_gateway_setup_params, read_artifact_bytecode};
-use crate::state::save_state;
+use crate::state::{Step, save_state};
 use crate::ui;
 use crate::utils::{compute_domain_separator, update_target_json};
 
 pub async fn run(
     ctx: &mut DeployContext,
     step_idx: usize,
-    step: &Value,
+    step: &Step,
     private_key: &str,
     impl_artifact: &str,
     proxy_artifact: &str,
@@ -35,61 +35,62 @@ pub async fn run(
 
     let domain_separator = compute_domain_separator(&ctx.target_json, &ctx.axelar_id)?;
 
-    let previous_signers_retention = U256::from(15);
-    let minimum_rotation_delay = U256::from(3600);
+    // How many past verifier sets the gateway accepts proofs from after a
+    // rotation. 15 means a rotation is reversible for 15 cycles before the
+    // old set goes cold.
+    const PREVIOUS_SIGNERS_RETENTION: u64 = 15;
+    // Minimum seconds between rotations. 1h matches Axelar's published
+    // gateway deployment defaults.
+    const MIN_ROTATION_DELAY_SECS: u64 = 3600;
+
+    let previous_signers_retention = U256::from(PREVIOUS_SIGNERS_RETENTION);
+    let minimum_rotation_delay = U256::from(MIN_ROTATION_DELAY_SECS);
 
     // --- Tx 1: Deploy implementation (skip if already deployed) ---
-    let (impl_addr, impl_codehash) =
-        if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str()) {
-            let addr = saved.parse()?;
-            let code = provider.get_code_at(addr).await?;
-            if code.is_empty() {
-                return Err(eyre::eyre!(
-                    "saved implementation {addr} has no code on-chain"
-                ));
-            }
-            ui::info(&format!(
-                "reusing previously deployed implementation: {addr}"
+    let (impl_addr, impl_codehash) = if let Some(addr) = step.implementation_address() {
+        let code = provider.get_code_at(addr).await?;
+        if code.is_empty() {
+            return Err(eyre::eyre!(
+                "saved implementation {addr} has no code on-chain"
             ));
-            (addr, keccak256(&code))
-        } else {
-            ui::info("deploying AxelarAmplifierGateway implementation...");
-            let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
-            let mut impl_deploy_code = impl_bytecode.clone();
-            impl_deploy_code.extend_from_slice(
-                &(
-                    previous_signers_retention,
-                    domain_separator,
-                    minimum_rotation_delay,
-                )
-                    .abi_encode(),
-            );
+        }
+        ui::info(&format!(
+            "reusing previously deployed implementation: {addr}"
+        ));
+        (addr, keccak256(&code))
+    } else {
+        ui::info("deploying AxelarAmplifierGateway implementation...");
+        let impl_bytecode = read_artifact_bytecode(impl_artifact)?;
+        let mut impl_deploy_code = impl_bytecode.clone();
+        impl_deploy_code.extend_from_slice(
+            &(
+                previous_signers_retention,
+                domain_separator,
+                minimum_rotation_delay,
+            )
+                .abi_encode(),
+        );
 
-            let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
-            let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
-            ui::tx_hash(
-                "implementation tx hash",
-                &format!("{}", receipt.transaction_hash),
-            );
-            let addr = receipt
-                .contract_address
-                .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
-            ui::address("implementation deployed at", &format!("{addr}"));
+        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
+        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        ui::tx_hash(
+            "implementation tx hash",
+            &format!("{}", receipt.transaction_hash),
+        );
+        let addr = receipt
+            .contract_address
+            .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
+        ui::address("implementation deployed at", &format!("{addr}"));
 
-            let code = provider.get_code_at(addr).await?;
-            let codehash = keccak256(&code);
+        let code = provider.get_code_at(addr).await?;
+        let codehash = keccak256(&code);
 
-            // Save implementation address to step so retries skip re-deployment
-            if let Some(s) = ctx.state["steps"]
-                .as_array_mut()
-                .and_then(|a| a.get_mut(step_idx))
-            {
-                s["implementationAddress"] = json!(format!("{addr}"));
-            }
-            save_state(&ctx.axelar_id, &ctx.state)?;
+        // Save implementation address to step so retries skip re-deployment
+        ctx.state.steps[step_idx].set_implementation_address(addr);
+        save_state(&ctx.state)?;
 
-            (addr, codehash)
-        };
+        (addr, codehash)
+    };
 
     // --- Fetch verifier set from Axelar chain ---
     let chain_axelar_id = {

@@ -1,23 +1,18 @@
-//! XRPL client primitives used by the load-test tool.
-//!
-//! Thin wrapper over `xrpl_http_client::Client` + `xrpl_binary_codec` for
-//! building, signing, submitting and polling XRPL `Payment` transactions that
-//! carry Axelar ITS memos.
-
-// Several helpers here are used only by the forthcoming EVM → XRPL
-// destination verifier; keep them reachable but silence dead-code lints
-// until the second direction lands.
-#![allow(dead_code)]
+//! `XrplClient` — thin wrapper over `xrpl_http_client::Client` that builds,
+//! signs, submits and polls XRPL `Payment` transactions, including the
+//! Axelar ITS interchain-transfer flow and the `account_tx` scan used to
+//! match inbound `message_id` memos on the destination side.
 
 use std::time::Duration;
 
 use eyre::{Result, eyre};
-use libsecp256k1::{PublicKey, SecretKey};
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256, Sha512};
 use xrpl_api::{AccountInfoRequest, SubmitRequest, TxRequest};
 use xrpl_binary_codec::{serialize, sign::sign_transaction};
-use xrpl_types::{AccountId, Amount, Blob, DropsAmount, Memo, PaymentTransaction};
+use xrpl_types::{AccountId, Amount, PaymentTransaction};
+
+use super::helpers::signed_tx_hash_hex;
+use super::its::build_its_transfer_memos;
+use super::wallet::XrplWallet;
 
 /// Poll interval while waiting for a submitted tx to be validated on the
 /// ledger. XRPL closes ledgers ~every 3–4s, so 2s is a reasonable cadence.
@@ -25,225 +20,18 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Upper bound on how long we wait for a single tx to validate.
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(60);
 
-// ---------------------------------------------------------------------------
-// Wallet (secp256k1 keypair + derived r-address)
-// ---------------------------------------------------------------------------
+/// `LastLedgerSequence` bump applied on top of whatever
+/// `prepare_transaction` autofills. The SDK sets `validated + 4` (~16 s),
+/// which expires too easily under any one-ledger delay. xrpl.js autofill
+/// defaults to +20; we add +26 here to leave a comfortable window for
+/// load-test bursts that may queue behind several congested closes.
+pub const LAST_LEDGER_SEQUENCE_BUMP: u32 = 26;
 
-/// An XRPL wallet derived from a 32-byte secp256k1 secret seed.
-///
-/// The XRPL address is computed from the compressed public key via
-/// `RIPEMD160(SHA256(pubkey))` and base58check-encoded with the `r` version
-/// byte (`0x00`).
-#[derive(Clone)]
-pub struct XrplWallet {
-    pub secret_key: SecretKey,
-    pub public_key: PublicKey,
-    pub account_id: AccountId,
-}
-
-impl XrplWallet {
-    pub fn from_bytes(secret_bytes: &[u8; 32]) -> Result<Self> {
-        let secret_key = SecretKey::parse(secret_bytes)
-            .map_err(|e| eyre!("invalid XRPL secret key bytes: {e:?}"))?;
-        let public_key = PublicKey::from_secret_key(&secret_key);
-        let account_id = account_id_from_public_key(&public_key);
-        Ok(Self {
-            secret_key,
-            public_key,
-            account_id,
-        })
-    }
-
-    pub fn from_hex(hex_str: &str) -> Result<Self> {
-        let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-            .map_err(|e| eyre!("invalid XRPL secret key hex: {e}"))?;
-        let bytes: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| eyre!("XRPL secret key must be exactly 32 bytes"))?;
-        Self::from_bytes(&bytes)
-    }
-
-    /// Parse an XRPL family seed (s-prefix base58check, e.g. `snr...`) and
-    /// derive the secp256k1 master keypair per the XRPL `signing` spec —
-    /// root_key + intermediate_key (account_index = 0), summed mod n.
-    pub fn from_family_seed(seed_str: &str) -> Result<Self> {
-        let seed16 = decode_xrpl_family_seed(seed_str)?;
-        let master_priv = derive_secp256k1_master(&seed16)?;
-        Self::from_bytes(&master_priv)
-    }
-
-    /// Auto-detect the input format: 64/66-char hex, or XRPL family seed.
-    pub fn from_secret_str(s: &str) -> Result<Self> {
-        let trimmed = s.trim();
-        let stripped = trimmed.trim_start_matches("0x");
-        if stripped.len() == 64 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
-            Self::from_hex(trimmed)
-        } else if trimmed.starts_with('s') {
-            Self::from_family_seed(trimmed)
-        } else {
-            Err(eyre!(
-                "unrecognized XRPL secret format (expected 32-byte hex or s-prefix family seed)"
-            ))
-        }
-    }
-
-    pub fn address(&self) -> String {
-        self.account_id.to_address()
-    }
-}
-
-/// XRPL base58 alphabet (note: differs from Bitcoin's).
-const XRPL_B58_ALPHA: &[u8] = b"rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz";
-
-fn b58_decode_xrpl(s: &str) -> Result<Vec<u8>> {
-    let mut bytes: Vec<u8> = vec![0u8];
-    for c in s.chars() {
-        let idx = XRPL_B58_ALPHA
-            .iter()
-            .position(|&a| a == c as u8)
-            .ok_or_else(|| eyre!("invalid base58 char in XRPL seed: {c}"))?;
-        let mut carry = idx as u32;
-        for b in bytes.iter_mut() {
-            carry += (*b as u32) * 58;
-            *b = (carry & 0xff) as u8;
-            carry >>= 8;
-        }
-        while carry > 0 {
-            bytes.push((carry & 0xff) as u8);
-            carry >>= 8;
-        }
-    }
-    // Leading 'r' chars (alphabet[0]) → leading zero bytes.
-    for c in s.chars() {
-        if c as u8 == XRPL_B58_ALPHA[0] {
-            bytes.push(0);
-        } else {
-            break;
-        }
-    }
-    bytes.reverse();
-    Ok(bytes)
-}
-
-/// Decode the 16-byte payload from an XRPL family seed string.
-fn decode_xrpl_family_seed(seed: &str) -> Result<[u8; 16]> {
-    let raw = b58_decode_xrpl(seed)?;
-    if raw.len() != 21 {
-        return Err(eyre!(
-            "XRPL family seed has wrong length: got {} bytes, expected 21 (1 prefix + 16 payload + 4 checksum)",
-            raw.len()
-        ));
-    }
-    if raw[0] != 0x21 {
-        return Err(eyre!(
-            "XRPL family seed has wrong version byte: got 0x{:02x}, expected 0x21 (sec256k1 seed)",
-            raw[0]
-        ));
-    }
-    let payload = &raw[..17];
-    let checksum = &raw[17..21];
-    let expected = &Sha256::digest(Sha256::digest(payload))[..4];
-    if checksum != expected {
-        return Err(eyre!("XRPL family seed checksum mismatch"));
-    }
-    let mut out = [0u8; 16];
-    out.copy_from_slice(&raw[1..17]);
-    Ok(out)
-}
-
-/// Derive the secp256k1 master private key from a 16-byte family seed,
-/// matching `rippled`'s standard derivation:
-///   1. root_priv = first SHA512_half(seed || seq) that is in (0, n).
-///   2. intermediate = first SHA512_half(root_pub_compressed || 0u32_be || seq) in (0, n).
-///   3. master_priv = (root_priv + intermediate) mod n.
-fn derive_secp256k1_master(seed16: &[u8; 16]) -> Result<[u8; 32]> {
-    let root = derive_part_secp256k1(seed16)?;
-    let root_sk = SecretKey::parse(&root).map_err(|e| eyre!("root key invalid: {e:?}"))?;
-    let root_pk = PublicKey::from_secret_key(&root_sk);
-    let pk_compressed = root_pk.serialize_compressed();
-    let mut payload = Vec::with_capacity(33 + 4);
-    payload.extend_from_slice(&pk_compressed);
-    payload.extend_from_slice(&0u32.to_be_bytes());
-    let intermediate = derive_part_secp256k1(&payload)?;
-
-    // master = (root + intermediate) mod n
-    let mut sum_sk = SecretKey::parse(&root).map_err(|e| eyre!("root key invalid: {e:?}"))?;
-    let inter_sk =
-        SecretKey::parse(&intermediate).map_err(|e| eyre!("intermediate key invalid: {e:?}"))?;
-    sum_sk
-        .tweak_add_assign(&inter_sk)
-        .map_err(|e| eyre!("master key tweak failed: {e:?}"))?;
-    Ok(sum_sk.serialize())
-}
-
-fn derive_part_secp256k1(prefix: &[u8]) -> Result<[u8; 32]> {
-    for seq in 0u32..=u32::MAX {
-        let mut h = Sha512::new();
-        h.update(prefix);
-        h.update(seq.to_be_bytes());
-        let half = &h.finalize()[..32];
-        let mut candidate = [0u8; 32];
-        candidate.copy_from_slice(half);
-        if SecretKey::parse(&candidate).is_ok() {
-            return Ok(candidate);
-        }
-    }
-    Err(eyre!("exhausted u32 search deriving XRPL secp256k1 key"))
-}
-
-/// Derive an XRPL AccountId from a secp256k1 compressed public key.
-fn account_id_from_public_key(pk: &PublicKey) -> AccountId {
-    let compressed = pk.serialize_compressed();
-    let sha = Sha256::digest(compressed);
-    let ripe = Ripemd160::digest(sha);
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(&ripe);
-    AccountId(bytes)
-}
-
-// ---------------------------------------------------------------------------
-// Memo helpers
-// ---------------------------------------------------------------------------
-
-/// Build an XRPL `Memo` from a UTF-8 key and arbitrary bytes value.
-fn memo(key: &str, value: impl AsRef<[u8]>) -> Memo {
-    Memo {
-        memo_type: Blob(key.as_bytes().to_vec()),
-        memo_data: Blob(value.as_ref().to_vec()),
-        memo_format: None,
-    }
-}
-
-/// Build the 4 Axelar ITS `interchain_transfer` memos for a native-XRP payment
-/// to the Axelar multisig.
-///
-/// * `destination_chain` — e.g. `"xrpl-evm"`
-/// * `destination_address_hex` — hex-encoded destination bytes, WITHOUT
-///   the leading `0x` (this matches the off-chain TypeScript reference
-///   implementation in `axelar-contract-deployments/xrpl/interchain-transfer.js`)
-/// * `gas_fee_drops` — gas fee, in the same units as the payment `Amount`
-///   (drops for XRP), encoded as a decimal string
-pub fn build_its_transfer_memos(
-    destination_chain: &str,
-    destination_address_hex: &str,
-    gas_fee_drops: u64,
-    payload: Option<&[u8]>,
-) -> Vec<Memo> {
-    let mut memos = vec![
-        memo("type", b"interchain_transfer"),
-        memo("destination_address", destination_address_hex.as_bytes()),
-        memo("destination_chain", destination_chain.as_bytes()),
-        memo("gas_fee_amount", gas_fee_drops.to_string().as_bytes()),
-    ];
-    if let Some(p) = payload {
-        memos.push(memo("payload", p));
-    }
-    memos
-}
-
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
+/// Maximum txs returned by `account_tx` when scanning for an inbound
+/// `Payment` carrying a particular `message_id` memo. The XRPL public
+/// servers cap responses lower (200 is the documented ceiling), so this is
+/// also the practical lookback window.
+const ACCOUNT_TX_LIMIT: u32 = 200;
 
 #[derive(Clone)]
 pub struct XrplClient {
@@ -396,7 +184,7 @@ impl XrplClient {
             .await
             .map_err(|e| eyre!("prepare_transaction failed: {e}"))?;
         if let Some(lls) = tx.common.last_ledger_sequence {
-            tx.common.last_ledger_sequence = Some(lls.saturating_add(26));
+            tx.common.last_ledger_sequence = Some(lls.saturating_add(LAST_LEDGER_SEQUENCE_BUMP));
         }
         sign_transaction(&mut tx, &wallet.public_key, &wallet.secret_key)
             .map_err(|e| eyre!("sign_transaction failed: {e:?}"))?;
@@ -446,7 +234,7 @@ impl XrplClient {
             forward: Some(false),
             ledger_index_min: min_ledger.map(|n| n.to_string()),
             pagination: xrpl_api::RequestPagination {
-                limit: Some(200),
+                limit: Some(ACCOUNT_TX_LIMIT),
                 ..Default::default()
             },
             ..Default::default()
@@ -463,9 +251,8 @@ impl XrplClient {
             }
             // We only care about Payments (the relayer broadcasts Payments).
             let common = at.tx.common();
-            let memos = match &common.memos {
-                Some(m) => m,
-                None => continue,
+            let Some(memos) = &common.memos else {
+                continue;
             };
             for m in memos {
                 let memo_type_decoded = m
@@ -556,56 +343,4 @@ pub struct AccountInfo {
 pub struct ValidatedTx {
     pub ledger_index: Option<u32>,
     pub success: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Convenience helpers
-// ---------------------------------------------------------------------------
-
-/// Parse an r-address string into an `AccountId`.
-pub fn parse_address(addr: &str) -> Result<AccountId> {
-    AccountId::from_address(addr).map_err(|e| eyre!("invalid XRPL address {addr:?}: {e}"))
-}
-
-/// Encode an `AccountId`'s 20-byte payload as lowercase hex (no 0x prefix).
-/// Used when building the `destination_address` memo for inbound transfers
-/// where the destination is an XRPL account.
-pub fn account_id_to_hex(id: &AccountId) -> String {
-    hex::encode(id.0)
-}
-
-/// Convenience conversion: 1 XRP = 1_000_000 drops.
-pub const fn xrp_to_drops(xrp: u64) -> u64 {
-    xrp.saturating_mul(1_000_000)
-}
-
-/// Default faucet URL for a given XRPL chain. We look at the configured
-/// RPC/WSS URL because the chain config's `networkType` is unreliable on
-/// devnet-amplifier (it labels the chain "testnet" even though the multisig
-/// lives on XRPL devnet — a separate ledger). Returns `None` for mainnet.
-pub fn faucet_url_for_network(network_type_or_rpc: &str) -> Option<&'static str> {
-    let lower = network_type_or_rpc.to_lowercase();
-    if lower.contains("devnet") {
-        Some("https://faucet.devnet.rippletest.net/accounts")
-    } else if lower.contains("altnet") || lower == "testnet" || lower == "stagenet" {
-        Some("https://faucet.altnet.rippletest.net/accounts")
-    } else {
-        None
-    }
-}
-
-/// `DropsAmount` convenience — wraps validation.
-#[allow(dead_code)]
-pub fn drops(d: u64) -> Result<DropsAmount> {
-    DropsAmount::from_drops(d).map_err(|e| eyre!("invalid drops amount {d}: {e}"))
-}
-
-/// Compute the deterministic hash of a signed XRPL transaction blob, returning
-/// it as 64 uppercase hex characters (the canonical XRPL tx hash format).
-fn signed_tx_hash_hex(tx_bytes: &[u8]) -> String {
-    let h = xrpl_binary_codec::hash::hash(
-        xrpl_binary_codec::hash::HASH_PREFIX_SIGNED_TRANSACTION,
-        tx_bytes,
-    );
-    h.to_hex()
 }

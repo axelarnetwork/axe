@@ -16,8 +16,7 @@ use tokio::sync::Mutex;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::stellar::{
-    StellarClient, StellarWallet, scval_address_account, scval_address_from_str, scval_bytes,
-    scval_string, scval_token,
+    StellarClient, StellarWallet, scval_address_account, scval_bytes, scval_string, scval_token,
 };
 use crate::ui;
 
@@ -100,7 +99,6 @@ async fn submit_single(
         .await
     {
         Ok(invoked) => {
-            #[allow(clippy::cast_possible_truncation)]
             let submit_time_ms = submit_start.elapsed().as_millis() as u64;
             // Stellar message IDs are `0x{lowercase_tx_hash}-{event_index}` per
             // the `hex_tx_hash_and_event_index` msg_id format. When
@@ -153,7 +151,6 @@ fn build_send_args(
 }
 
 fn fail_metrics(submit_start: Instant, source: &str, err: &str) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: String::new(),
@@ -246,7 +243,6 @@ pub async fn run_burst(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
 fn build_burst_report(
     metrics: Vec<TxMetrics>,
     source_chain: &str,
@@ -345,12 +341,20 @@ pub(super) async fn run_sustained(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
-            let m = submit_single(&c, wallet, &ex, &gw, &dc, &da, &payload, &gas_token, gas).await;
+            let mut m =
+                submit_single(&c, wallet, &ex, &gw, &dc, &da, &payload, &gas_token, gas).await;
             if m.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_stellar(&m, has_vv, contract_addr);
-                let _ = tx_sender.send(pending);
+                match super::verify::tx_to_pending_stellar(&m, has_vv, contract_addr) {
+                    Ok(pending) => {
+                        let _ = tx_sender.send(pending);
+                    }
+                    Err(e) => {
+                        m.success = false;
+                        m.error = Some(format!("failed to build verification state: {e}"));
+                    }
+                }
             }
             m
         })
@@ -448,28 +452,5 @@ pub async fn ensure_funded(
         "funded {} Stellar keys via Friendbot",
         missing.len()
     ));
-    Ok(())
-}
-
-/// Convenience: derive + fund.
-#[allow(dead_code)]
-pub async fn prepare_wallets(
-    client: &StellarClient,
-    main_seed: &[u8; 32],
-    count: usize,
-    use_friendbot: bool,
-) -> Result<Vec<StellarWallet>> {
-    if count == 0 {
-        return Err(eyre!("Stellar load test needs at least 1 ephemeral wallet"));
-    }
-    let wallets = derive_wallets(main_seed, count)?;
-    ensure_funded(client, &wallets, use_friendbot).await?;
-    Ok(wallets)
-}
-
-// Suppress unused warnings while the reverse direction is staged.
-#[allow(dead_code)]
-fn _suppress() -> Result<()> {
-    let _ = scval_address_from_str as fn(&str) -> _;
     Ok(())
 }

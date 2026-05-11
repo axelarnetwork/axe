@@ -42,10 +42,7 @@ pub async fn run(
         // deploy-create2
         let const_deployer_addr =
             read_contract_address(&ctx.target_json, &ctx.axelar_id, "ConstAddressDeployer")?;
-        let salt_string = salt
-            .clone()
-            .or_else(|| ctx.state["cosmSalt"].as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| step_name.to_string());
+        let salt_string = salt.clone().unwrap_or_else(|| ctx.state.cosm_salt.clone());
         let salt_bytes = get_salt_from_key(&salt_string);
 
         // For contracts with constructor args (e.g. Operators(address owner)),

@@ -1,6 +1,8 @@
 mod cli;
 mod commands;
+mod config;
 mod cosmos;
+mod error;
 mod evm;
 mod preflight;
 mod solana;
@@ -8,6 +10,8 @@ mod state;
 mod stellar;
 mod steps;
 mod sui;
+mod timing;
+mod types;
 pub mod ui;
 mod utils;
 mod xrpl;
@@ -85,6 +89,7 @@ async fn main() -> Result<()> {
                 config,
                 source_chain,
                 destination_chain,
+                destination_address,
                 mnemonic,
             } => {
                 if let Some(config) = config {
@@ -92,6 +97,7 @@ async fn main() -> Result<()> {
                         config,
                         source_chain,
                         destination_chain,
+                        destination_address,
                         mnemonic,
                     )
                     .await
@@ -99,7 +105,33 @@ async fn main() -> Result<()> {
                     commands::test_gmp::run(axelar_id).await
                 }
             }
-            cli::TestCommands::Its { axelar_id } => commands::test_its::run(axelar_id).await,
+            cli::TestCommands::Its {
+                axelar_id,
+                config,
+                source_chain,
+                destination_chain,
+                mnemonic,
+                evm_private_key,
+                amount,
+                gas_value,
+                fresh_token,
+            } => {
+                if let Some(config) = config {
+                    commands::test_its::run_config(
+                        config,
+                        source_chain,
+                        destination_chain,
+                        mnemonic,
+                        evm_private_key,
+                        amount,
+                        gas_value,
+                        fresh_token,
+                    )
+                    .await
+                } else {
+                    commands::test_its::run(axelar_id).await
+                }
+            }
             cli::TestCommands::LoadTest {
                 config,
                 test_type,

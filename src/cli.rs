@@ -97,7 +97,6 @@ pub enum DeployCommands {
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)]
 pub enum TestCommands {
     /// Test GMP: send a cross-chain message and relay through the full Amplifier pipeline
     Gmp {
@@ -117,6 +116,13 @@ pub enum TestCommands {
         #[arg(long)]
         destination_chain: Option<String>,
 
+        /// Destination contract address (required for sol→evm; defaults to the
+        /// SVM memo program for sol→sol). For EVM destinations this should
+        /// point at a deployed `SenderReceiver` so the test can call
+        /// `execute(...)` and read back the stored message.
+        #[arg(long)]
+        destination_address: Option<String>,
+
         /// Cosmos mnemonic for relay transactions
         #[arg(long, env = "MNEMONIC")]
         mnemonic: Option<String>,
@@ -124,8 +130,42 @@ pub enum TestCommands {
 
     /// Test ITS: deploy interchain token on source, deploy remotely to flow via hub
     Its {
+        /// Chain axelar ID (legacy EVM-only mode, uses state file)
         #[arg(long)]
         axelar_id: Option<String>,
+
+        /// Path to chains config JSON (config-based mode, supports Solana → EVM)
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// Source chain axelar ID (e.g. solana-devnet)
+        #[arg(long)]
+        source_chain: Option<String>,
+
+        /// Destination chain axelar ID (e.g. avalanche-fuji)
+        #[arg(long)]
+        destination_chain: Option<String>,
+
+        /// Cosmos mnemonic for relay transactions
+        #[arg(long, env = "MNEMONIC")]
+        mnemonic: Option<String>,
+
+        /// EVM private key (used to derive the destination receiver address)
+        #[arg(long, env = "EVM_PRIVATE_KEY")]
+        evm_private_key: Option<String>,
+
+        /// Amount of base units to transfer (default 1_000_000_000 = 1 token at 9 decimals)
+        #[arg(long)]
+        amount: Option<u64>,
+
+        /// Gas value (lamports) attached to the cross-chain ITS deploy/transfer (default: 0.01 SOL)
+        #[arg(long)]
+        gas_value: Option<u64>,
+
+        /// Force a fresh token deploy even if a cached token already exists
+        /// for this network/src/dst/deployer combination.
+        #[arg(long)]
+        fresh_token: bool,
     },
 
     /// Cross-chain load test (auto-detects chains, RPCs, and test type from config)

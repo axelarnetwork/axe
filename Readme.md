@@ -95,7 +95,7 @@ See [docs/load-test-coverage.md](docs/load-test-coverage.md) for the full source
 | EVM ↔ EVM | ✅ | (use evm-to-evm with token id) |
 | EVM ↔ Solana | ✅ both directions, sustained-mode supported | ✅ both directions, sustained-mode supported |
 | EVM ↔ XRPL | n/a (XRPL has no contracts) | ✅ canonical XRP, both directions |
-| EVM ↔ Stellar | ✅ both directions | ✅ both directions |
+| EVM ↔ Stellar | ✅ both directions | ⚠️ Stellar → EVM passed; EVM → Stellar reaches Stellar approval but times out at execution on testnet |
 | EVM ↔ Sui | ✅ EVM → Sui *(Sui → EVM works on source side; voter coverage upstream is sparse for `Example::gmp` messages today)* | (deferred — needs Sui ITS PTB type-tag resolution) |
 | Solana ↔ Stellar | ✅ both directions | ⚠️ Stellar testnet ITS doesn't list `solana` as trusted yet (Contract #7 = UntrustedChain). Wire-complete on our side. |
 | Solana ↔ Sui | ✅ Sol → Sui | (deferred) |
@@ -338,9 +338,9 @@ axe decode evm-activity --contract its --network testnet --chain flow --json
 
 Shows recent events from Axelar EVM contracts (Gateway, ITS, GasService) using `eth_getLogs`. Auto-discovers contract addresses from config files. Decodes event names and parameters using the embedded ABI database.
 
-### LLM / AI Assistant Usage
+### Debugging Cross-Chain Messages
 
-See [LLM-GUIDE.md](LLM-GUIDE.md) for a complete guide on using `axe` for debugging cross-chain messages with AI assistants.
+See [docs/axelar-debugging.md](docs/axelar-debugging.md) for a guide to tracing GMP and ITS messages through source, Axelar, and destination-chain state.
 
 ## Verifiers
 

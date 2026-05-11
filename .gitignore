@@ -5,3 +5,9 @@ output/
 .claude/
 axe-load-test-logs/
 bench-results/
+
+# Local-only baseline / comparison helpers used during the polish refactor.
+# Kept on disk for re-use, not pushed.
+scripts/run-baseline-matrix.sh
+scripts/compare-load-test-baseline.sh
+scripts/plot_load_tests.py

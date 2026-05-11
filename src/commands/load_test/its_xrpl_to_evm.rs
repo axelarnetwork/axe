@@ -11,11 +11,11 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use eyre::{Result, eyre};
+use xrpl_types::AccountId;
 
 use super::{LoadTestArgs, finish_report, validate_evm_rpc, xrpl_sender};
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::ui;
-use crate::utils::read_contract_address;
 use crate::xrpl::{
     XrplClient, XrplWallet, account_id_to_hex, faucet_url_for_network, parse_address,
 };
@@ -26,35 +26,103 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
 
     validate_evm_rpc(&args.destination_rpc).await?;
 
-    // Verify Axelar-side prerequisites
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
-        eyre::bail!(
-            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
-        );
-    }
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
-        .is_err()
-    {
-        eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
-    }
+    let cfg = ChainsConfig::load(&args.config)?;
+    verify_axelar_prerequisites(&cfg, dest)?;
 
     ui::kv("source", src);
     ui::kv("destination", dest);
     ui::kv("protocol", "ITS (XRP interchain_transfer via hub)");
 
-    // --- XRPL config ---
     let (xrpl_rpc, xrpl_multisig_addr, xrpl_network_type) =
         read_xrpl_chain_config(&args.config, src)?;
     ui::address("XRPL multisig", &xrpl_multisig_addr);
 
-    // --- XRPL main wallet ---
-    let main_wallet = load_xrpl_main_wallet(args.private_key.as_deref())?;
-    let xrpl_client = XrplClient::new(&xrpl_rpc);
+    let (xrpl_client, main_wallet) =
+        init_xrpl_client_and_main_wallet(&xrpl_rpc, args.private_key.as_deref()).await?;
+
+    let evm_targets = resolve_evm_targets(&cfg, dest)?;
+
+    let gas_fee_drops = parse_gas_fee_drops(args.gas_value.as_deref())?;
+    let sizing = compute_run_sizing(&args);
+    let wallets = fund_ephemeral_wallets(
+        &xrpl_client,
+        &main_wallet,
+        &xrpl_rpc,
+        &xrpl_network_type,
+        &sizing,
+        gas_fee_drops,
+    )
+    .await?;
+    let multisig = parse_address(&xrpl_multisig_addr)?;
+
+    if !sizing.burst_mode {
+        run_sustained_pipeline(
+            &args,
+            &xrpl_client,
+            wallets,
+            multisig,
+            &evm_targets,
+            gas_fee_drops,
+            &sizing,
+        )
+        .await
+    } else {
+        run_burst_pipeline(
+            &args,
+            &xrpl_client,
+            &wallets,
+            &multisig,
+            &evm_targets,
+            gas_fee_drops,
+        )
+        .await
+    }
+}
+
+/// EVM-side addresses resolved from config for the destination chain.
+struct EvmTargets {
+    its_proxy_addr: alloy::primitives::Address,
+    dest_address_hex: String,
+    evm_gateway_addr: alloy::primitives::Address,
+    axelarnet_gw_addr: String,
+}
+
+/// Sizing parameters derived from CLI flags: chooses burst vs sustained,
+/// number of ephemeral wallets, and per-wallet tx count.
+struct RunSizing {
+    burst_mode: bool,
+    sustained_params: Option<(u64, u64)>,
+    num_keys: usize,
+    txs_per_key: u64,
+}
+
+/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
+/// AxelarnetGateway). Bails with the existing error strings if either is
+/// missing.
+fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> Result<()> {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+        );
+    }
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
+        .is_err()
+    {
+        eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
+    }
+    Ok(())
+}
+
+/// Build the XRPL HTTP client and load the main funding wallet, logging the
+/// wallet's address and current balance to the UI.
+async fn init_xrpl_client_and_main_wallet(
+    xrpl_rpc: &str,
+    fallback_private_key: Option<&str>,
+) -> Result<(XrplClient, XrplWallet)> {
+    let main_wallet = load_xrpl_main_wallet(fallback_private_key)?;
+    let xrpl_client = XrplClient::new(xrpl_rpc);
     let main_info = xrpl_client.account_info(&main_wallet.address()).await?;
     let main_balance_drops = main_info.map(|i| i.balance_drops).unwrap_or(0);
     ui::kv(
@@ -65,9 +133,19 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             main_balance_drops as f64 / 1_000_000.0
         ),
     );
+    Ok((xrpl_client, main_wallet))
+}
 
-    // --- EVM destination address (ITS proxy) ---
-    let its_proxy_addr = read_contract_address(&args.config, dest, "InterchainTokenService")?;
+/// Resolve the EVM-destination addresses (ITS proxy, gateway, axelarnet
+/// gateway) from config and emit the matching UI lines.
+fn resolve_evm_targets(cfg: &ChainsConfig, dest: &str) -> Result<EvmTargets> {
+    let dest_cfg = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre!("destination chain '{dest}' not found in config"))?;
+    let its_proxy_addr: alloy::primitives::Address = dest_cfg
+        .contract_address("InterchainTokenService", dest)?
+        .parse()?;
     ui::address("destination ITS", &format!("{its_proxy_addr}"));
     // For XRPL → EVM interchain_transfer, the destination_address memo carries
     // the hex-encoded destination bytes (the ITS proxy on the EVM side).
@@ -75,14 +153,27 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         .trim_start_matches("0x")
         .to_string();
 
-    let evm_gateway_addr = read_contract_address(&args.config, dest, "AxelarGateway")?;
+    let evm_gateway_addr: alloy::primitives::Address =
+        dest_cfg.contract_address("AxelarGateway", dest)?.parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
-    let axelarnet_gw_addr =
-        read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")?;
+    let axelarnet_gw_addr = cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")?
+        .to_string();
 
-    // --- Gas fee (XRP drops) ---
-    let gas_fee_drops: u64 = match &args.gas_value {
+    Ok(EvmTargets {
+        its_proxy_addr,
+        dest_address_hex,
+        evm_gateway_addr,
+        axelarnet_gw_addr,
+    })
+}
+
+/// Parse the user-supplied gas fee (XRP drops), defaulting to
+/// `xrpl_sender::DEFAULT_GAS_FEE_DROPS`, and emit the matching UI line.
+fn parse_gas_fee_drops(gas_value: Option<&str>) -> Result<u64> {
+    let gas_fee_drops: u64 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => xrpl_sender::DEFAULT_GAS_FEE_DROPS,
     };
@@ -93,147 +184,197 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             gas_fee_drops as f64 / 1_000_000.0
         ),
     );
+    Ok(gas_fee_drops)
+}
 
-    // --- Burst vs sustained ---
-    let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
+/// Decide burst vs sustained, ephemeral wallet count, and per-wallet tx count.
+fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
+    let sustained_params = args.tps.zip(args.duration_secs);
+    let burst_mode = sustained_params.is_none();
     let (num_keys, _total_expected) = if burst_mode {
         let n = args.num_txs.max(1) as usize;
         (n, args.num_txs.max(1))
     } else {
-        let tps = args.tps.unwrap() as usize;
-        let dur = args.duration_secs.unwrap();
+        let (tps, dur) = sustained_params.expect("burst_mode is false");
+        let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
 
-    // --- Fund ephemeral wallets ---
     let txs_per_key = if burst_mode {
         1u64
     } else {
-        args.duration_secs.unwrap().div_ceil(args.key_cycle)
+        sustained_params
+            .expect("burst_mode is false")
+            .1
+            .div_ceil(args.key_cycle)
     };
+
+    RunSizing {
+        burst_mode,
+        sustained_params,
+        num_keys,
+        txs_per_key,
+    }
+}
+
+/// Derive ephemeral wallets and ensure each one is funded for the planned
+/// number of transfers.
+async fn fund_ephemeral_wallets(
+    xrpl_client: &XrplClient,
+    main_wallet: &XrplWallet,
+    xrpl_rpc: &str,
+    xrpl_network_type: &str,
+    sizing: &RunSizing,
+    gas_fee_drops: u64,
+) -> Result<Vec<XrplWallet>> {
     // Each wallet needs: base reserve (~10 XRP) + txs_per_key * (transfer + gas + base fee)
     let per_wallet_drops: u64 = 10_000_000u64
-        + txs_per_key.saturating_mul(xrpl_sender::TRANSFER_AMOUNT_DROPS + gas_fee_drops + 100);
+        + sizing
+            .txs_per_key
+            .saturating_mul(xrpl_sender::TRANSFER_AMOUNT_DROPS + gas_fee_drops + 100);
 
     // Pass RPC URL so devnet vs testnet vs mainnet is inferred from the
     // actual endpoint (devnet-amplifier mislabels its xrpl networkType).
     let faucet_url =
-        faucet_url_for_network(&xrpl_rpc).or_else(|| faucet_url_for_network(&xrpl_network_type));
+        faucet_url_for_network(xrpl_rpc).or_else(|| faucet_url_for_network(xrpl_network_type));
     let main_seed = main_wallet.secret_key.serialize();
-    let wallets = xrpl_sender::prepare_wallets(
-        &xrpl_client,
+    xrpl_sender::prepare_wallets(
+        xrpl_client,
         &main_seed,
-        Some(&main_wallet),
-        num_keys,
+        Some(main_wallet),
+        sizing.num_keys,
         per_wallet_drops,
         faucet_url,
     )
-    .await?;
+    .await
+}
 
-    let multisig = parse_address(&xrpl_multisig_addr)?;
+/// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
+/// XRPL sustained sender, stitch amplifier timings back into the report, and
+/// hand off to `finish_report`.
+async fn run_sustained_pipeline(
+    args: &LoadTestArgs,
+    xrpl_client: &XrplClient,
+    wallets: Vec<XrplWallet>,
+    multisig: AccountId,
+    evm: &EvmTargets,
+    gas_fee_drops: u64,
+    sizing: &RunSizing,
+) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let tps_n = sizing.sustained_params.expect("burst_mode is false").0 as usize;
+    let duration_secs = sizing.sustained_params.expect("burst_mode is false").1;
+    let key_cycle = args.key_cycle as usize;
 
-    // --- Sustained mode ---
-    if !burst_mode {
-        let tps_n = args.tps.unwrap() as usize;
-        let duration_secs = args.duration_secs.unwrap();
-        let key_cycle = args.key_cycle as usize;
+    let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let send_done = Arc::new(AtomicBool::new(false));
+    let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
-        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
-        let send_done = Arc::new(AtomicBool::new(false));
-        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
-
-        let vconfig = args.config.clone();
-        let vsource = args.source_axelar_id.clone();
-        let vdest = args.destination_axelar_id.clone();
-        let vdest_rpc = args.destination_rpc.clone();
-        let vdone = Arc::clone(&send_done);
-        let vgw = evm_gateway_addr;
-        let verify_handle = tokio::spawn(async move {
-            let spinner = spinner_rx.await.expect("spinner channel dropped");
-            super::verify::verify_onchain_evm_its_streaming(
-                &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
-            )
-            .await
-        });
-
-        let spinner = ui::wait_spinner(&format!(
-            "[0/{duration_secs}s] starting sustained XRPL ITS send..."
-        ));
-        let _ = spinner_tx.send(spinner.clone());
-
-        let test_start = Instant::now();
-
-        // XRPL source has a separate VotingVerifier (XrplVotingVerifier). The
-        // existing streaming verifier uses `VotingVerifier/{source}` — which
-        // doesn't exist for XRPL — so we run without a voting check and let
-        // the Routed → HubApproved → ... stages drive the pipeline.
-        let has_voting_verifier = false;
-
-        let result = xrpl_sender::run_sustained(
-            &xrpl_client,
-            wallets,
-            multisig,
-            dest.clone(),
-            dest_address_hex.clone(),
-            gas_fee_drops,
-            "axelar".to_string(),
-            axelarnet_gw_addr.clone(),
-            tps_n,
-            duration_secs,
-            key_cycle,
-            Some(verify_tx),
-            Some(send_done),
-            spinner,
-            has_voting_verifier,
+    let vconfig = args.config.clone();
+    let vsource = args.source_axelar_id.clone();
+    let vdest = args.destination_axelar_id.clone();
+    let vdest_rpc = args.destination_rpc.clone();
+    let vdone = Arc::clone(&send_done);
+    let vgw = evm.evm_gateway_addr;
+    let verify_handle = tokio::spawn(async move {
+        let spinner = spinner_rx.await.expect("spinner channel dropped");
+        super::verify::verify_onchain_evm_its_streaming(
+            &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
         )
-        .await;
+        .await
+    });
 
-        let mut report = super::sustained::build_sustained_report(
-            result,
-            src,
-            dest,
-            &format!("{its_proxy_addr}"),
-            tps_n as u64 * duration_secs,
-            num_keys,
-        );
-        let (verification, timings) = verify_handle.await??;
-        for (msg_id, timing) in timings {
-            if let Some(tx) = report
-                .transactions
-                .iter_mut()
-                .find(|t| t.signature == msg_id)
-            {
-                tx.amplifier_timing = Some(timing);
-            }
+    let spinner = ui::wait_spinner(&format!(
+        "[0/{duration_secs}s] starting sustained XRPL ITS send..."
+    ));
+    let _ = spinner_tx.send(spinner.clone());
+
+    let test_start = Instant::now();
+
+    // XRPL source has a separate VotingVerifier (XrplVotingVerifier). The
+    // existing streaming verifier uses `VotingVerifier/{source}` — which
+    // doesn't exist for XRPL — so we run without a voting check and let
+    // the Routed → HubApproved → ... stages drive the pipeline.
+    let has_voting_verifier = false;
+
+    let result = xrpl_sender::run_sustained(
+        xrpl_client,
+        wallets,
+        multisig,
+        dest.clone(),
+        evm.dest_address_hex.clone(),
+        gas_fee_drops,
+        "axelar".to_string(),
+        evm.axelarnet_gw_addr.clone(),
+        tps_n,
+        duration_secs,
+        key_cycle,
+        Some(verify_tx),
+        Some(send_done),
+        spinner,
+        has_voting_verifier,
+    )
+    .await;
+
+    let mut report = super::sustained::build_sustained_report(
+        result,
+        src,
+        dest,
+        &format!("{}", evm.its_proxy_addr),
+        tps_n as u64 * duration_secs,
+        sizing.num_keys,
+    );
+    let (verification, timings) = verify_handle.await??;
+    for (msg_id, timing) in timings {
+        if let Some(tx) = report
+            .transactions
+            .iter_mut()
+            .find(|t| t.signature == msg_id)
+        {
+            tx.amplifier_timing = Some(timing);
         }
-        report.verification = Some(verification);
-        return finish_report(&args, &mut report, test_start);
     }
+    report.verification = Some(verification);
+    finish_report(args, &mut report, test_start)
+}
 
-    // --- Burst mode ---
+/// Drive the burst-mode pipeline: fan out the XRPL transfers, batch-verify on
+/// the EVM destination, and hand off to `finish_report`.
+async fn run_burst_pipeline(
+    args: &LoadTestArgs,
+    xrpl_client: &XrplClient,
+    wallets: &[XrplWallet],
+    multisig: &AccountId,
+    evm: &EvmTargets,
+    gas_fee_drops: u64,
+) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+
     let test_start = Instant::now();
     let mut report = xrpl_sender::run_burst(
-        &xrpl_client,
-        &wallets,
-        &multisig,
+        xrpl_client,
+        wallets,
+        multisig,
         dest,
-        &dest_address_hex,
+        &evm.dest_address_hex,
         gas_fee_drops,
         "axelar",
-        &axelarnet_gw_addr,
+        &evm.axelarnet_gw_addr,
         src,
         dest,
     )
     .await?;
-    report.destination_address = format!("{its_proxy_addr}");
+    report.destination_address = format!("{}", evm.its_proxy_addr);
 
     // Reuse the existing EVM-destination ITS verifier on the batch of confirmed txs.
     let verification = super::verify::verify_onchain_evm_its(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
-        &format!("{its_proxy_addr}"),
-        evm_gateway_addr,
+        &format!("{}", evm.its_proxy_addr),
+        evm.evm_gateway_addr,
         &args.destination_rpc,
         &mut report.transactions,
     )
@@ -243,7 +384,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     // Suppress unused warnings while the remaining hooks take shape.
     let _ = account_id_to_hex;
 
-    finish_report(&args, &mut report, test_start)
+    finish_report(args, &mut report, test_start)
 }
 
 /// Read `(rpc, multisig_address, network_type)` for an XRPL chain from config.

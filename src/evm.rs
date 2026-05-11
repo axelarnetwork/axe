@@ -2,12 +2,17 @@ use std::fs;
 
 use alloy::{
     hex,
+    network::{Network, ReceiptResponse},
     primitives::{Address, Bytes, FixedBytes, keccak256},
+    providers::PendingTransactionBuilder,
     sol,
     sol_types::{SolCall, SolValue},
 };
 use eyre::Result;
 use serde_json::Value;
+
+use crate::timing::EVM_TX_RECEIPT_TIMEOUT;
+use crate::ui;
 
 sol! {
     #[sol(rpc)]
@@ -141,7 +146,35 @@ sol! {
     #[sol(rpc)]
     contract InterchainTokenService {
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
+        /// Address of the deployed `TokenManager` for the given token id. The
+        /// token manager — not the ITS proxy — is the spender that pulls
+        /// tokens via `safeTransferFrom(from, address(this), amount)` for
+        /// lock/unlock-managed tokens, so canonical-token transfers must
+        /// approve THIS address (not the ITS proxy).
+        function tokenManagerAddress(bytes32 tokenId) external view returns (address);
+        /// Token-manager type for the given token id. The values match the
+        /// `TokenManagerType` enum in axelar-its:
+        ///   0 = NATIVE_INTERCHAIN_TOKEN — mint/burn via the Axelar
+        ///       `InterchainToken`'s owner-only `mint/burn`, no allowance
+        ///       required.
+        ///   1 = MINT_BURN_FROM — `burnFrom` via the token, requires
+        ///       allowance from sender → token manager.
+        ///   2 = LOCK_UNLOCK — `safeTransferFrom` via the token manager,
+        ///       requires allowance from sender → token manager.
+        ///   3 = LOCK_UNLOCK_FEE — same as LOCK_UNLOCK with a fee hook.
+        ///   4 = MINT_BURN — mint/burn via a custom token whose minter is
+        ///       the token manager; no allowance required.
+        ///
+        /// Reverts on older ITS deployments for token ids that have no
+        /// `TokenManager` deployed locally — that revert is itself
+        /// diagnostic (the canonical token isn't registered on this chain).
+        function tokenManagerType(bytes32 tokenId) external view returns (uint8);
         function isTrustedChain(string calldata chainName) external view returns (bool);
+        function itsHubAddress() external view returns (string memory);
+        /// Legacy ITS trust API. Returns the trusted address for a chain — for
+        /// hub-routed chains this is the literal string "hub". For "axelar"
+        /// this returns the actual hub's bech32 address. Reverts if not set.
+        function trustedAddress(string calldata chain) external view returns (string memory);
         function interchainTransfer(
             bytes32 tokenId,
             string calldata destinationChain,
@@ -150,6 +183,12 @@ sol! {
             bytes calldata metadata,
             uint256 gasValue
         ) external payable;
+        function execute(
+            bytes32 commandId,
+            string calldata sourceChain,
+            string calldata sourceAddress,
+            bytes calldata payload
+        ) external;
     }
 
     // InterchainTokenDeployed event (emitted by ITS when a token is deployed)
@@ -167,6 +206,8 @@ sol! {
         function name() external view returns (string);
         function balanceOf(address account) external view returns (uint256);
         function transfer(address to, uint256 amount) external returns (bool);
+        function approve(address spender, uint256 amount) external returns (bool);
+        function allowance(address owner, address spender) external view returns (uint256);
     }
 
     #[sol(rpc)]
@@ -296,7 +337,7 @@ pub fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
             }
         }
     }
-    debug.to_string()
+    debug
 }
 
 /// Compute CREATE address: keccak256(rlp([sender, nonce]))[12..]
@@ -346,4 +387,35 @@ pub fn compute_create_address(sender: Address, nonce: u64) -> Address {
 
     let hash = keccak256(&stream);
     Address::from_slice(&hash[12..])
+}
+
+/// Print the tx hash, wait for the receipt with the standard timeout, and
+/// log the confirmation block. Replaces the 8-line broadcast-and-await block
+/// repeated across the deploy/test/load-test commands.
+///
+/// `label` controls the prefix in both the kv print (e.g. "tx" → `tx: 0x…`)
+/// and the timeout error (e.g. "{label} {tx_hash} timed out after Ns").
+pub async fn broadcast_and_log<N>(
+    pending: PendingTransactionBuilder<N>,
+    label: &str,
+) -> Result<N::ReceiptResponse>
+where
+    N: Network,
+{
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash(label, &format!("{tx_hash}"));
+    ui::info("waiting for confirmation...");
+    let receipt = tokio::time::timeout(EVM_TX_RECEIPT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| {
+            eyre::eyre!(
+                "{label} {tx_hash} timed out after {}s",
+                EVM_TX_RECEIPT_TIMEOUT.as_secs()
+            )
+        })??;
+    ui::success(&format!(
+        "confirmed in block {}",
+        receipt.block_number().unwrap_or(0)
+    ));
+    Ok(receipt)
 }

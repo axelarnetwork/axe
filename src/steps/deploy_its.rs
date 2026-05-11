@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::{
-    ConstAddressDeployer, Create3Deployer, get_salt_from_key, read_artifact_bytecode,
+    ConstAddressDeployer, Create3Deployer, broadcast_and_log, get_salt_from_key,
+    read_artifact_bytecode,
 };
-use crate::state::save_state;
+use crate::state::{Step, save_state};
 use crate::ui;
 use crate::utils::{deployments_root, read_contract_address, update_target_json};
 
@@ -21,7 +22,7 @@ use crate::utils::{deployments_root, read_contract_address, update_target_json};
 pub async fn run(
     ctx: &mut DeployContext,
     step_idx: usize,
-    step: &Value,
+    step: &Step,
     private_key: &str,
 ) -> Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -31,50 +32,24 @@ pub async fn run(
         .connect_http(ctx.rpc_url.parse()?);
 
     // --- Detect deployer change and clear stale helper addresses ---
-    let deployer_key = "itsDeployerAddress";
-    let saved_deployer = step
-        .get(deployer_key)
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let current_deployer = format!("{deployer_addr}");
-    if let Some(ref prev) = saved_deployer {
-        if prev != &current_deployer {
+    let saved_deployer = step.its_address("itsDeployer");
+    if let Some(prev) = saved_deployer {
+        if prev != deployer_addr {
             ui::warn(&format!(
-                "ITS deployer changed from {prev} to {current_deployer}"
+                "ITS deployer changed from {prev} to {deployer_addr}"
             ));
             ui::info("clearing stale helper addresses from step state...");
-            let stale_keys = [
-                "TokenManagerDeployerAddress",
-                "InterchainTokenAddress",
-                "InterchainTokenDeployerAddress",
-                "TokenManagerAddress",
-                "TokenHandlerAddress",
-                "InterchainTokenServiceImplAddress",
-                "InterchainTokenFactoryImplAddress",
-            ];
-            if let Some(s) = ctx.state["steps"]
-                .as_array_mut()
-                .and_then(|a| a.get_mut(step_idx))
-            {
-                for key in &stale_keys {
-                    s.as_object_mut().map(|m| m.remove(*key));
-                }
-                s[deployer_key] = json!(current_deployer);
-            }
-            save_state(&ctx.axelar_id, &ctx.state)?;
+            ctx.state.steps[step_idx].clear_its_helper_addresses();
+            ctx.state.steps[step_idx].set_its_address("itsDeployer", deployer_addr);
+            save_state(&ctx.state)?;
         }
     } else {
         // First run — save deployer address
-        if let Some(s) = ctx.state["steps"]
-            .as_array_mut()
-            .and_then(|a| a.get_mut(step_idx))
-        {
-            s[deployer_key] = json!(current_deployer);
-        }
-        save_state(&ctx.axelar_id, &ctx.state)?;
+        ctx.state.steps[step_idx].set_its_address("itsDeployer", deployer_addr);
+        save_state(&ctx.state)?;
     }
     // Re-read step after potential mutation
-    let step = ctx.state["steps"][step_idx].clone();
+    let step = ctx.state.steps[step_idx].clone();
 
     // --- Read prerequisites ---
     let const_deployer_addr =
@@ -102,16 +77,13 @@ pub async fn run(
         .to_string();
 
     // --- Compute salts ---
-    let its_salt = ctx.state["itsSalt"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no itsSalt in state. Set ITS_SALT in .env and re-run init"))?
-        .to_string();
-    let its_proxy_salt = ctx.state["itsProxySalt"]
-        .as_str()
-        .ok_or_else(|| {
-            eyre::eyre!("no itsProxySalt in state. Set ITS_PROXY_SALT in .env and re-run init")
-        })?
-        .to_string();
+    let its_salt =
+        ctx.state.its_salt.clone().ok_or_else(|| {
+            eyre::eyre!("no itsSalt in state. Set ITS_SALT in .env and re-run init")
+        })?;
+    let its_proxy_salt = ctx.state.its_proxy_salt.clone().ok_or_else(|| {
+        eyre::eyre!("no itsProxySalt in state. Set ITS_PROXY_SALT in .env and re-run init")
+    })?;
 
     let helper_salt = get_salt_from_key(&format!("ITS {its_salt}"));
     let impl_salt = get_salt_from_key(&format!("ITS {its_salt} Implementation"));
@@ -403,7 +375,7 @@ async fn deploy_via_create2<P: Provider>(
     bytecode: Vec<u8>,
     constructor_args: Option<Vec<u8>>,
     salt: FixedBytes<32>,
-    step: &Value,
+    step: &Step,
 ) -> Result<Address> {
     let mut deploy_code = bytecode;
     if let Some(args) = constructor_args {
@@ -418,14 +390,12 @@ async fn deploy_via_create2<P: Provider>(
         .await?;
 
     // Check step state — only trust it if the saved address matches the predicted one
-    let saved_key = format!("{name}Address");
-    if let Some(addr_str) = step.get(&saved_key).and_then(|v| v.as_str()) {
-        let saved: Address = addr_str.parse()?;
-        if saved != predicted {
-            ui::warn(&format!(
-                "{name}: stale address {saved} in step state (predicted {predicted}), ignoring"
-            ));
-        }
+    if let Some(saved) = step.its_address(name)
+        && saved != predicted
+    {
+        ui::warn(&format!(
+            "{name}: stale address {saved} in step state (predicted {predicted}), ignoring"
+        ));
     }
 
     // Check if already deployed at the correct predicted address
@@ -450,18 +420,8 @@ async fn deploy_via_create2<P: Provider>(
                 eyre::eyre!("{name}: send failed: {e}")
             }
         })?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run")
-        })??;
-    ui::success(&format!(
-        "{name}: confirmed in block {} -> {predicted}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    broadcast_and_log(pending, &format!("{name}: tx")).await?;
+    ui::kv(&format!("{name} deployed at"), &format!("{predicted}"));
     Ok(predicted)
 }
 
@@ -498,18 +458,8 @@ async fn deploy_via_create3<P: Provider>(
                 eyre::eyre!("{name}: send failed: {e}")
             }
         })?;
-    let tx_hash = *pending.tx_hash();
-    ui::tx_hash(&format!("{name}: tx"), &format!("{tx_hash}"));
-    ui::info("waiting for confirmation...");
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
-        .await
-        .map_err(|_| {
-            eyre::eyre!("{name}: tx {tx_hash} timed out after 120s — check explorer and re-run")
-        })??;
-    ui::success(&format!(
-        "{name}: confirmed in block {} -> {predicted}",
-        receipt.block_number.unwrap_or(0)
-    ));
+    broadcast_and_log(pending, &format!("{name}: tx")).await?;
+    ui::kv(&format!("{name} deployed at"), &format!("{predicted}"));
     Ok(predicted)
 }
 
@@ -520,13 +470,7 @@ fn save_its_address(
     name: &str,
     addr: Address,
 ) -> Result<()> {
-    let key = format!("{name}Address");
-    if let Some(s) = ctx.state["steps"]
-        .as_array_mut()
-        .and_then(|a| a.get_mut(step_idx))
-    {
-        s[&key] = json!(format!("{addr}"));
-    }
-    save_state(&ctx.axelar_id, &ctx.state)?;
+    ctx.state.steps[step_idx].set_its_address(name, addr);
+    save_state(&ctx.state)?;
     Ok(())
 }

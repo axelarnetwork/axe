@@ -2,18 +2,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use alloy::primitives::keccak256;
+use alloy::sol_types::SolValue;
 use eyre::eyre;
 use futures::future::join_all;
 use indicatif::ProgressBar;
+use rand::Rng;
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::Signer;
 use tokio::sync::Mutex;
-
-use alloy::primitives::keccak256;
-use alloy::sol_types::SolValue;
-use rand::Rng;
-
-use solana_sdk::pubkey::Pubkey;
 
 use super::LoadTestArgs;
 use super::keypairs;
@@ -35,7 +34,7 @@ fn fund_hint(pubkey: &solana_sdk::pubkey::Pubkey) -> String {
 
 /// Generate a unique ABI-encoded payload compatible with `SenderReceiver._execute`.
 /// The contract does `abi.decode(payload_, (string))`, so we must ABI-encode the string.
-pub fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
+pub(super) fn make_payload(custom: &Option<Vec<u8>>) -> Vec<u8> {
     match custom {
         Some(p) => p.clone(),
         None => {
@@ -69,7 +68,6 @@ fn prepare_keypairs(
     let derived = keypairs::derive_keypairs(main_keypair, num_keys)?;
     let balances = keypairs::ensure_funded(solana_rpc, main_keypair, &derived)?;
 
-    #[allow(clippy::float_arithmetic)]
     let total_sol: f64 = balances.iter().sum::<u64>() as f64 / 1e9;
     ui::success(&format!(
         "funded {} keys ({:.4} SOL)",
@@ -87,7 +85,6 @@ fn prepare_keypairs(
 ///
 /// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
 /// `SenderReceiver._execute`. When false, payloads use the Solana executable format.
-#[allow(clippy::too_many_lines, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     destination_address: &str,
@@ -98,13 +95,12 @@ pub async fn run_load_test_with_metrics(
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
 
     // Check main wallet balance
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+    let rpc_client = RpcClient::new_with_commitment(
         &args.source_rpc,
         solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
@@ -186,7 +182,6 @@ pub async fn run_load_test_with_metrics(
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
     let compute_units: Vec<u64> = metrics.iter().filter_map(|m| m.compute_units).collect();
 
-    #[allow(clippy::cast_precision_loss)]
     let report = LoadTestReport {
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
@@ -256,7 +251,6 @@ fn send_sol_tx(
             metrics
         }
         Err(e) => {
-            #[allow(clippy::cast_possible_truncation)]
             let elapsed_ms = submit_start.elapsed().as_millis() as u64;
             TxMetrics {
                 signature: String::new(),
@@ -280,7 +274,6 @@ fn send_sol_tx(
 }
 
 /// Run Solana sustained load test at a controlled TPS rate.
-#[allow(clippy::float_arithmetic)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     evm_destination: bool,
@@ -289,20 +282,25 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     send_done: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     spinner_tx: tokio::sync::oneshot::Sender<indicatif::ProgressBar>,
 ) -> eyre::Result<LoadTestReport> {
-    let tps = args.tps.unwrap() as usize;
-    let duration_secs = args.duration_secs.unwrap();
+    // `run_sustained` is only called from sustained-mode dispatch, where
+    // both `tps` and `duration_secs` have already been validated as `Some`.
+    let tps = args
+        .tps
+        .expect("run_sustained called outside sustained mode") as usize;
+    let duration_secs = args
+        .duration_secs
+        .expect("run_sustained called outside sustained mode");
     let key_cycle = args.key_cycle as usize;
     let pool_size = tps * key_cycle;
     let total_expected = tps as u64 * duration_secs;
 
     let main_keypair = solana::load_keypair(args.keypair.as_deref())?;
-    let rpc_client = solana_client::rpc_client::RpcClient::new_with_commitment(
+    let rpc_client = RpcClient::new_with_commitment(
         &args.source_rpc,
         solana_commitment_config::CommitmentConfig::finalized(),
     );
     let pubkey = main_keypair.pubkey();
     let balance = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    #[allow(clippy::float_arithmetic)]
     let sol = balance as f64 / 1e9;
     ui::kv("wallet", &format!("{pubkey} ({sol:.4} SOL)"));
     if balance == 0 {
@@ -357,14 +355,11 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let source_chain = args.source_axelar_id.clone();
 
     // Check if source chain has a voting verifier (for correct initial phase).
-    let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
-        &args.config,
-        &format!(
-            "/axelar/contracts/VotingVerifier/{}/address",
-            args.source_chain
-        ),
-    )
-    .is_ok();
+    let cfg = crate::config::ChainsConfig::load(&args.config)?;
+    let has_voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", &args.source_chain)
+        .is_ok();
 
     let make_task: sustained::MakeTask = Box::new(move |key_idx: usize, _nonce: Option<u64>| {
         let kp = Arc::clone(&keypairs_pool[key_idx]);
@@ -381,7 +376,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         let has_vv = has_voting_verifier;
 
         Box::pin(async move {
-            let result = tokio::task::spawn_blocking(move || {
+            let mut result = tokio::task::spawn_blocking(move || {
                 send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
             })
             .await
@@ -406,15 +401,22 @@ pub(super) async fn run_sustained_load_test_with_metrics(
             if result.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_solana(
+                match super::verify::tx_to_pending_solana(
                     &result,
                     0,
                     &sc,
                     has_vv,
                     super::verify::SourceChainType::Svm,
-                );
-                if tx_sender.send(pending).is_err() {
-                    eprintln!("warning: verification channel closed, tx won't be verified");
+                ) {
+                    Ok(pending) => {
+                        if tx_sender.send(pending).is_err() {
+                            eprintln!("warning: verification channel closed, tx won't be verified");
+                        }
+                    }
+                    Err(e) => {
+                        result.success = false;
+                        result.error = Some(format!("failed to build verification state: {e}"));
+                    }
                 }
             }
             result
@@ -442,7 +444,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     ))
 }
 
-#[allow(clippy::semicolon_outside_block, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn execute_and_record(
     solana_rpc: &str,
     keypair: Arc<dyn Signer + Send + Sync>,
@@ -470,7 +472,6 @@ async fn execute_and_record(
             metrics_list.lock().await.push(metrics);
         }
         Err(e) => {
-            #[allow(clippy::cast_possible_truncation)]
             let elapsed_ms = submit_start.elapsed().as_millis() as u64;
             let metrics = TxMetrics {
                 signature: String::new(),

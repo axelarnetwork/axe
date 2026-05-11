@@ -102,7 +102,6 @@ pub fn make_executable_payload(custom: &Option<Vec<u8>>, counter_pda: &Pubkey) -
 ///
 /// When `evm_destination` is true, payloads are ABI-encoded strings for EVM
 /// `SenderReceiver._execute`. When false, payloads use the Solana gateway format.
-#[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
 pub async fn run_load_test_with_metrics(
     args: &LoadTestArgs,
     sender_receiver_addr: Address,
@@ -251,7 +250,6 @@ pub async fn run_load_test_with_metrics(
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss)]
     let report = LoadTestReport {
         source_chain: args.source_chain.clone(),
         destination_chain: args.destination_chain.clone(),
@@ -305,7 +303,6 @@ pub async fn run_load_test_with_metrics(
 /// (including QuikNode) do not reliably return pending-mempool txs in
 /// `eth_getTransactionCount(addr, "pending")`, causing nonce collisions when the same
 /// key fires again within 3s before its previous tx confirms.
-#[allow(clippy::too_many_arguments)]
 async fn execute_and_record_evm<P: Provider>(
     provider: &P,
     sender_receiver_addr: Address,
@@ -337,7 +334,6 @@ async fn execute_and_record_evm<P: Provider>(
             let tx_hash = *pending.tx_hash();
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     // Extract ContractCall event index
@@ -388,7 +384,7 @@ async fn execute_and_record_evm<P: Provider>(
 ///
 /// Uses a rotating pool of `tps * key_cycle` derived wallets, cycling keys
 /// every `key_cycle` seconds. Sends `tps` txs per second for `duration_secs`.
-#[allow(clippy::too_many_arguments, clippy::float_arithmetic)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_sustained_load_test_with_metrics(
     args: &LoadTestArgs,
     sender_receiver_addr: Address,
@@ -400,8 +396,14 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     verify_spinner_tx: tokio::sync::oneshot::Sender<indicatif::ProgressBar>,
     evm_destination: bool,
 ) -> eyre::Result<LoadTestReport> {
-    let tps = args.tps.unwrap() as usize;
-    let duration_secs = args.duration_secs.unwrap();
+    // `run_sustained` is only called from sustained-mode dispatch, where
+    // both `tps` and `duration_secs` have already been validated as `Some`.
+    let tps = args
+        .tps
+        .expect("run_sustained called outside sustained mode") as usize;
+    let duration_secs = args
+        .duration_secs
+        .expect("run_sustained called outside sustained mode");
     let key_cycle = args.key_cycle as usize;
     let pool_size = tps * key_cycle;
     let total_expected = tps as u64 * duration_secs;
@@ -471,14 +473,11 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let dest_chain = args.destination_chain.clone();
     let dest_addr = destination_address.to_string();
     let rpc_url_str = evm_rpc_url.to_string();
-    let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
-        &args.config,
-        &format!(
-            "/axelar/contracts/VotingVerifier/{}/address",
-            args.source_chain
-        ),
-    )
-    .is_ok();
+    let cfg = crate::config::ChainsConfig::load(&args.config)?;
+    let has_voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", &args.source_chain)
+        .is_ok();
     let source_chain = args.source_axelar_id.clone();
 
     let make_task: super::sustained::MakeTask =
@@ -502,7 +501,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let result =
+                let mut result =
                     execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
                 // Stream successful txs to the concurrent verification pipeline.
                 if result.success
@@ -510,15 +509,24 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                 {
                     // Use signature length as a proxy for idx — the verify task
                     // will overwrite idx from the timings vec anyway.
-                    let pending = super::verify::tx_to_pending_solana(
+                    match super::verify::tx_to_pending_solana(
                         &result,
                         0,
                         &sc,
                         has_vv,
                         super::verify::SourceChainType::Evm,
-                    );
-                    if tx_sender.send(pending).is_err() {
-                        eprintln!("warning: verification channel closed, tx won't be verified");
+                    ) {
+                        Ok(pending) => {
+                            if tx_sender.send(pending).is_err() {
+                                eprintln!(
+                                    "warning: verification channel closed, tx won't be verified"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            result.success = false;
+                            result.error = Some(format!("failed to build verification state: {e}"));
+                        }
                     }
                 }
                 result
@@ -555,7 +563,6 @@ fn make_failure_with_hash(
     error: &str,
     tx_hash: Option<alloy::primitives::TxHash>,
 ) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),

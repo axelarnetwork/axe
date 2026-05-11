@@ -14,6 +14,7 @@ use eyre::eyre;
 use futures::future::join_all;
 use rand::Rng;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signer::Signer;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
@@ -25,10 +26,9 @@ use super::{
 use crate::commands::test_its::{
     extract_contract_call_event, extract_token_deployed_event, generate_salt,
 };
-use crate::cosmos::read_axelar_contract_field;
+use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
-use crate::utils::read_contract_address;
 
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
@@ -115,22 +115,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     validate_evm_rpc(&evm_rpc_url).await?;
     validate_solana_rpc(&args.destination_rpc).await?;
 
-    if read_axelar_contract_field(
-        &args.config,
-        &format!("/axelar/contracts/Gateway/{dest}/address"),
-    )
-    .is_err()
-    {
-        eyre::bail!(
-            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
-        );
-    }
-
-    if read_axelar_contract_field(&args.config, "/axelar/contracts/AxelarnetGateway/address")
-        .is_err()
-    {
-        eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
-    }
+    let cfg = ChainsConfig::load(&args.config)?;
+    verify_axelar_prerequisites(&cfg, dest)?;
 
     ui::kv("source", src);
     ui::kv("destination", dest);
@@ -139,8 +125,139 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         "ITS with data (interchainTransfer + memo execute)",
     );
 
-    // --- EVM signer ---
-    let private_key = args.private_key.as_ref().ok_or_else(|| {
+    let evm = init_evm_signer_and_provider(&evm_rpc_url, args.private_key.as_deref()).await?;
+    let its_addrs = resolve_its_addresses(&cfg, src)?;
+
+    let write_provider = ProviderBuilder::new()
+        .wallet(evm.signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
+
+    let memo_program_id = super::evm_sender::memo_program_id();
+    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
+    ui::kv("memo program", &memo_program_id.to_string());
+    ui::kv("counter PDA", &counter_pda.to_string());
+
+    let (gas_value_wei, gas_value) = parse_gas_value_wei(args.gas_value.as_deref(), src)?;
+
+    let sizing = compute_run_sizing(&args);
+    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 1 token
+    let amount_per_key = amount_per_tx * U256::from(100);
+
+    let (token_id, token_addr, deploy_message_id) = resolve_its_token(
+        &args,
+        &write_provider,
+        &its_addrs,
+        evm.deployer_address,
+        gas_value,
+        &sizing,
+        amount_per_key,
+    )
+    .await?;
+
+    wait_for_remote_deploy_if_needed(&args, deploy_message_id.as_deref()).await?;
+
+    let extra_accounts = args.extra_accounts;
+    let token_mint_ata =
+        setup_extra_accounts_ata(&args, token_id, memo_program_id, extra_accounts)?;
+
+    let derived = keypairs::derive_evm_signers(&evm.main_key, sizing.num_keys)?;
+    ui::info(&format!("derived {} EVM signing keys", derived.len()));
+
+    let gas_extra_per_key = compute_gas_extra_per_key(&sizing, &args, gas_value_wei);
+    fund_and_distribute(
+        &evm_rpc_url,
+        &evm.signer,
+        &derived,
+        token_addr,
+        amount_per_key,
+        gas_extra_per_key,
+    )
+    .await?;
+
+    // Destination is the memo program (not a wallet), since we want it to
+    // execute with the interchain token.
+    let receiver_bytes = Bytes::from(memo_program_id.to_bytes().to_vec());
+
+    let transfer_ctx = TransferContext {
+        its_proxy_addr: its_addrs.its_proxy_addr,
+        token_id,
+        receiver_bytes,
+        amount_per_tx,
+        gas_value,
+        counter_pda,
+        extra_accounts,
+        token_mint_ata,
+    };
+
+    if !sizing.burst_mode {
+        run_sustained_pipeline(&args, &cfg, &evm_rpc_url, &derived, &sizing, &transfer_ctx).await
+    } else {
+        run_burst_pipeline(&args, &evm_rpc_url, &derived, &sizing, &transfer_ctx).await
+    }
+}
+
+/// EVM signer + read provider bundle, threaded through the orchestrator.
+struct EvmSetup {
+    signer: PrivateKeySigner,
+    deployer_address: Address,
+    main_key: [u8; 32],
+}
+
+/// ITS factory + service addresses resolved from config for the source chain.
+struct ItsAddrs {
+    its_factory_addr: Address,
+    its_proxy_addr: Address,
+}
+
+/// Sizing parameters derived from CLI flags: chooses burst vs sustained,
+/// number of ephemeral wallets, and per-test totals.
+struct RunSizing {
+    burst_mode: bool,
+    sustained_params: Option<(u64, u64)>,
+    num_keys: usize,
+    total_expected: u64,
+    num_txs: usize,
+}
+
+/// Per-tx parameters threaded into the sustained / burst pipelines.
+struct TransferContext {
+    its_proxy_addr: Address,
+    token_id: FixedBytes<32>,
+    receiver_bytes: Bytes,
+    amount_per_tx: U256,
+    gas_value: U256,
+    counter_pda: Pubkey,
+    extra_accounts: u32,
+    token_mint_ata: Option<Pubkey>,
+}
+
+/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
+/// AxelarnetGateway). Bails with the existing error strings if either is
+/// missing.
+fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> eyre::Result<()> {
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+        );
+    }
+
+    if cfg
+        .axelar
+        .global_contract_address("AxelarnetGateway")
+        .is_err()
+    {
+        eyre::bail!("no AxelarnetGateway address in config — required for ITS load test");
+    }
+    Ok(())
+}
+
+/// Build the EVM signer, validate the deployer balance, and emit the wallet
+/// UI line.
+async fn init_evm_signer_and_provider(
+    evm_rpc_url: &str,
+    private_key: Option<&str>,
+) -> eyre::Result<EvmSetup> {
+    let private_key = private_key.ok_or_else(|| {
         eyre!("EVM private key required. Set EVM_PRIVATE_KEY env var or use --private-key")
     })?;
     let signer: PrivateKeySigner = private_key.parse()?;
@@ -150,38 +267,51 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let main_key: [u8; 32] = signer.to_bytes().into();
 
-    #[allow(clippy::float_arithmetic)]
     {
         let balance: u128 = read_provider.get_balance(deployer_address).await?.to();
         let eth = balance as f64 / 1e18;
         ui::kv("wallet", &format!("{deployer_address} ({eth:.6} ETH)"));
     }
 
-    // --- ITS contract addresses ---
-    let its_factory_addr = read_contract_address(&args.config, src, "InterchainTokenFactory")?;
-    let its_proxy_addr = read_contract_address(&args.config, src, "InterchainTokenService")?;
+    Ok(EvmSetup {
+        signer,
+        deployer_address,
+        main_key,
+    })
+}
+
+/// Resolve the ITS factory and service addresses from config and emit the
+/// matching UI lines.
+fn resolve_its_addresses(cfg: &ChainsConfig, src: &str) -> eyre::Result<ItsAddrs> {
+    let src_cfg = cfg
+        .chains
+        .get(src)
+        .ok_or_else(|| eyre!("source chain '{src}' not found in config"))?;
+    let its_factory_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenFactory", src)?
+        .parse()?;
+    let its_proxy_addr: alloy::primitives::Address = src_cfg
+        .contract_address("InterchainTokenService", src)?
+        .parse()?;
 
     ui::address("ITS factory", &format!("{its_factory_addr}"));
     ui::address("ITS service", &format!("{its_proxy_addr}"));
 
-    let write_provider = ProviderBuilder::new()
-        .wallet(signer.clone())
-        .connect_http(evm_rpc_url.parse()?);
+    Ok(ItsAddrs {
+        its_factory_addr,
+        its_proxy_addr,
+    })
+}
 
-    // --- Memo program counter PDA ---
-    let memo_program_id = super::evm_sender::memo_program_id();
-    let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
-    ui::kv("memo program", &memo_program_id.to_string());
-    ui::kv("counter PDA", &counter_pda.to_string());
-
-    // --- Gas value ---
-    let gas_value_wei: u128 = match &args.gas_value {
+/// Parse the user-supplied gas value (wei), defaulting to
+/// `default_gas_value_wei`, and emit the matching UI line.
+fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<(u128, U256)> {
+    let gas_value_wei: u128 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => default_gas_value_wei(src),
     };
     let gas_value = U256::from(gas_value_wei);
 
-    #[allow(clippy::float_arithmetic)]
     {
         ui::kv(
             "gas value",
@@ -191,25 +321,50 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             ),
         );
     }
+    Ok((gas_value_wei, gas_value))
+}
 
-    // --- Token setup (reuses same logic as its_evm_to_sol) ---
-    let burst_mode = !(args.tps.is_some() && args.duration_secs.is_some());
+/// Decide burst vs sustained, ephemeral wallet count, and per-test totals.
+fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
+    let sustained_params = args.tps.zip(args.duration_secs);
+    let burst_mode = sustained_params.is_none();
     let (num_keys, total_expected) = if burst_mode {
         let n = args.num_txs.max(1) as usize;
         (n, args.num_txs.max(1))
     } else {
-        let tps = args.tps.unwrap() as usize;
-        let dur = args.duration_secs.unwrap();
+        let (tps, dur) = sustained_params.expect("burst_mode is false");
+        let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
     let num_txs = num_keys;
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 1 token
-    let amount_per_key = amount_per_tx * U256::from(100);
+
+    RunSizing {
+        burst_mode,
+        sustained_params,
+        num_keys,
+        total_expected,
+        num_txs,
+    }
+}
+
+/// Resolve the ITS token: prefer `--token-id`, then a cached entry with
+/// sufficient supply, otherwise deploy a fresh interchain token.
+async fn resolve_its_token<P: Provider>(
+    args: &LoadTestArgs,
+    write_provider: &P,
+    its_addrs: &ItsAddrs,
+    deployer_address: Address,
+    gas_value: U256,
+    sizing: &RunSizing,
+    amount_per_key: U256,
+) -> eyre::Result<(FixedBytes<32>, Address, Option<String>)> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
     let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 
-    let its_service = InterchainTokenService::new(its_proxy_addr, &write_provider);
+    let its_service = InterchainTokenService::new(its_addrs.its_proxy_addr, write_provider);
 
-    let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
+    if let Some(ref tid) = args.token_id {
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
             .interchainTokenAddress(token_id)
@@ -218,305 +373,343 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
-        (token_id, addr, None)
-    } else {
-        let cache = read_its_cache(src, dest);
-        let cached = cache
-            .get("tokenId")
-            .and_then(|v| v.as_str())
-            .and_then(|tid| tid.parse::<FixedBytes<32>>().ok())
-            .and_then(|tid| {
-                cache
-                    .get("tokenAddress")
-                    .and_then(|v| v.as_str())
-                    .and_then(|a| a.parse::<Address>().ok())
-                    .map(|addr| (tid, addr))
-            });
+        return Ok((token_id, addr, None));
+    }
 
-        if let Some((tid, addr)) = cached {
-            let token = ERC20::new(addr, &write_provider);
-            let needed = amount_per_key * U256::from(num_keys);
-            let balance = token
-                .balanceOf(deployer_address)
-                .call()
-                .await
-                .unwrap_or_default();
-            if balance >= needed {
-                ui::info(&format!("reusing cached ITS token: {addr}"));
-                ui::kv("token ID (cached)", &format!("{tid}"));
-                (tid, addr, None)
-            } else {
-                ui::warn("cached token supply insufficient, deploying fresh...");
-                deploy_its_token(
-                    &write_provider,
-                    its_factory_addr,
-                    deployer_address,
-                    dest,
-                    total_supply,
-                    src,
-                    gas_value,
-                )
-                .await?
-            }
-        } else {
-            deploy_its_token(
-                &write_provider,
-                its_factory_addr,
-                deployer_address,
-                dest,
-                total_supply,
-                src,
-                gas_value,
-            )
-            .await?
+    let cache = read_its_cache(src, dest);
+    let cached = cache
+        .get("tokenId")
+        .and_then(|v| v.as_str())
+        .and_then(|tid| tid.parse::<FixedBytes<32>>().ok())
+        .and_then(|tid| {
+            cache
+                .get("tokenAddress")
+                .and_then(|v| v.as_str())
+                .and_then(|a| a.parse::<Address>().ok())
+                .map(|addr| (tid, addr))
+        });
+
+    if let Some((tid, addr)) = cached {
+        let token = ERC20::new(addr, write_provider);
+        let needed = amount_per_key * U256::from(sizing.num_keys);
+        let balance = token
+            .balanceOf(deployer_address)
+            .call()
+            .await
+            .unwrap_or_default();
+        if balance >= needed {
+            ui::info(&format!("reusing cached ITS token: {addr}"));
+            ui::kv("token ID (cached)", &format!("{tid}"));
+            return Ok((tid, addr, None));
         }
-    };
+        ui::warn("cached token supply insufficient, deploying fresh...");
+    }
 
-    // Wait for the remote deploy to propagate through the hub to Solana.
-    if let Some(ref deploy_msg_id) = deploy_message_id {
+    deploy_its_token(
+        write_provider,
+        its_addrs.its_factory_addr,
+        deployer_address,
+        dest,
+        total_supply,
+        src,
+        gas_value,
+    )
+    .await
+}
+
+/// If a fresh remote deploy was just sent, block until it propagates through
+/// the hub to Solana. No-op when the token came from cache or `--token-id`.
+async fn wait_for_remote_deploy_if_needed(
+    args: &LoadTestArgs,
+    deploy_message_id: Option<&str>,
+) -> eyre::Result<()> {
+    if let Some(deploy_msg_id) = deploy_message_id {
         super::verify::wait_for_its_remote_deploy_to_solana(
             &args.config,
-            src,
-            dest,
+            &args.source_chain,
+            &args.destination_chain,
             deploy_msg_id,
             &args.destination_rpc,
         )
         .await?;
     }
+    Ok(())
+}
 
-    // --- Extra accounts for ALT testing ---
-    let extra_accounts = args.extra_accounts;
-    let token_mint_ata = if extra_accounts > 0 {
-        // Derive the ITS token mint on Solana and compute an ATA for the memo program.
-        let (its_root, _) = crate::solana::find_its_root_pda();
-        let (sol_mint, _) =
-            crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
-        let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
-        let ata_program = Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-        let ata = Pubkey::find_program_address(
-            &[
-                memo_program_id.as_ref(),
-                token_program.as_ref(),
-                sol_mint.as_ref(),
+/// When `extra_accounts > 0`, derive the ITS token mint ATA for the memo
+/// program on Solana, ensure it exists, and return it. Otherwise no-op.
+fn setup_extra_accounts_ata(
+    args: &LoadTestArgs,
+    token_id: FixedBytes<32>,
+    memo_program_id: Pubkey,
+    extra_accounts: u32,
+) -> eyre::Result<Option<Pubkey>> {
+    if extra_accounts == 0 {
+        return Ok(None);
+    }
+
+    // Derive the ITS token mint on Solana and compute an ATA for the memo program.
+    let (its_root, _) = crate::solana::find_its_root_pda();
+    let (sol_mint, _) = crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
+    let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let ata_program = Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+    let ata = Pubkey::find_program_address(
+        &[
+            memo_program_id.as_ref(),
+            token_program.as_ref(),
+            sol_mint.as_ref(),
+        ],
+        &ata_program,
+    )
+    .0;
+    ui::kv("extra accounts", &extra_accounts.to_string());
+    ui::address("first extra (ATA)", &ata.to_string());
+
+    // Create the ATA on Solana if it doesn't exist yet, so the memo program
+    // can transfer tokens to it during execution.
+    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
+    let sol_rpc = solana_client::rpc_client::RpcClient::new_with_commitment(
+        &args.destination_rpc,
+        solana_commitment_config::CommitmentConfig::finalized(),
+    );
+    if sol_rpc.get_account_data(&ata).is_err() {
+        ui::info("creating ATA on Solana for memo program...");
+        let create_ata_ix = solana_sdk::instruction::Instruction {
+            program_id: ata_program,
+            accounts: vec![
+                solana_sdk::instruction::AccountMeta::new(sol_keypair.pubkey(), true),
+                solana_sdk::instruction::AccountMeta::new(ata, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(memo_program_id, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(sol_mint, false),
+                solana_sdk::instruction::AccountMeta::new_readonly(
+                    Pubkey::from_str_const("11111111111111111111111111111111"),
+                    false,
+                ),
+                solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
             ],
-            &ata_program,
-        )
-        .0;
-        ui::kv("extra accounts", &extra_accounts.to_string());
-        ui::address("first extra (ATA)", &ata.to_string());
-
-        // Create the ATA on Solana if it doesn't exist yet, so the memo program
-        // can transfer tokens to it during execution.
-        let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-        use solana_sdk::signer::Signer;
-        let sol_rpc = solana_client::rpc_client::RpcClient::new_with_commitment(
-            &args.destination_rpc,
-            solana_commitment_config::CommitmentConfig::finalized(),
+            data: vec![1], // CreateIdempotent
+        };
+        let blockhash = sol_rpc.get_latest_blockhash()?;
+        let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+            &[create_ata_ix],
+            Some(&sol_keypair.pubkey()),
+            &[&sol_keypair],
+            blockhash,
         );
-        if sol_rpc.get_account_data(&ata).is_err() {
-            ui::info("creating ATA on Solana for memo program...");
-            let create_ata_ix = solana_sdk::instruction::Instruction {
-                program_id: ata_program,
-                accounts: vec![
-                    solana_sdk::instruction::AccountMeta::new(sol_keypair.pubkey(), true),
-                    solana_sdk::instruction::AccountMeta::new(ata, false),
-                    solana_sdk::instruction::AccountMeta::new_readonly(memo_program_id, false),
-                    solana_sdk::instruction::AccountMeta::new_readonly(sol_mint, false),
-                    solana_sdk::instruction::AccountMeta::new_readonly(
-                        Pubkey::from_str_const("11111111111111111111111111111111"),
-                        false,
-                    ),
-                    solana_sdk::instruction::AccountMeta::new_readonly(token_program, false),
-                ],
-                data: vec![1], // CreateIdempotent
-            };
-            let blockhash = sol_rpc.get_latest_blockhash()?;
-            let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-                &[create_ata_ix],
-                Some(&sol_keypair.pubkey()),
-                &[&sol_keypair],
-                blockhash,
-            );
-            sol_rpc
-                .send_and_confirm_transaction(&tx)
-                .map_err(|e| eyre!("failed to create ATA: {e}"))?;
-            ui::success("ATA created");
-        } else {
-            ui::info("ATA already exists");
-        }
-
-        Some(ata)
+        sol_rpc
+            .send_and_confirm_transaction(&tx)
+            .map_err(|e| eyre!("failed to create ATA: {e}"))?;
+        ui::success("ATA created");
     } else {
-        None
-    };
+        ui::info("ATA already exists");
+    }
 
-    // --- Derive N EVM signers ---
-    let derived = keypairs::derive_evm_signers(&main_key, num_keys)?;
-    ui::info(&format!("derived {} EVM signing keys", derived.len()));
+    Ok(Some(ata))
+}
 
-    // Fund derived wallets.
-    let funding_provider = ProviderBuilder::new()
-        .wallet(signer.clone())
-        .connect_http(evm_rpc_url.parse()?);
-    let gas_extra_per_key = if burst_mode {
+/// Per-key extra gas budget: 1x in burst mode, buffered rounds-per-key in
+/// sustained mode.
+fn compute_gas_extra_per_key(sizing: &RunSizing, args: &LoadTestArgs, gas_value_wei: u128) -> u128 {
+    if sizing.burst_mode {
         gas_value_wei
     } else {
-        let dur = args.duration_secs.unwrap();
+        let dur = sizing.sustained_params.expect("burst_mode is false").1;
         let rounds = dur.div_ceil(args.key_cycle);
         let buffered = rounds + rounds / 5 + 1;
         gas_value_wei.saturating_mul(buffered as u128)
-    };
-    keypairs::ensure_funded_evm_with_extra(&funding_provider, &signer, &derived, gas_extra_per_key)
+    }
+}
+
+/// Fund the derived EVM wallets with the gas budget for the planned run and
+/// distribute the per-key ITS token allocation.
+async fn fund_and_distribute(
+    evm_rpc_url: &str,
+    signer: &PrivateKeySigner,
+    derived: &[PrivateKeySigner],
+    token_addr: Address,
+    amount_per_key: U256,
+    gas_extra_per_key: u128,
+) -> eyre::Result<()> {
+    let funding_provider = ProviderBuilder::new()
+        .wallet(signer.clone())
+        .connect_http(evm_rpc_url.parse()?);
+    keypairs::ensure_funded_evm_with_extra(&funding_provider, signer, derived, gas_extra_per_key)
         .await?;
 
-    // --- Distribute ITS tokens to derived wallets ---
     let token_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, &derived, amount_per_key)
+    super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, derived, amount_per_key)
         .await?;
+    Ok(())
+}
 
-    // Destination is the memo program (not a wallet), since we want it to
-    // execute with the interchain token.
-    let receiver_bytes = Bytes::from(memo_program_id.to_bytes().to_vec());
+/// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
+/// sustained sender, stitch amplifier timings into the report, and hand off
+/// to `finish_report`.
+async fn run_sustained_pipeline(
+    args: &LoadTestArgs,
+    cfg: &ChainsConfig,
+    evm_rpc_url: &str,
+    derived: &[PrivateKeySigner],
+    sizing: &RunSizing,
+    transfer_ctx: &TransferContext,
+) -> eyre::Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let tps = sizing.sustained_params.expect("burst_mode is false").0 as usize;
+    let duration_secs = sizing.sustained_params.expect("burst_mode is false").1;
+    let key_cycle = args.key_cycle as usize;
+    let rpc_url_str = evm_rpc_url.to_string();
 
-    // Build the metadata once (counter PDA is the same for all txs, memo varies per tx).
-    // We build per-tx in the send function so each tx gets a unique memo.
+    let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    let mut nonces: Vec<u64> = Vec::with_capacity(sizing.num_keys);
+    for signer in derived {
+        let n = nonce_provider
+            .get_transaction_count(signer.address())
+            .await?;
+        nonces.push(n);
+    }
 
-    // === SUSTAINED MODE ===
-    if !burst_mode {
-        let tps = args.tps.unwrap() as usize;
-        let duration_secs = args.duration_secs.unwrap();
-        let key_cycle = args.key_cycle as usize;
-        let rpc_url_str = evm_rpc_url.clone();
+    // Streaming verification: run concurrently with sends.
+    let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
 
-        let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
-        let mut nonces: Vec<u64> = Vec::with_capacity(num_keys);
-        for signer in &derived {
-            let n = nonce_provider
-                .get_transaction_count(signer.address())
-                .await?;
-            nonces.push(n);
-        }
-
-        // Streaming verification: run concurrently with sends.
-        let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
-        let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
-
-        // Check if source chain has a voting verifier.
-        let has_voting_verifier = crate::cosmos::read_axelar_contract_field(
-            &args.config,
-            &format!(
-                "/axelar/contracts/VotingVerifier/{}/address",
-                args.source_chain
-            ),
-        )
+    // Check if source chain has a voting verifier.
+    let has_voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", &args.source_chain)
         .is_ok();
 
-        let vconfig = args.config.clone();
-        let vsource = args.source_axelar_id.clone();
-        let vdest = args.destination_axelar_id.clone();
-        let vdest_rpc = args.destination_rpc.clone();
-        let vdone = std::sync::Arc::clone(&send_done);
-        let verify_handle = tokio::spawn(async move {
-            let spinner = spinner_rx.await.expect("spinner channel dropped");
-            super::verify::verify_onchain_solana_its_streaming(
-                &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
-            )
-            .await
+    let vconfig = args.config.clone();
+    let vsource = args.source_axelar_id.clone();
+    let vdest = args.destination_axelar_id.clone();
+    let vdest_rpc = args.destination_rpc.clone();
+    let vdone = std::sync::Arc::clone(&send_done);
+    let verify_handle = tokio::spawn(async move {
+        let spinner = spinner_rx.await.expect("spinner channel dropped");
+        super::verify::verify_onchain_solana_its_streaming(
+            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
+        )
+        .await
+    });
+
+    let spinner = ui::wait_spinner(&format!(
+        "[0/{duration_secs}s] starting sustained ITS-with-data send..."
+    ));
+    let _ = spinner_tx.send(spinner.clone());
+
+    let test_start = Instant::now();
+    let dest_chain_s = dest.to_string();
+    let counter_pda_clone = transfer_ctx.counter_pda;
+    let ea = transfer_ctx.extra_accounts;
+    let tma = transfer_ctx.token_mint_ata;
+    let gas_value = transfer_ctx.gas_value;
+    let receiver_bytes = transfer_ctx.receiver_bytes.clone();
+    let amount_per_tx = transfer_ctx.amount_per_tx;
+    let its_proxy_addr = transfer_ctx.its_proxy_addr;
+    let token_id = transfer_ctx.token_id;
+    let derived_owned: Vec<PrivateKeySigner> = derived.to_vec();
+
+    let make_task: super::sustained::MakeTask =
+        Box::new(move |key_idx: usize, nonce: Option<u64>| {
+            let dc = dest_chain_s.clone();
+            let gv = gas_value;
+            let rb = receiver_bytes.clone();
+            let amt = amount_per_tx;
+            let its_proxy = its_proxy_addr;
+            let tid = token_id;
+            let url = rpc_url_str.clone();
+            let cpda = counter_pda_clone;
+            let vtx = verify_tx.clone();
+            let has_vv = has_voting_verifier;
+
+            let provider = ProviderBuilder::new()
+                .wallet(derived_owned[key_idx].clone())
+                .connect_http(url.parse().expect("invalid RPC URL"));
+
+            Box::pin(async move {
+                let mut result = execute_interchain_transfer_with_data(
+                    &provider,
+                    its_proxy,
+                    tid,
+                    &dc,
+                    &rb,
+                    amt,
+                    gv,
+                    &cpda,
+                    ea,
+                    tma.as_ref(),
+                    nonce,
+                )
+                .await;
+                // Stream successful txs to the concurrent verification pipeline.
+                if result.success {
+                    match super::verify::tx_to_pending_its(&result, has_vv) {
+                        Ok(pending) => {
+                            let _ = vtx.send(pending);
+                        }
+                        Err(e) => {
+                            result.success = false;
+                            result.error = Some(format!("failed to build verification state: {e}"));
+                        }
+                    }
+                }
+                result
+            })
         });
 
-        let spinner = ui::wait_spinner(&format!(
-            "[0/{duration_secs}s] starting sustained ITS-with-data send..."
-        ));
-        let _ = spinner_tx.send(spinner.clone());
+    let result = super::sustained::run_sustained_loop(
+        tps,
+        duration_secs,
+        key_cycle,
+        Some(nonces),
+        make_task,
+        Some(send_done),
+        spinner,
+    )
+    .await;
 
-        let test_start = Instant::now();
-        let dest_chain_s = dest.to_string();
-        let counter_pda_clone = counter_pda;
-        let ea = extra_accounts;
-        let tma = token_mint_ata;
+    let mut report = super::sustained::build_sustained_report(
+        result,
+        src,
+        dest,
+        &format!("{}", transfer_ctx.its_proxy_addr),
+        sizing.total_expected,
+        sizing.num_keys,
+    );
 
-        let make_task: super::sustained::MakeTask =
-            Box::new(move |key_idx: usize, nonce: Option<u64>| {
-                let dc = dest_chain_s.clone();
-                let gv = gas_value;
-                let rb = receiver_bytes.clone();
-                let amt = amount_per_tx;
-                let its_proxy = its_proxy_addr;
-                let tid = token_id;
-                let url = rpc_url_str.clone();
-                let cpda = counter_pda_clone;
-                let vtx = verify_tx.clone();
-                let has_vv = has_voting_verifier;
-
-                let provider = ProviderBuilder::new()
-                    .wallet(derived[key_idx].clone())
-                    .connect_http(url.parse().expect("invalid RPC URL"));
-
-                Box::pin(async move {
-                    let result = execute_interchain_transfer_with_data(
-                        &provider,
-                        its_proxy,
-                        tid,
-                        &dc,
-                        &rb,
-                        amt,
-                        gv,
-                        &cpda,
-                        ea,
-                        tma.as_ref(),
-                        nonce,
-                    )
-                    .await;
-                    // Stream successful txs to the concurrent verification pipeline.
-                    if result.success {
-                        let pending = super::verify::tx_to_pending_its(&result, has_vv);
-                        let _ = vtx.send(pending);
-                    }
-                    result
-                })
-            });
-
-        let result = super::sustained::run_sustained_loop(
-            tps,
-            duration_secs,
-            key_cycle,
-            Some(nonces),
-            make_task,
-            Some(send_done),
-            spinner,
-        )
-        .await;
-
-        let mut report = super::sustained::build_sustained_report(
-            result,
-            src,
-            dest,
-            &format!("{its_proxy_addr}"),
-            total_expected,
-            num_keys,
-        );
-
-        // Wait for verification to finish.
-        let (verification, timings) = verify_handle.await??;
-        for (msg_id, timing) in timings {
-            if let Some(tx) = report
-                .transactions
-                .iter_mut()
-                .find(|t| t.signature == msg_id)
-            {
-                tx.amplifier_timing = Some(timing);
-            }
+    // Wait for verification to finish.
+    let (verification, timings) = verify_handle.await??;
+    for (msg_id, timing) in timings {
+        if let Some(tx) = report
+            .transactions
+            .iter_mut()
+            .find(|t| t.signature == msg_id)
+        {
+            tx.amplifier_timing = Some(timing);
         }
-        report.verification = Some(verification);
-
-        return finish_report(&args, &mut report, test_start);
     }
-    // === END SUSTAINED MODE ===
+    report.verification = Some(verification);
 
-    // --- Burst mode: parallel sends ---
+    finish_report(args, &mut report, test_start)
+}
+
+/// Drive the burst-mode pipeline: fan out the EVM ITS-with-data transfers,
+/// batch-verify on Solana, and hand off to `finish_report`.
+async fn run_burst_pipeline(
+    args: &LoadTestArgs,
+    evm_rpc_url: &str,
+    derived: &[PrivateKeySigner],
+    sizing: &RunSizing,
+    transfer_ctx: &TransferContext,
+) -> eyre::Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let num_txs = sizing.num_txs;
+    let its_proxy_addr = transfer_ctx.its_proxy_addr;
+
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let confirmed_counter = Arc::new(AtomicU64::new(0));
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS));
@@ -526,21 +719,21 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let mut tasks = Vec::with_capacity(num_txs);
     let dest_chain = dest.to_string();
 
-    for derived_signer in &derived {
+    for derived_signer in derived {
         let metrics_clone = Arc::clone(&metrics_list);
         let counter = Arc::clone(&confirmed_counter);
         let sem = Arc::clone(&semaphore);
         let sp = spinner.clone();
         let total = num_txs;
         let dc = dest_chain.clone();
-        let gv = gas_value;
-        let rb = receiver_bytes.clone();
-        let amt = amount_per_tx;
-        let its_proxy = its_proxy_addr;
-        let tid = token_id;
-        let cpda = counter_pda;
-        let ea = extra_accounts;
-        let tma = token_mint_ata;
+        let gv = transfer_ctx.gas_value;
+        let rb = transfer_ctx.receiver_bytes.clone();
+        let amt = transfer_ctx.amount_per_tx;
+        let its_proxy = transfer_ctx.its_proxy_addr;
+        let tid = transfer_ctx.token_id;
+        let cpda = transfer_ctx.counter_pda;
+        let ea = transfer_ctx.extra_accounts;
+        let tma = transfer_ctx.token_mint_ata;
 
         let provider = ProviderBuilder::new()
             .wallet(derived_signer.clone())
@@ -627,7 +820,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
 
-    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
     let mut report = LoadTestReport {
         source_chain: src.to_string(),
         destination_chain: dest.to_string(),
@@ -670,7 +862,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         transactions: metrics,
     };
 
-    // --- Verify ---
     let verification = super::verify::verify_onchain_solana_its(
         &args.config,
         &args.source_axelar_id,
@@ -682,11 +873,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     .await?;
     report.verification = Some(verification);
 
-    finish_report(&args, &mut report, test_start)
+    finish_report(args, &mut report, test_start)
 }
 
 /// Deploy a new interchain token and its remote counterpart.
-#[allow(clippy::too_many_arguments)]
 async fn deploy_its_token<P: Provider>(
     provider: &P,
     factory_addr: Address,
@@ -812,7 +1002,6 @@ async fn execute_interchain_transfer_with_data<P: Provider>(
             let tx_hash = *pending.tx_hash();
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
-                    #[allow(clippy::cast_possible_truncation)]
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
                     match extract_contract_call_event(&receipt) {
@@ -867,7 +1056,6 @@ fn make_failure_with_hash(
     error: &str,
     tx_hash: Option<alloy::primitives::TxHash>,
 ) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: tx_hash.map_or_else(String::new, |h| format!("{h:#x}")),

@@ -1,25 +1,30 @@
-use alloy::{primitives::Address, providers::ProviderBuilder, signers::local::PrivateKeySigner};
+use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::Ownable;
+use crate::state::{Step, StepKind};
 use crate::ui;
 use crate::utils::{patch_target_json, read_contract_address};
 
-pub async fn run(ctx: &DeployContext, step: &Value, private_key: &str) -> Result<()> {
+pub async fn run(ctx: &DeployContext, step: &Step, private_key: &str) -> Result<()> {
     let signer: PrivateKeySigner = private_key.parse()?;
     let provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(ctx.rpc_url.parse()?);
 
-    let contract_name = step["contract"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no 'contract' field in step"))?;
-    let new_owner: Address = step["newOwner"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("no 'newOwner' field in step"))?
-        .parse()?;
+    let (contract_name, new_owner) = match &step.kind {
+        StepKind::TransferOwnership {
+            contract,
+            new_owner,
+        } => (contract.as_str(), *new_owner),
+        other => {
+            return Err(eyre::eyre!(
+                "transfer_ownership::run called on wrong kind: {other:?}"
+            ));
+        }
+    };
 
     let contract_addr = read_contract_address(&ctx.target_json, &ctx.axelar_id, contract_name)?;
     let ownable = Ownable::new(contract_addr, &provider);

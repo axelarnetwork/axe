@@ -11,14 +11,14 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::evm::{LegacyProxy, read_artifact_bytecode};
-use crate::state::save_state;
+use crate::state::{Step, save_state};
 use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
 
 pub async fn run(
     ctx: &mut DeployContext,
     step_idx: usize,
-    step: &Value,
+    step: &Step,
     step_name: &str,
     private_key: &str,
     impl_artifact: &str,
@@ -35,9 +35,7 @@ pub async fn run(
     ui::address("gas collector (Operators)", &format!("{gas_collector}"));
 
     // --- Tx 1: Deploy implementation (skip if already deployed) ---
-    let impl_addr = if let Some(saved) = step.get("implementationAddress").and_then(|v| v.as_str())
-    {
-        let addr = saved.parse()?;
+    let impl_addr = if let Some(addr) = step.implementation_address() {
         let code = provider.get_code_at(addr).await?;
         if code.is_empty() {
             return Err(eyre::eyre!(
@@ -74,19 +72,13 @@ pub async fn run(
         ui::address("implementation deployed at", &format!("{addr}"));
 
         // Save to state so retries skip re-deployment
-        if let Some(s) = ctx.state["steps"]
-            .as_array_mut()
-            .and_then(|a| a.get_mut(step_idx))
-        {
-            s["implementationAddress"] = json!(format!("{addr}"));
-        }
-        save_state(&ctx.axelar_id, &ctx.state)?;
+        ctx.state.steps[step_idx].set_implementation_address(addr);
+        save_state(&ctx.state)?;
         addr
     };
 
     // --- Tx 2: Deploy proxy (skip if already deployed) ---
-    let proxy_addr = if let Some(saved) = step.get("proxyAddress").and_then(|v| v.as_str()) {
-        let addr = saved.parse()?;
+    let proxy_addr = if let Some(addr) = step.proxy_address() {
         let code = provider.get_code_at(addr).await?;
         if code.is_empty() {
             return Err(eyre::eyre!("saved proxy {addr} has no code on-chain"));
@@ -114,13 +106,8 @@ pub async fn run(
         ui::address("proxy deployed at", &format!("{addr}"));
 
         // Save to state so retries skip re-deployment
-        if let Some(s) = ctx.state["steps"]
-            .as_array_mut()
-            .and_then(|a| a.get_mut(step_idx))
-        {
-            s["proxyAddress"] = json!(format!("{addr}"));
-        }
-        save_state(&ctx.axelar_id, &ctx.state)?;
+        ctx.state.steps[step_idx].set_proxy_address(addr);
+        save_state(&ctx.state)?;
         addr
     };
 

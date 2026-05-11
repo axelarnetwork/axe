@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::ui;
-use crate::xrpl::{XrplClient, XrplWallet, build_its_transfer_memos};
+use crate::xrpl::{LAST_LEDGER_SEQUENCE_BUMP, XrplClient, XrplWallet, build_its_transfer_memos};
 use xrpl_api::SubmitRequest;
 use xrpl_binary_codec::{serialize, sign::sign_transaction};
 use xrpl_types::{AccountId, Amount, Blob, PaymentTransaction};
@@ -76,10 +76,11 @@ async fn submit_single(
 
     // The SDK's `prepare_transaction` sets `LastLedgerSequence = validated + 4`,
     // which is only ~16 seconds and frequently expires before inclusion under
-    // any congestion or a one-ledger delay. Extend the window — xrpl.js
-    // autofill defaults to +20; we use +30 to be safe at load-test volumes.
+    // any congestion or a one-ledger delay. Extend the window via the shared
+    // `LAST_LEDGER_SEQUENCE_BUMP` (xrpl.js autofill defaults to +20; we use
+    // +26 to be safe at load-test volumes).
     if let Some(lls) = tx.common.last_ledger_sequence {
-        tx.common.last_ledger_sequence = Some(lls.saturating_add(26));
+        tx.common.last_ledger_sequence = Some(lls.saturating_add(LAST_LEDGER_SEQUENCE_BUMP));
     }
 
     if let Err(e) = sign_transaction(&mut tx, &wallet.public_key, &wallet.secret_key) {
@@ -114,7 +115,6 @@ async fn submit_single(
         Err(e) => return fail_metrics(submit_start, &source_addr, &format!("submit: {e}")),
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     let submit_time_ms = submit_start.elapsed().as_millis() as u64;
 
     // XRPL message IDs are `0x{lowercase-hex-tx-hash}` per the
@@ -141,7 +141,6 @@ async fn submit_single(
 }
 
 fn fail_metrics(submit_start: Instant, source: &str, err: &str) -> TxMetrics {
-    #[allow(clippy::cast_possible_truncation)]
     let elapsed_ms = submit_start.elapsed().as_millis() as u64;
     TxMetrics {
         signature: String::new(),
@@ -247,7 +246,6 @@ pub async fn run_burst(
     ))
 }
 
-#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
 fn build_burst_report(
     metrics: Vec<TxMetrics>,
     source_chain: &str,
@@ -344,7 +342,7 @@ pub(super) async fn run_sustained(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
-            let m = submit_single(
+            let mut m = submit_single(
                 &c,
                 wallet,
                 &multisig,
@@ -362,8 +360,15 @@ pub(super) async fn run_sustained(
             if m.success
                 && let Some(ref tx_sender) = vtx
             {
-                let pending = super::verify::tx_to_pending_xrpl(&m, has_vv);
-                let _ = tx_sender.send(pending);
+                match super::verify::tx_to_pending_xrpl(&m, has_vv) {
+                    Ok(pending) => {
+                        let _ = tx_sender.send(pending);
+                    }
+                    Err(e) => {
+                        m.success = false;
+                        m.error = Some(format!("failed to build verification state: {e}"));
+                    }
+                }
             }
             m
         })

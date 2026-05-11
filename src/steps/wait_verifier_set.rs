@@ -8,6 +8,7 @@ use crate::cosmos::{
     build_execute_msg_any, derive_axelar_wallet, lcd_cosmwasm_smart_query, read_axelar_config,
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
+use crate::timing::VERIFIER_SET_POLL_INTERVAL;
 use crate::ui;
 
 pub async fn run(ctx: &DeployContext) -> Result<()> {
@@ -18,7 +19,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or(&ctx.axelar_id)
         .to_string();
-    let rpc_url = ctx.state["rpcUrl"].as_str().unwrap_or("").to_string();
+    let rpc_url = ctx.state.rpc_url.clone();
 
     let prover_addr = read_axelar_contract_field(
         &ctx.target_json,
@@ -35,7 +36,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         "/axelar/contracts/ServiceRegistry/address",
     )?;
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json)?;
-    let env = ctx.state["env"].as_str().unwrap_or("testnet");
+    let env = ctx.state.env;
 
     // Check if verifier set already exists
     let query_msg = json!("current_verifier_set");
@@ -104,9 +105,9 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
 
     // Phase 1: poll ServiceRegistry for active verifiers
     let min_verifiers: usize = match env {
-        "devnet-amplifier" => 3,
-        "mainnet" => 25,
-        _ => 22, // testnet
+        crate::types::Network::DevnetAmplifier => 3,
+        crate::types::Network::Mainnet => 25,
+        _ => 22, // testnet, stagenet
     };
     let spinner = ui::wait_spinner(&format!(
         "polling ServiceRegistry for active verifiers (need {min_verifiers})..."
@@ -129,19 +130,23 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
                     break;
                 }
                 spinner.set_message(format!(
-                    "{count}/{min_verifiers} verifiers, retrying in 30s..."
+                    "{count}/{min_verifiers} verifiers, retrying in {}s...",
+                    VERIFIER_SET_POLL_INTERVAL.as_secs()
                 ));
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
             }
             _ => {
-                spinner.set_message("not enough verifiers yet, retrying in 30s...".to_string());
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                spinner.set_message(format!(
+                    "not enough verifiers yet, retrying in {}s...",
+                    VERIFIER_SET_POLL_INTERVAL.as_secs()
+                ));
+                tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
             }
         }
     }
 
     // Phase 2: call update_verifier_set
-    if let Some(admin_mn) = ctx.state["adminMnemonic"].as_str() {
+    if let Some(admin_mn) = ctx.state.admin_mnemonic.as_deref() {
         ui::info("calling update_verifier_set with admin key...");
         let (admin_key, admin_address) = derive_axelar_wallet(admin_mn)?;
         let execute_msg = json!("update_verifier_set");
@@ -171,7 +176,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
                     break;
                 }
                 _ => {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await;
                 }
             }
         }

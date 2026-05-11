@@ -1,3 +1,4 @@
+use alloy::dyn_abi::DynSolValue;
 use alloy::primitives::{Address, B256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::Filter;
@@ -18,7 +19,6 @@ struct EvmContractEntry {
     network: String,
     chain_name: String,
     rpc_url: String,
-    _contract_type: String,
     label: String,
     address: Address,
 }
@@ -41,18 +41,16 @@ fn discover_contracts(
 
     for network in &networks {
         let config_path = config_dir.join(format!("{network}.json"));
-        let config_content = match std::fs::read_to_string(&config_path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(config_content) = std::fs::read_to_string(&config_path) else {
+            continue;
         };
         let config: serde_json::Value = match serde_json::from_str(&config_content) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let chains = match config.get("chains").and_then(|v| v.as_object()) {
-            Some(c) => c,
-            None => continue,
+        let Some(chains) = config.get("chains").and_then(|v| v.as_object()) else {
+            continue;
         };
 
         for (chain_name, chain_config) in chains {
@@ -73,9 +71,8 @@ fn discover_contracts(
                 None => continue,
             };
 
-            let contracts = match chain_config.get("contracts").and_then(|v| v.as_object()) {
-                Some(c) => c,
-                None => continue,
+            let Some(contracts) = chain_config.get("contracts").and_then(|v| v.as_object()) else {
+                continue;
             };
 
             let contract_map = [
@@ -103,7 +100,6 @@ fn discover_contracts(
                         network: network.clone(),
                         chain_name: chain_name.clone(),
                         rpc_url: rpc_url.clone(),
-                        _contract_type: prog_type.to_string(),
                         label: label.to_string(),
                         address,
                     });
@@ -158,19 +154,16 @@ pub async fn run(
     for entry in &contracts {
         let provider = ProviderBuilder::new().connect_http(entry.rpc_url.parse()?);
 
-        let latest_block = match provider.get_block_number().await {
-            Ok(b) => b,
-            Err(_) => {
-                if !json_mode {
-                    eprintln!(
-                        "  {} could not reach {} ({})",
-                        "!".yellow(),
-                        entry.chain_name,
-                        entry.rpc_url
-                    );
-                }
-                continue;
+        let Ok(latest_block) = provider.get_block_number().await else {
+            if !json_mode {
+                eprintln!(
+                    "  {} could not reach {} ({})",
+                    "!".yellow(),
+                    entry.chain_name,
+                    entry.rpc_url
+                );
             }
+            continue;
         };
 
         let from_block = latest_block.saturating_sub(10000);
@@ -180,9 +173,8 @@ pub async fn run(
             .from_block(from_block)
             .to_block(latest_block);
 
-        let logs = match provider.get_logs(&filter).await {
-            Ok(l) => l,
-            Err(_) => continue,
+        let Ok(logs) = provider.get_logs(&filter).await else {
+            continue;
         };
 
         if logs.is_empty() {
@@ -348,8 +340,7 @@ fn build_params_summary(
     }
 }
 
-fn format_sol_value(value: &alloy::dyn_abi::DynSolValue) -> String {
-    use alloy::dyn_abi::DynSolValue;
+fn format_sol_value(value: &DynSolValue) -> String {
     match value {
         DynSolValue::String(s) => s.clone(),
         DynSolValue::Address(a) => format!("0x{a:x}"),
@@ -368,7 +359,7 @@ fn format_sol_value(value: &alloy::dyn_abi::DynSolValue) -> String {
     }
 }
 
-fn params_to_json(params: &[(String, alloy::dyn_abi::DynSolValue)]) -> serde_json::Value {
+fn params_to_json(params: &[(String, DynSolValue)]) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (name, value) in params {
         map.insert(name.clone(), sol_value_to_json(value));
@@ -376,8 +367,7 @@ fn params_to_json(params: &[(String, alloy::dyn_abi::DynSolValue)]) -> serde_jso
     serde_json::Value::Object(map)
 }
 
-fn sol_value_to_json(value: &alloy::dyn_abi::DynSolValue) -> serde_json::Value {
-    use alloy::dyn_abi::DynSolValue;
+fn sol_value_to_json(value: &DynSolValue) -> serde_json::Value {
     use serde_json::json;
 
     match value {

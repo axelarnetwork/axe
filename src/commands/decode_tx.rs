@@ -337,20 +337,16 @@ async fn fetch_tx(
 
 /// Resolve a Solana RPC URL from the config, falling back to devnet.
 fn resolve_solana_rpc(config: Option<&Path>) -> String {
-    if let Some(cfg) = config
-        && let Ok(content) = std::fs::read_to_string(cfg)
-        && let Ok(root) = serde_json::from_str::<serde_json::Value>(&content)
-    {
-        // Find the first SVM chain's RPC
-        if let Some(chains) = root.get("chains").and_then(|v| v.as_object()) {
-            for (_name, chain) in chains {
-                if chain.get("chainType").and_then(|v| v.as_str()) == Some("svm")
-                    && let Some(rpc) = chain.get("rpc").and_then(|v| v.as_str())
-                {
-                    return rpc.to_string();
-                }
-            }
-        }
-    }
-    "https://api.devnet.solana.com".to_string()
+    const FALLBACK: &str = "https://api.devnet.solana.com";
+    let Some(cfg_path) = config else {
+        return FALLBACK.to_string();
+    };
+    let Ok(cfg) = crate::config::ChainsConfig::load(cfg_path) else {
+        return FALLBACK.to_string();
+    };
+    cfg.chains
+        .values()
+        .find(|c| c.chain_type.as_deref() == Some("svm"))
+        .and_then(|c| c.rpc.clone())
+        .unwrap_or_else(|| FALLBACK.to_string())
 }

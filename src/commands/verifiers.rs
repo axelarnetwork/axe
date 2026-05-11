@@ -5,6 +5,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
+use crate::types::Network;
 use crate::ui;
 
 // source: axelar-skills/verifiers.md
@@ -107,9 +108,10 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
         "Node.monster",
     ),
     ("axelar1kr5f2wrq9l2denmvfqfky7f8rd07wk9kygxjak", "Redbooker"),
+    ("axelar1lkg5zs5zgywc0ua9mpd9d63gdnl3ka9n07r5fg", "DSRV"),
     (
-        "axelar1lkg5zs5zgywc0ua9mpd9d63gdnl3ka9n07r5fg",
-        "DSRV / Encapsulate",
+        "axelar1nppclnu328tgvxyvu0fmd6yder3r9mrrgusrj3",
+        "Encapsulate",
     ),
     ("axelar1p0z7ff4wru5yq0v2ny5h6vx5e6ceg06kqnhfpg", "axelar1"),
     ("axelar1qgwu4jjgeapqm82w4nslhwlzxa3mjd8fvn4xdx", "AlexZ"),
@@ -138,26 +140,33 @@ const MAINNET_VERIFIERS: &[(&str, &str)] = &[
     ("axelar1k4whz7vj0jurjlwmu3rnx7gfanme8wx4lhzecu", "axelar2"),
 ];
 
-const SUPPORTED_NETWORKS: &[&str] = &["testnet", "mainnet"];
+const SUPPORTED_NETWORKS: &[crate::types::Network] = &[
+    crate::types::Network::Testnet,
+    crate::types::Network::Mainnet,
+];
 
-fn verifiers_for_network(network: &str) -> Result<&'static [(&'static str, &'static str)]> {
+fn verifiers_for_network(network: Network) -> Result<&'static [(&'static str, &'static str)]> {
     match network {
-        "testnet" => Ok(TESTNET_VERIFIERS),
-        "mainnet" => Ok(MAINNET_VERIFIERS),
+        Network::Testnet => Ok(TESTNET_VERIFIERS),
+        Network::Mainnet => Ok(MAINNET_VERIFIERS),
         _ => Err(eyre::eyre!(
             "verifier mapping only available for: {}. \
              Other networks (devnet-amplifier, stagenet) are internally operated.",
-            SUPPORTED_NETWORKS.join(", ")
+            SUPPORTED_NETWORKS
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
 
 /// Look up a verifier's friendly name by address on a given network. Returns
 /// `None` for unknown addresses or networks without a hardcoded mapping.
-pub fn lookup_name(network: &str, addr: &str) -> Option<&'static str> {
+pub fn lookup_name(network: Network, addr: &str) -> Option<&'static str> {
     let table = match network {
-        "testnet" => TESTNET_VERIFIERS,
-        "mainnet" => MAINNET_VERIFIERS,
+        Network::Testnet => TESTNET_VERIFIERS,
+        Network::Mainnet => MAINNET_VERIFIERS,
         _ => return None,
     };
     table
@@ -166,7 +175,7 @@ pub fn lookup_name(network: &str, addr: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-fn resolve_config(network: &str) -> Result<PathBuf> {
+fn resolve_config(network: crate::types::Network) -> Result<PathBuf> {
     let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
     let path = config_dir.join(format!("{network}.json"));
     if !path.exists() {
@@ -252,8 +261,9 @@ fn truncate_address(addr: &str) -> String {
 }
 
 pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> {
-    let known_verifiers = verifiers_for_network(&network)?;
-    let config_path = resolve_config(&network)?;
+    let network: crate::types::Network = network.parse()?;
+    let known_verifiers = verifiers_for_network(network)?;
+    let config_path = resolve_config(network)?;
     let chain_axelar_id = resolve_chain_axelar_id(&config_path, &chain)?;
 
     let (lcd, _chain_id, _fee_denom, _gas_price) = read_axelar_config(&config_path)?;

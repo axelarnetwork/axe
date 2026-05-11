@@ -63,15 +63,12 @@ pub fn read_contract_address(
     axelar_id: &str,
     contract_name: &str,
 ) -> Result<Address> {
-    let content = fs::read_to_string(target_json)?;
-    let root: Value = serde_json::from_str(&content)?;
-    let addr_str = root
-        .pointer(&format!(
-            "/chains/{axelar_id}/contracts/{contract_name}/address"
-        ))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("{contract_name} not deployed yet for {axelar_id}"))?;
-    Ok(addr_str.parse()?)
+    let cfg = crate::config::ChainsConfig::load(target_json)?;
+    let chain = cfg
+        .chains
+        .get(axelar_id)
+        .ok_or_else(|| eyre::eyre!("chain '{axelar_id}' not found in target json"))?;
+    Ok(chain.contract_address(contract_name, axelar_id)?.parse()?)
 }
 
 /// Derive the axelar-contract-deployments repo root from target_json path.
@@ -130,22 +127,20 @@ pub fn artifact_paths_for_step(step_name: &str, root: &Path) -> Option<(String, 
 
 /// Compute domain separator: keccak256(chainAxelarId + routerAddress + axelarChainId)
 pub fn compute_domain_separator(target_json: &Path, axelar_id: &str) -> Result<FixedBytes<32>> {
-    let content = fs::read_to_string(target_json)?;
-    let root: Value = serde_json::from_str(&content)?;
+    let cfg = crate::config::ChainsConfig::load(target_json)?;
 
-    let chain_axelar_id = root
-        .pointer(&format!("/chains/{axelar_id}/axelarId"))
-        .and_then(|v| v.as_str())
+    let chain_axelar_id = cfg
+        .chains
+        .get(axelar_id)
+        .and_then(|c| c.axelar_id.as_deref())
         .ok_or_else(|| eyre::eyre!("no axelarId for chain {axelar_id}"))?;
 
-    let router_address = root
-        .pointer("/axelar/contracts/Router/address")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no axelar.contracts.Router.address in target json"))?;
+    let router_address = cfg.axelar.global_contract_address("Router")?;
 
-    let axelar_chain_id = root
-        .pointer("/axelar/chainId")
-        .and_then(|v| v.as_str())
+    let axelar_chain_id = cfg
+        .axelar
+        .chain_id
+        .as_deref()
         .ok_or_else(|| eyre::eyre!("no axelar.chainId in target json"))?;
 
     let input = format!("{chain_axelar_id}{router_address}{axelar_chain_id}");

@@ -29,13 +29,15 @@ XRPL has no contract execution model — it can only carry token payments via IT
 
 | Source ↓ / Dest → | EVM | Solana | Stellar | Sui | XRPL |
 |---|---|---|---|---|---|
-| **EVM** | (use evm-to-evm) | ✅ | ✅ | (not built yet) | ✅ canonical XRP |
+| **EVM** | (use evm-to-evm) | ✅ | ✅ ² | (not built yet) | ✅ canonical XRP |
 | **Solana** | ✅ | ✅ | ❌ not implemented | (not built yet) | ❌ not implemented |
 | **Stellar** | ✅ | ⚠️ ¹ | n/a | (not built yet) | ❌ not implemented |
 | **Sui** | (not built yet) | (not built yet) | (not built yet) | — | (not built yet) |
 | **XRPL** | ✅ canonical XRP | ❌ not implemented | ❌ not implemented | (not built yet) | n/a |
 
 ¹ Module `its_stellar_to_sol` exists and the dispatch is wired, but the **Stellar testnet ITS contract** (`CC7L…M5YP`) has not added `solana` to its trusted-chains list. The run reaches Stellar simulation and reverts with `Contract Error #7 (UntrustedChain)`. The fix is upstream: the contract owner runs `ts-node stellar/its.js add-trusted-chains solana` from `axelar-contract-deployments`. Once that's in, this pair starts working with no code changes here.
+
+² `stellar-2026-q1-2 → flow` ITS passed in a one-transaction testnet smoke run. `flow → stellar-2026-q1-2` ITS also passed after the runner verified the remote token deploy executed and the token was registered on Stellar before sending transfers. The Flow→Stellar default gas value is inferred as `1000000000000000000` wei; override it with `--gas-value` only when testing a different funding assumption. The runner fails before transfer if a provided/cached token ID is not registered on Stellar ITS.
 
 ## Outstanding Sui implementation work
 
@@ -117,9 +119,9 @@ Every flag (other than `--config`) is optional. Defaults are picked from the cha
 
 ## Solana commitment level
 
-All Solana RPC clients in load-test paths (sender, verifier, keypairs) use `CommitmentConfig::finalized` since [src/solana.rs](../src/solana.rs) and the load-test modules. Earlier we used `confirmed` (faster ~5 s vs ~13–30 s) but this caused vote splits on mainnet: some Axelar verifiers query Solana at `confirmed`, others at `finalized`, so a tx confirmed-but-not-finalized could be voted on at mixed visibility — leading to `5Y / 5N` polls expiring as `Failed`. Finalized adds latency to the source confirm step but eliminates the race; net end-to-end time is roughly unchanged because the Axelar voter pass is faster when all queries see consistent state.
+All Solana RPC clients in load-test paths (sender, verifier, keypairs) use `CommitmentConfig::finalized` since [src/solana/mod.rs](../src/solana/mod.rs) and the load-test modules. Earlier we used `confirmed` (faster ~5 s vs ~13–30 s) but this caused vote splits on mainnet: some Axelar verifiers query Solana at `confirmed`, others at `finalized`, so a tx confirmed-but-not-finalized could be voted on at mixed visibility — leading to `5Y / 5N` polls expiring as `Failed`. Finalized adds latency to the source confirm step but eliminates the race; net end-to-end time is roughly unchanged because the Axelar voter pass is faster when all queries see consistent state.
 
-The `decode sol-tx` and `decode sol-activity` subcommands stay on `confirmed` — read-only diagnostic paths where the lower-latency commitment doesn't risk consistency.
+The `decode tx <solana-signature>` and `decode sol-activity` subcommands stay on `confirmed` — read-only diagnostic paths where the lower-latency commitment doesn't risk consistency.
 
 ## Building per environment
 
