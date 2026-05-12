@@ -25,6 +25,24 @@ use super::rpc::{fetch_confirmed_tx, fetch_tx_details, rpc_client};
 use crate::commands::load_test::metrics::TxMetrics;
 use crate::ui;
 
+/// Lamports attached as `PayGas` for a sol→`destination_chain` GMP call.
+///
+/// Testnet observation (Axelarscan): sol→sol consistently spends ~0.0002 SOL
+/// on relayer bookkeeping, so 0.0005 SOL is ~2.5× headroom. Other destinations
+/// keep the historical 0.01 SOL until we confirm a smaller amount is safe on
+/// mainnet, where destination-execution cost is converted via price oracles
+/// and can push the required SOL payment higher than testnet shows.
+#[cfg(not(feature = "devnet-amplifier"))]
+pub fn pay_gas_lamports(destination_chain: &str) -> u64 {
+    // Match every env's Solana axelar id: "solana" (mainnet/testnet),
+    // "solana-stagenet-3" (stagenet), "solana-18" (devnet).
+    if destination_chain.starts_with("solana") {
+        500_000
+    } else {
+        10_000_000
+    }
+}
+
 /// Send a call_contract instruction to the Solana Axelar Gateway.
 /// Returns the transaction signature and per-tx metrics.
 pub fn send_call_contract(
@@ -77,7 +95,7 @@ pub fn send_call_contract(
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
             payload_hash,
-            amount: 10_000_000, // 0.01 SOL — enough for testnet relayer pickup
+            amount: pay_gas_lamports(destination_chain),
             refund_address: fee_payer,
         }
         .data();

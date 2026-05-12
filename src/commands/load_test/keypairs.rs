@@ -148,7 +148,11 @@ pub fn ensure_funded_for_sustained(
     let target = cost_per_tx
         .saturating_mul(fires_per_key)
         .max(TARGET_LAMPORTS_PER_KEY);
-    let min_needed = target / 2; // top up when below half
+    // Top-up trigger must match the actual requirement: half-target lets a
+    // key squeak by with enough for only ~half its planned fires, then every
+    // subsequent fire fails at `PayGas` with system-program error 0x1
+    // (`ResultWithNegativeLamports`).
+    let min_needed = target;
 
     let rpc = RpcClient::new_with_commitment(rpc_url, CommitmentConfig::finalized());
     let main_balance = rpc

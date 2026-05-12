@@ -316,11 +316,11 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     };
 
     // Derive and fund pool — each key fires duration/cycle times, and each
-    // fire costs ~10M lamports in gas (on non-devnet).
+    // fire costs `gas_per_tx` lamports in gas (on non-devnet).
     let derived = keypairs::derive_keypairs(&main_keypair, pool_size)?;
     let fires_per_key = (duration_secs / key_cycle as u64).max(1);
     #[cfg(not(feature = "devnet-amplifier"))]
-    let gas_per_tx: u64 = 10_000_000; // must match solana.rs pay_gas amount
+    let gas_per_tx: u64 = solana::pay_gas_lamports(&args.destination_chain);
     #[cfg(feature = "devnet-amplifier")]
     let gas_per_tx: u64 = 0; // devnet-amplifier doesn't pay gas
     let _balances = keypairs::ensure_funded_for_sustained(

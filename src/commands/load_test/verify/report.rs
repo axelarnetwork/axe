@@ -47,21 +47,21 @@ pub(super) fn compute_peak_throughput(txs: &[PendingTx]) -> PeakThroughput {
         if times.len() < 2 {
             return None;
         }
-        // `times[i]` is already relative to the first-tx submission instant
-        // (the `epoch` in `compute_peak_throughput`). The honest rate is
-        // "how many tx finished this phase in the elapsed time since we
-        // started sending" — i.e. count / latest_completion_offset.
+        // Phase-drain rate = count / active phase window. The window is
+        // first-completion → last-completion, NOT first-submission → last-
+        // completion: dividing by the full wall-clock offset (`max`) drags
+        // low-volume sustained runs to ~0 because the offset is dominated
+        // by per-tx pipeline latency rather than by the inter-completion
+        // spread.
         //
-        // Earlier we used `(max - min)` of the phase-completion times, but
-        // burst-mode runs collapse that span to ~0 when all 5 txs cross a
-        // phase in the same verifier poll iteration, producing meaningless
-        // millions of tx/s.
+        // Burst-mode runs that cross a phase in a single verifier poll
+        // would otherwise collapse `(max - min)` to ~0 and produce
+        // millions of tx/s, so floor the window at one poll cadence.
+        const MIN_WINDOW_SECS: f64 = 5.0;
+        let min = times.iter().cloned().reduce(f64::min)?;
         let max = times.iter().cloned().reduce(f64::max)?;
-        if max > 0.0 {
-            Some(times.len() as f64 / max)
-        } else {
-            None
-        }
+        let window = (max - min).max(MIN_WINDOW_SECS);
+        Some(times.len() as f64 / window)
     }
 
     PeakThroughput {
