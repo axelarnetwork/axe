@@ -31,13 +31,13 @@ pub use balance::{
 pub use encoding::{
     find_interchain_token_pda, find_its_root_pda, interchain_token_id, load_keypair,
 };
+#[cfg(not(feature = "devnet-amplifier"))]
+pub use gateway::pay_gas_lamports;
 pub use gateway::{
     approve_messages_on_gateway, decode_execute_data, execute_on_memo,
     extract_gateway_call_contract_payload, extract_its_message_id, send_call_contract,
     solana_call_contract_index,
 };
-#[cfg(not(feature = "devnet-amplifier"))]
-pub use gateway::pay_gas_lamports;
 pub use its::{
     send_its_deploy_interchain_token, send_its_deploy_remote_interchain_token,
     send_its_interchain_transfer,

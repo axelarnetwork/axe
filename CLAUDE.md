@@ -121,6 +121,22 @@ If you find yourself reaching for `<'a>` on a bundle struct, ask: is the alloc a
 - Before adding a guideline here, ask: "Can clippy/rustfmt/a git hook enforce this?" If yes, configure the tool. CLAUDE.md is for what the tooling can't catch.
 - Existing deterministic gates: `[lints.clippy]` in `Cargo.toml`, `.githooks/pre-commit` (fmt + clippy + tests on default features), `.githooks/pre-push` (clippy across all four feature flags). Extend these in preference to writing more prose.
 
+### Before reporting an edit as done
+
+After any Rust edit, run both of these and resolve every diagnostic before handing back:
+
+- `cargo fmt --all --check`
+- The pre-push hook's clippy matrix (one invocation per feature flag — cfg-gated code only surfaces under its own flag):
+  ```bash
+  for f in mainnet testnet stagenet devnet-amplifier; do
+      cargo clippy --no-default-features --features "$f" --all-targets -- -D warnings -A clippy::too_many_lines
+  done
+  ```
+
+The `-A clippy::too_many_lines` flag is **mandatory** — it matches the project gate in `.githooks/pre-push`. The repo intentionally keeps `too_many_lines = "warn"` in `Cargo.toml` for visibility, but does not deny on it (see the inline rationale next to the lint). Running plain `cargo clippy ... -D warnings` will report ~60 pre-existing too-many-lines warnings on orchestrators that are large by design — those are not your bug to fix.
+
+A passing `cargo check` is not sufficient; the matrix above is the bar.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
