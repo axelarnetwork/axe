@@ -1,0 +1,185 @@
+name: Run axe load test
+description: Build axe for the selected network, clone the chains-config repo, and invoke `axe test load-test` with the supplied arguments.
+
+inputs:
+  network:
+    description: Axelar network feature flag (mainnet/testnet/stagenet/devnet-amplifier).
+    required: true
+  source_chain:
+    description: Source chain axelar ID (e.g. solana, solana-stagenet-3, flow, avalanche).
+    required: true
+  destination_chain:
+    description: Destination chain axelar ID.
+    required: true
+  protocol:
+    description: gmp | its | its-with-data
+    required: true
+  source_rpc:
+    description: Optional override for the source chain RPC URL.
+    required: false
+    default: ""
+  destination_rpc:
+    description: Optional override for the destination chain RPC URL.
+    required: false
+    default: ""
+  num_txs:
+    description: Total transactions to send (burst / single modes). Empty in sustained mode.
+    required: false
+    default: ""
+  tps:
+    description: Sustained-mode transactions per second. Empty in burst / single modes.
+    required: false
+    default: ""
+  duration_secs:
+    description: Sustained-mode duration. Empty in burst / single modes.
+    required: false
+    default: ""
+  key_cycle:
+    description: Sustained-mode key cycle (seconds before a derived key is reused).
+    required: false
+    default: ""
+  gas_value:
+    description: Override the cross-chain gas value attached to each call.
+    required: false
+    default: ""
+  token_id:
+    description: ITS token ID (hex) - reuse an existing token instead of deploying.
+    required: false
+    default: ""
+  payload:
+    description: GMP payload override (hex).
+    required: false
+    default: ""
+  coin_type:
+    description: Sui Move type tag for ITS coin (e.g. `0x...::token::TOKEN`).
+    required: false
+    default: ""
+  extra_accounts:
+    description: Number of extra accounts in ITS-with-data payloads (default 0).
+    required: false
+    default: ""
+  evm_private_key:
+    description: Hex EVM private key. Required for any test that touches an EVM chain.
+    required: false
+    default: ""
+  solana_private_key:
+    description: Path or JSON contents of a Solana keypair.
+    required: false
+    default: ""
+  sui_private_key:
+    description: Sui suiprivkey1... bech32 or 64-char hex secret.
+    required: false
+    default: ""
+  xrpl_private_key:
+    description: XRPL secret seed or 32-byte hex private key.
+    required: false
+    default: ""
+  stellar_private_key:
+    description: Stellar S... secret key.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Step 1 — try to grab the pre-built binary for this exact commit. Tagged
+    # by `${{ github.sha }}`, so a code change automatically invalidates: new
+    # SHA, no artifact, fall through to the local build.
+    - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
+      id: download_axe
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        workflow: build-axe.yml
+        name: axe-${{ inputs.network }}-${{ github.sha }}
+        commit: ${{ github.sha }}
+        path: target/release
+        if_no_artifact_found: warn
+
+    - name: Mark pre-built axe executable
+      if: steps.download_axe.outputs.found_artifact == 'true'
+      shell: bash
+      run: chmod +x target/release/axe
+
+    # Steps 2a-2c — fallback build. Only runs when the pre-build step didn't
+    # find an artifact (e.g. dispatched from a branch before build-axe ran for
+    # it, or the artifact's 30-day retention lapsed).
+    - name: Set up Rust toolchain (fallback)
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cargo cache (fallback)
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.network }}
+
+    - name: Build axe (fallback, ${{ inputs.network }})
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      shell: bash
+      run: cargo build --release --locked --no-default-features --features "${{ inputs.network }}"
+
+    - name: Clone axelar-contract-deployments
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone --depth 1 https://github.com/axelarnetwork/axelar-contract-deployments.git "$RUNNER_TEMP/axelar-contract-deployments"
+
+    - name: Run load test
+      shell: bash
+      env:
+        NETWORK: ${{ inputs.network }}
+        SOURCE_CHAIN: ${{ inputs.source_chain }}
+        DESTINATION_CHAIN: ${{ inputs.destination_chain }}
+        PROTOCOL: ${{ inputs.protocol }}
+        SOURCE_RPC: ${{ inputs.source_rpc }}
+        DESTINATION_RPC: ${{ inputs.destination_rpc }}
+        NUM_TXS: ${{ inputs.num_txs }}
+        TPS: ${{ inputs.tps }}
+        DURATION_SECS: ${{ inputs.duration_secs }}
+        KEY_CYCLE: ${{ inputs.key_cycle }}
+        GAS_VALUE: ${{ inputs.gas_value }}
+        TOKEN_ID: ${{ inputs.token_id }}
+        PAYLOAD: ${{ inputs.payload }}
+        COIN_TYPE: ${{ inputs.coin_type }}
+        EXTRA_ACCOUNTS: ${{ inputs.extra_accounts }}
+        EVM_PRIVATE_KEY: ${{ inputs.evm_private_key }}
+        SOLANA_PRIVATE_KEY: ${{ inputs.solana_private_key }}
+        SUI_PRIVATE_KEY: ${{ inputs.sui_private_key }}
+        XRPL_PRIVATE_KEY: ${{ inputs.xrpl_private_key }}
+        STELLAR_PRIVATE_KEY: ${{ inputs.stellar_private_key }}
+      run: |
+        set -euo pipefail
+        CONFIG_PATH="$RUNNER_TEMP/axelar-contract-deployments/axelar-chains-config/info/${NETWORK}.json"
+        if [ ! -f "$CONFIG_PATH" ]; then
+          echo "::error::Chains config not found at $CONFIG_PATH" >&2
+          exit 1
+        fi
+
+        ARGS=(
+          test load-test
+          --config "$CONFIG_PATH"
+          --source-chain "$SOURCE_CHAIN"
+          --destination-chain "$DESTINATION_CHAIN"
+          --protocol "$PROTOCOL"
+        )
+        if [ -n "$SOURCE_RPC" ];       then ARGS+=(--source-rpc "$SOURCE_RPC"); fi
+        if [ -n "$DESTINATION_RPC" ];  then ARGS+=(--destination-rpc "$DESTINATION_RPC"); fi
+        if [ -n "$NUM_TXS" ];          then ARGS+=(--num-txs "$NUM_TXS"); fi
+        if [ -n "$TPS" ];              then ARGS+=(--tps "$TPS"); fi
+        if [ -n "$DURATION_SECS" ];    then ARGS+=(--duration-secs "$DURATION_SECS"); fi
+        if [ -n "$KEY_CYCLE" ];        then ARGS+=(--key-cycle "$KEY_CYCLE"); fi
+        if [ -n "$GAS_VALUE" ];        then ARGS+=(--gas-value "$GAS_VALUE"); fi
+        if [ -n "$TOKEN_ID" ];         then ARGS+=(--token-id "$TOKEN_ID"); fi
+        if [ -n "$PAYLOAD" ];          then ARGS+=(--payload "$PAYLOAD"); fi
+        if [ -n "$COIN_TYPE" ];        then ARGS+=(--coin-type "$COIN_TYPE"); fi
+        if [ -n "$EXTRA_ACCOUNTS" ];   then ARGS+=(--extra-accounts "$EXTRA_ACCOUNTS"); fi
+
+        ./target/release/axe "${ARGS[@]}"
+
+    - name: Upload load-test report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}
+        path: axe-load-test-logs/*.json
+        if-no-files-found: ignore

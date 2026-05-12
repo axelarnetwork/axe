@@ -1,0 +1,45 @@
+name: Build axe binaries
+
+# Pre-builds axe for every feature flag and uploads each binary as an artifact
+# tagged with the commit SHA. The load-test workflows look up the artifact for
+# the exact commit they're running against, so freshness is enforced
+# automatically: if the code changes, the SHA changes, the cache misses, and
+# the load-test falls back to building locally.
+#
+# Triggers on every push to `main` (so main is always pre-built) and on manual
+# dispatch (run this once per feature branch before kicking off long load
+# tests to skip the build step).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        network: [mainnet, testnet, stagenet, devnet-amplifier]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: build-axe-${{ matrix.network }}
+
+      - name: Build axe (${{ matrix.network }})
+        run: cargo build --release --locked --no-default-features --features "${{ matrix.network }}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: axe-${{ matrix.network }}-${{ github.sha }}
+          path: target/release/axe
+          retention-days: 30
+          if-no-files-found: error

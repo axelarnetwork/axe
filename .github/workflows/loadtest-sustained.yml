@@ -1,0 +1,89 @@
+name: Load test (sustained)
+
+# Drives a sustained `tps` rate for `duration_secs` and waits for the pipeline
+# to drain. Triggerable only by users with write access on the repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Axelar network
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - devnet-amplifier
+          - stagenet
+          - testnet
+          - mainnet
+      source_chain:
+        description: Source chain axelar ID (e.g. solana, solana-stagenet-3, solana-18, flow, avalanche)
+        type: string
+        required: true
+      destination_chain:
+        description: Destination chain axelar ID
+        type: string
+        required: true
+      protocol:
+        description: Wire protocol
+        type: choice
+        required: true
+        default: gmp
+        options:
+          - gmp
+          - its
+          - its-with-data
+      tps:
+        description: Transactions per second
+        type: number
+        required: true
+        default: 3
+      duration_secs:
+        description: Total send duration in seconds
+        type: number
+        required: true
+        default: 60
+      key_cycle:
+        description: Optional - seconds before a derived signing key is reused (default 3)
+        type: string
+        required: false
+        default: ""
+      source_rpc:
+        description: Optional - override the source RPC URL
+        type: string
+        required: false
+        default: ""
+      destination_rpc:
+        description: Optional - override the destination RPC URL
+        type: string
+        required: false
+        default: ""
+      gas_value:
+        description: Optional - cross-chain gas value override
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-loadtest
+        with:
+          network: ${{ inputs.network }}
+          source_chain: ${{ inputs.source_chain }}
+          destination_chain: ${{ inputs.destination_chain }}
+          protocol: ${{ inputs.protocol }}
+          source_rpc: ${{ inputs.source_rpc }}
+          destination_rpc: ${{ inputs.destination_rpc }}
+          tps: ${{ inputs.tps }}
+          duration_secs: ${{ inputs.duration_secs }}
+          key_cycle: ${{ inputs.key_cycle }}
+          gas_value: ${{ inputs.gas_value }}
+          evm_private_key: ${{ secrets.EVM_PRIVATE_KEY }}
+          solana_private_key: ${{ secrets.SOLANA_PRIVATE_KEY }}
+          sui_private_key: ${{ secrets.SUI_PRIVATE_KEY }}
+          xrpl_private_key: ${{ secrets.XRPL_PRIVATE_KEY }}
+          stellar_private_key: ${{ secrets.STELLAR_PRIVATE_KEY }}

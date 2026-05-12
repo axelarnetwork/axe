@@ -1,0 +1,89 @@
+name: Load test (single)
+
+# Runs a single cross-chain transaction end-to-end. Triggerable only by users
+# with write access on the repo (workflow_dispatch is the only entry point).
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Axelar network (drives feature flag + which chains-config file to use)
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - devnet-amplifier
+          - stagenet
+          - testnet
+          - mainnet
+      source_chain:
+        description: Source chain axelar ID (e.g. solana, solana-stagenet-3, solana-18, flow, avalanche)
+        type: string
+        required: true
+      destination_chain:
+        description: Destination chain axelar ID
+        type: string
+        required: true
+      protocol:
+        description: Wire protocol
+        type: choice
+        required: true
+        default: gmp
+        options:
+          - gmp
+          - its
+          - its-with-data
+      source_rpc:
+        description: Optional - override the source RPC URL (blank = use config default)
+        type: string
+        required: false
+        default: ""
+      destination_rpc:
+        description: Optional - override the destination RPC URL
+        type: string
+        required: false
+        default: ""
+      gas_value:
+        description: Optional - cross-chain gas value override
+        type: string
+        required: false
+        default: ""
+      token_id:
+        description: Optional - reuse an existing ITS token (hex) instead of deploying
+        type: string
+        required: false
+        default: ""
+      payload:
+        description: Optional - GMP payload override (hex)
+        type: string
+        required: false
+        default: ""
+      extra_accounts:
+        description: Optional - extra accounts for ITS-with-data payloads (default 0, only used when protocol=its-with-data)
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-loadtest
+        with:
+          network: ${{ inputs.network }}
+          source_chain: ${{ inputs.source_chain }}
+          destination_chain: ${{ inputs.destination_chain }}
+          protocol: ${{ inputs.protocol }}
+          source_rpc: ${{ inputs.source_rpc }}
+          destination_rpc: ${{ inputs.destination_rpc }}
+          num_txs: "1"
+          gas_value: ${{ inputs.gas_value }}
+          token_id: ${{ inputs.token_id }}
+          payload: ${{ inputs.payload }}
+          extra_accounts: ${{ inputs.extra_accounts }}
+          evm_private_key: ${{ secrets.EVM_PRIVATE_KEY }}
+          solana_private_key: ${{ secrets.SOLANA_PRIVATE_KEY }}
+          sui_private_key: ${{ secrets.SUI_PRIVATE_KEY }}
+          xrpl_private_key: ${{ secrets.XRPL_PRIVATE_KEY }}
+          stellar_private_key: ${{ secrets.STELLAR_PRIVATE_KEY }}

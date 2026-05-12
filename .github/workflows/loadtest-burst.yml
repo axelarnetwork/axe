@@ -1,0 +1,88 @@
+name: Load test (burst)
+
+# Sends `num_txs` transactions as fast as possible and waits for the cross-chain
+# pipeline to drain. Triggerable only by users with write access on the repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Axelar network
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - devnet-amplifier
+          - stagenet
+          - testnet
+          - mainnet
+      source_chain:
+        description: Source chain axelar ID (e.g. solana, solana-stagenet-3, solana-18, flow, avalanche)
+        type: string
+        required: true
+      destination_chain:
+        description: Destination chain axelar ID
+        type: string
+        required: true
+      protocol:
+        description: Wire protocol
+        type: choice
+        required: true
+        default: gmp
+        options:
+          - gmp
+          - its
+          - its-with-data
+      num_txs:
+        description: Total transactions to send
+        type: number
+        required: true
+        default: 10
+      source_rpc:
+        description: Optional - override the source RPC URL
+        type: string
+        required: false
+        default: ""
+      destination_rpc:
+        description: Optional - override the destination RPC URL
+        type: string
+        required: false
+        default: ""
+      gas_value:
+        description: Optional - cross-chain gas value override
+        type: string
+        required: false
+        default: ""
+      token_id:
+        description: Optional - reuse an existing ITS token (hex) instead of deploying
+        type: string
+        required: false
+        default: ""
+      coin_type:
+        description: Optional - Sui Move type tag for ITS coin (only for Sui-source ITS)
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-loadtest
+        with:
+          network: ${{ inputs.network }}
+          source_chain: ${{ inputs.source_chain }}
+          destination_chain: ${{ inputs.destination_chain }}
+          protocol: ${{ inputs.protocol }}
+          source_rpc: ${{ inputs.source_rpc }}
+          destination_rpc: ${{ inputs.destination_rpc }}
+          num_txs: ${{ inputs.num_txs }}
+          gas_value: ${{ inputs.gas_value }}
+          token_id: ${{ inputs.token_id }}
+          coin_type: ${{ inputs.coin_type }}
+          evm_private_key: ${{ secrets.EVM_PRIVATE_KEY }}
+          solana_private_key: ${{ secrets.SOLANA_PRIVATE_KEY }}
+          sui_private_key: ${{ secrets.SUI_PRIVATE_KEY }}
+          xrpl_private_key: ${{ secrets.XRPL_PRIVATE_KEY }}
+          stellar_private_key: ${{ secrets.STELLAR_PRIVATE_KEY }}
