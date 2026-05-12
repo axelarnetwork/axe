@@ -17,7 +17,7 @@ use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
 /// Resets every time a tx makes progress, so large batches naturally get more time.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(120);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

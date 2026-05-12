@@ -222,6 +222,14 @@ pub enum TestCommands {
         #[arg(long)]
         token_id: Option<String>,
 
+        /// Sui Move type tag for the ITS coin, e.g.
+        /// `0x96b4…::token::TOKEN`. Required for Sui-source ITS runs because
+        /// `interchain_transfer<T>` PTBs need the type at compile time. If
+        /// omitted, the runner will resolve it via dev-inspect on
+        /// `interchain_token_service::registered_coin_type(token_id)`.
+        #[arg(long)]
+        coin_type: Option<String>,
+
         /// Transactions per second for sustained load test
         #[arg(long)]
         tps: Option<u64>,

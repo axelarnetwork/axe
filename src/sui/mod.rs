@@ -21,11 +21,13 @@
 
 mod config;
 mod gmp;
+mod its;
 mod rpc;
 mod tx;
 mod wallet;
 
 pub use config::{read_sui_chain_config, read_sui_gateway_pkg};
 pub use gmp::{SuiGmpCall, send_gmp_call};
+pub use its::{read_sui_its_config, send_its_interchain_transfer};
 pub use rpc::SuiClient;
 pub use wallet::SuiWallet;

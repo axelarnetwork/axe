@@ -18,12 +18,12 @@ use xrpl_api::SubmitRequest;
 use xrpl_binary_codec::{serialize, sign::sign_transaction};
 use xrpl_types::{AccountId, Amount, Blob, PaymentTransaction};
 
-/// Payment amount (drops) carried by each load-test transfer.
-/// This includes both the gas fee AND the effective cross-chain transfer
-/// (the relayer subtracts `gas_fee_amount` from the total and treats the
-/// remainder as the transfer). We set this to gas + a tiny delta so each
-/// iteration costs ~0.1 XRP in total, not ~1 XRP.
-pub const TRANSFER_AMOUNT_DROPS: u64 = 110_000; // 0.11 XRP total (0.1 gas + 0.01 transfer)
+/// Net transfer amount (drops) that should arrive at the destination after
+/// the relayer subtracts `gas_fee_amount` from the on-wire payment. The
+/// on-wire `Payment.Amount` must therefore be `gas_fee_drops + NET_TRANSFER_DROPS`;
+/// callers compute it dynamically because hub-routed ITS doubles the per-command
+/// gas, and a fixed total would otherwise underflow.
+pub const NET_TRANSFER_DROPS: u64 = 50_000; // 0.05 XRP
 
 /// Gas fee in drops, memoed as `gas_fee_amount` and deducted by the relayer.
 /// Observed on-chain spend ~0.043 XRP; leaving 0.1 XRP gives comfortable
@@ -201,12 +201,13 @@ pub async fn run_burst(
         let counter = Arc::clone(&confirmed);
         let sp = spinner.clone();
         let total = key_count;
+        let total_drops = gas_fee_drops.saturating_add(NET_TRANSFER_DROPS);
         let handle = tokio::spawn(async move {
             let m = submit_single(
                 &c,
                 &w,
                 &multisig,
-                TRANSFER_AMOUNT_DROPS,
+                total_drops,
                 gas_fee_drops,
                 &dc,
                 &da,
@@ -342,11 +343,12 @@ pub(super) async fn run_sustained(
 
         Box::pin(async move {
             let wallet = &ws[key_idx % ws.len()];
+            let total_drops = gas.saturating_add(NET_TRANSFER_DROPS);
             let mut m = submit_single(
                 &c,
                 wallet,
                 &multisig,
-                TRANSFER_AMOUNT_DROPS,
+                total_drops,
                 gas,
                 &dc,
                 &da,

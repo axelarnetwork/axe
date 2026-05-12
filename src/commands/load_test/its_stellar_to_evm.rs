@@ -257,12 +257,17 @@ fn resolve_evm_targets(cfg: &ChainsConfig, dest: &str) -> Result<EvmTargets> {
 }
 
 /// Parse the user-supplied gas value (XLM stroops), defaulting to
-/// `DEFAULT_GAS_STROOPS`, and emit the matching UI line.
+/// `DEFAULT_GAS_STROOPS`, and emit the matching UI line. ITS routes via the
+/// hub (two commands: source→hub, hub→destination), so we pay 2× the
+/// per-command gas value.
 fn parse_gas_stroops(gas_value: Option<&str>) -> Result<u64> {
     let gas_stroops: u64 = match gas_value {
-        Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
+        Some(v) => v
+            .parse::<u64>()
+            .map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => DEFAULT_GAS_STROOPS,
-    };
+    }
+    .saturating_mul(2);
     ui::kv(
         "gas",
         &format!(

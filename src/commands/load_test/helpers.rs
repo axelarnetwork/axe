@@ -680,6 +680,60 @@ pub(crate) async fn ensure_sender_receiver(
     save_cache(&args.destination_chain, &cache)?;
     Ok((addr, write_provider))
 }
+/// Resolve the Sui-side ITS token id (32B) and optional coin type tag for
+/// AXE, defaulting to whatever `axelar-contract-deployments/sui/its.js
+/// register-coin-from-info` wrote into the chain config (`chains.<sui>.contracts.AXE`).
+///
+/// Returning `None` for the coin type lets the caller fall back to the
+/// dev-inspect path. CLI flags (`--token-id`, `--coin-type`) override.
+pub(crate) fn resolve_sui_axe_token(
+    config: &std::path::Path,
+    sui_chain_id: &str,
+    cli_token_id: Option<&str>,
+    cli_coin_type: Option<&str>,
+) -> Result<([u8; 32], Option<String>)> {
+    let parse_tid = |s: &str| -> Result<[u8; 32]> {
+        let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+            .map_err(|e| eyre::eyre!("invalid token id hex: {e}"))?;
+        if bytes.len() != 32 {
+            eyre::bail!("token id must be 32 bytes (got {})", bytes.len());
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    };
+
+    if let Some(t) = cli_token_id {
+        return Ok((parse_tid(t)?, cli_coin_type.map(str::to_string)));
+    }
+
+    // Fall back to the chain config's AXE entry.
+    let content = std::fs::read_to_string(config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    let axe = root
+        .pointer(&format!("/chains/{sui_chain_id}/contracts/AXE"))
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "no `contracts.AXE` entry under chain `{sui_chain_id}` in config — \
+                 either pass --token-id, or pre-register AXE via\n  \
+                 cd axelar-contract-deployments && PRIVATE_KEY=$SUI_PRIVATE_KEY \\\n    \
+                 SUI_RPC=https://fullnode.testnet.sui.io:443 \\\n    \
+                 node sui/its.js register-coin-from-info AXE AXE 9 -e testnet -n {sui_chain_id} -y"
+            )
+        })?;
+    let tid_str = axe
+        .pointer("/objects/TokenId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("contracts.AXE.objects.TokenId missing in config"))?;
+    let coin_type = cli_coin_type.map(str::to_string).or_else(|| {
+        axe.get("typeArgument")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+    Ok((parse_tid(tid_str)?, coin_type))
+}
+
 pub(crate) fn load_sui_main_wallet() -> Result<crate::sui::SuiWallet> {
     let key = std::env::var("SUI_PRIVATE_KEY").map_err(|_| {
         eyre::eyre!(

@@ -8,6 +8,7 @@ mod its_evm_to_xrpl;
 mod its_sol_to_evm;
 mod its_stellar_to_evm;
 mod its_stellar_to_sol;
+mod its_sui_to_evm;
 mod its_xrpl_to_evm;
 mod keypairs;
 pub mod metrics;
@@ -39,7 +40,7 @@ pub(super) use helpers::{
     deploy_sender_receiver, ensure_evm_contract_deployed, ensure_sender_receiver,
     finalize_sui_dest_run, finish_report, load_stellar_main_wallet, load_sui_main_wallet,
     read_stellar_contract_address, read_stellar_network_type, read_stellar_token_address,
-    sui_dest_lookup, validate_evm_rpc, validate_solana_rpc,
+    resolve_sui_axe_token, sui_dest_lookup, validate_evm_rpc, validate_solana_rpc,
 };
 pub(super) use resolve::{
     compiled_network, detect_network_from_config, read_cache, read_its_cache, save_cache,
@@ -164,6 +165,9 @@ pub struct LoadTestArgs {
     pub payload: Option<String>,
     pub gas_value: Option<String>,
     pub token_id: Option<String>,
+    /// Sui Move type tag for ITS coin (e.g. `0x...::token::TOKEN`). Used by
+    /// Sui-source ITS runs; resolved via dev-inspect when omitted.
+    pub coin_type: Option<String>,
     pub tps: Option<u64>,
     pub duration_secs: Option<u64>,
     pub key_cycle: u64,
@@ -291,18 +295,18 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
                  token on Sui ITS. Not yet implemented."
             )
         }
-        // Sui-source ITS — needs Sui ITS interchain_transfer<T> PTB construction,
-        // which depends on resolving the Move coin type T for the token_id via
-        // dev-inspect. The PTB-builder foundation is in src/sui.rs but the ITS
-        // helper isn't yet.
-        (Protocol::Its, TestType::SuiToEvm)
-        | (Protocol::Its, TestType::SuiToSol)
+        // Sui-source ITS. We don't auto-deploy a fresh AXE token on Sui
+        // (Move package publish from Rust is impractical), so the user must
+        // pre-register a token via axelar-contract-deployments/sui/its.js
+        // and pass `--token-id`. `--coin-type` resolves automatically via
+        // dev-inspect when omitted.
+        (Protocol::Its, TestType::SuiToEvm) => its_sui_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::SuiToSol)
         | (Protocol::Its, TestType::SuiToStellar)
         | (Protocol::Its, TestType::SuiToXrpl) => {
             eyre::bail!(
-                "ITS sui -> {} is not yet implemented. Sui ITS interchain_transfer requires \
-                 the coin Move type tag, which we need to resolve via `interchain_token_service::registered_coin_type` dev-inspect. \
-                 Track this as the next step. For now, use axelar-contract-deployments/sui/its.js for sui-source ITS.",
+                "sui -> {} ITS not yet wired (only sui -> evm is). Source-side PTB construction is identical, \
+                 only the destination verifier differs — follow the its_sui_to_evm.rs pattern to add it.",
                 args.destination_chain
             )
         }

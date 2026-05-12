@@ -424,7 +424,9 @@ async fn derive_and_fund_evm_signers(
         .await
         .unwrap_or(1_000_000_000); // 1 gwei fallback
     const ITS_GAS_LIMIT: u128 = 1_000_000; // generous upper bound for ITS
-    let per_tx_native_cost = gas_price_wei.saturating_mul(ITS_GAS_LIMIT) + gas_value_wei;
+    // ITS hub routing pays 2× gas_value per transfer (two commands).
+    let hub_gas_value_wei = gas_value_wei.saturating_mul(2);
+    let per_tx_native_cost = gas_price_wei.saturating_mul(ITS_GAS_LIMIT) + hub_gas_value_wei;
     let txs_per_key: u128 = if sizing.burst_mode {
         1
     } else {
