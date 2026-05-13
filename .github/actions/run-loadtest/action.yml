@@ -6,10 +6,10 @@ inputs:
     description: Axelar network feature flag (mainnet/testnet/stagenet/devnet-amplifier).
     required: true
   source_chain:
-    description: Source chain axelar ID (e.g. solana, solana-stagenet-3, flow, avalanche).
+    description: Source chain display name (resolved to the actual ID by the action)
     required: true
   destination_chain:
-    description: Destination chain axelar ID.
+    description: Destination chain display name.
     required: true
   protocol:
     description: gmp | its | its-with-data
@@ -124,12 +124,59 @@ runs:
         set -euo pipefail
         git clone --depth 1 https://github.com/axelarnetwork/axelar-contract-deployments.git "$RUNNER_TEMP/axelar-contract-deployments"
 
+    # Map dropdown display names to the network-specific axelar IDs. The
+    # dropdown is curated to chains we've actually run load tests against;
+    # add new entries here when a new chain is exercised end-to-end.
+    - name: Resolve chain display names to axelar IDs
+      id: resolve_chains
+      shell: bash
+      env:
+        NETWORK: ${{ inputs.network }}
+        SOURCE_DISPLAY: ${{ inputs.source_chain }}
+        DEST_DISPLAY: ${{ inputs.destination_chain }}
+      run: |
+        set -euo pipefail
+        CHAIN_MAP=$(cat <<'EOF'
+        {
+          "Arbitrum":    {"mainnet": "arbitrum",   "testnet": "arbitrum-sepolia", "stagenet": "arbitrum-sepolia"},
+          "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche"},
+          "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
+          "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
+          "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
+          "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
+          "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
+          "Solana":      {"mainnet": "solana",     "testnet": "solana",           "stagenet": "solana-stagenet-3", "devnet-amplifier": "solana-18"},
+          "Stellar":     {"mainnet": "stellar",    "testnet": "stellar-2026-q1-2"},
+          "Sui":         {"mainnet": "sui",        "testnet": "sui",              "stagenet": "sui", "devnet-amplifier": "sui-2"},
+          "XRPL":        {"mainnet": "xrpl",       "testnet": "xrpl",             "stagenet": "xrpl", "devnet-amplifier": "xrpl-dev"},
+          "XRPL EVM":    {"mainnet": "xrpl-evm",   "testnet": "xrpl-evm",         "stagenet": "xrpl-evm"}
+        }
+        EOF
+        )
+
+        resolve() {
+          local display="$1" role="$2"
+          local id
+          id=$(echo "$CHAIN_MAP" | jq -r --arg n "$display" --arg net "$NETWORK" '.[$n][$net] // empty')
+          if [ -z "$id" ]; then
+            echo "::error::$role chain '$display' is not configured on $NETWORK (extend the chain map in .github/actions/run-loadtest/action.yml if this combination should be supported)" >&2
+            exit 1
+          fi
+          echo "$id"
+        }
+
+        SRC_ID=$(resolve "$SOURCE_DISPLAY" "source")
+        DST_ID=$(resolve "$DEST_DISPLAY" "destination")
+        echo "Resolved on $NETWORK: $SOURCE_DISPLAY -> $SRC_ID, $DEST_DISPLAY -> $DST_ID"
+        echo "source_axelar_id=$SRC_ID" >> "$GITHUB_OUTPUT"
+        echo "destination_axelar_id=$DST_ID" >> "$GITHUB_OUTPUT"
+
     - name: Run load test
       shell: bash
       env:
         NETWORK: ${{ inputs.network }}
-        SOURCE_CHAIN: ${{ inputs.source_chain }}
-        DESTINATION_CHAIN: ${{ inputs.destination_chain }}
+        SOURCE_CHAIN: ${{ steps.resolve_chains.outputs.source_axelar_id }}
+        DESTINATION_CHAIN: ${{ steps.resolve_chains.outputs.destination_axelar_id }}
         PROTOCOL: ${{ inputs.protocol }}
         SOURCE_RPC: ${{ inputs.source_rpc }}
         DESTINATION_RPC: ${{ inputs.destination_rpc }}
@@ -149,6 +196,13 @@ runs:
         STELLAR_PRIVATE_KEY: ${{ inputs.stellar_private_key }}
       run: |
         set -euo pipefail
+        # Unset env vars that are empty so axe falls through to defaults
+        # (e.g. config-default RPCs, ~/.config/solana/id.json). Otherwise
+        # clap reads VAR="" as Some("") rather than None.
+        for v in SOURCE_RPC DESTINATION_RPC EVM_PRIVATE_KEY SOLANA_PRIVATE_KEY \
+                 SUI_PRIVATE_KEY XRPL_PRIVATE_KEY STELLAR_PRIVATE_KEY; do
+            if [ -z "${!v:-}" ]; then unset "$v"; fi
+        done
         CONFIG_PATH="$RUNNER_TEMP/axelar-contract-deployments/axelar-chains-config/info/${NETWORK}.json"
         if [ ! -f "$CONFIG_PATH" ]; then
           echo "::error::Chains config not found at $CONFIG_PATH" >&2
@@ -176,10 +230,23 @@ runs:
 
         ./target/release/axe "${ARGS[@]}"
 
-    - name: Upload load-test report
+    # Only run when there is at least one report to upload; otherwise GitHub's
+    # upload-artifact step prints a misleading "No files were found" warning
+    # on runs that fail before axe writes anything to disk.
+    - name: Check for load-test report
+      id: report_present
       if: always()
+      shell: bash
+      run: |
+        if compgen -G "axe-load-test-logs/*.json" > /dev/null; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload load-test report
+      if: always() && steps.report_present.outputs.found == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}
         path: axe-load-test-logs/*.json
-        if-no-files-found: ignore

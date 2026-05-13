@@ -17,15 +17,41 @@ on:
           - testnet
           - mainnet
       source_chain:
-        description: Source chain axelar ID (e.g. solana, solana-stagenet-3, solana-18, flow, avalanche)
-        type: string
+        description: Source chain
+        type: choice
         required: true
+        options:
+          - Arbitrum
+          - Avalanche
+          - Base
+          - Ethereum
+          - Flow
+          - Hyperliquid
+          - Optimism
+          - Solana
+          - Stellar
+          - Sui
+          - XRPL
+          - XRPL EVM
       destination_chain:
-        description: Destination chain axelar ID
-        type: string
+        description: Destination chain
+        type: choice
         required: true
+        options:
+          - Arbitrum
+          - Avalanche
+          - Base
+          - Ethereum
+          - Flow
+          - Hyperliquid
+          - Optimism
+          - Solana
+          - Stellar
+          - Sui
+          - XRPL
+          - XRPL EVM
       protocol:
-        description: Wire protocol
+        description: Protocol
         type: choice
         required: true
         default: gmp

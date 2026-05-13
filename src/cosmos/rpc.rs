@@ -368,8 +368,25 @@ const LCD_FALLBACKS_MAINNET: &[&str] = &[
     "https://axelar-rest.publicnode.com",
 ];
 
-fn is_non_mainnet_axelar_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("testnet") || endpoint.contains("stagenet") || endpoint.contains("devnet")
+/// Public Axelar testnet LCD endpoints used the same way as
+/// `LCD_FALLBACKS_MAINNET`. qubelabs (the default in chain configs) returns
+/// HTTP 500 for "message not yet routed" instead of a proper empty response,
+/// so a failover list is essential for testnet runs.
+const LCD_FALLBACKS_TESTNET: &[&str] = &[
+    "https://lcd-axelar-testnet.imperator.co",
+    "https://axelartest-lcd.quickapi.com",
+];
+
+/// Returns the fallback LCD list appropriate for a given primary endpoint,
+/// or an empty slice when no public fallbacks exist (stagenet/devnet).
+fn lcd_fallbacks_for(primary: &str) -> &'static [&'static str] {
+    if primary.contains("testnet") {
+        LCD_FALLBACKS_TESTNET
+    } else if primary.contains("stagenet") || primary.contains("devnet") {
+        &[]
+    } else {
+        LCD_FALLBACKS_MAINNET
+    }
 }
 
 /// `OnceLock` flag for the LCD fallback warning. We emit one ui::warn the
@@ -417,8 +434,8 @@ pub async fn lcd_cosmwasm_smart_query(
     // endpoints. Only the user-set AXELAR_LCD_URL skips fallback — we honor
     // their explicit choice and surface the error directly.
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
-        for fb in LCD_FALLBACKS_MAINNET {
+    if user_override.is_none() {
+        for fb in lcd_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
             }
@@ -570,6 +587,25 @@ const RPC_FALLBACKS_MAINNET: &[&str] = &[
     "https://rpc.cosmos.directory/axelar",
 ];
 
+/// Public Axelar testnet Tendermint RPC fallbacks. qubelabs (default) flaps;
+/// imperator's testnet RPC is generally healthy.
+const RPC_FALLBACKS_TESTNET: &[&str] = &[
+    "https://rpc-axelar-testnet.imperator.co:443",
+    "https://axelartest-rpc.quickapi.com",
+];
+
+/// Returns the fallback RPC list appropriate for a given primary endpoint.
+/// Stagenet/devnet have no public fallbacks.
+fn rpc_fallbacks_for(primary: &str) -> &'static [&'static str] {
+    if primary.contains("testnet") {
+        RPC_FALLBACKS_TESTNET
+    } else if primary.contains("stagenet") || primary.contains("devnet") {
+        &[]
+    } else {
+        RPC_FALLBACKS_MAINNET
+    }
+}
+
 /// `OnceLock` flag matching `LCD_FALLBACK_WARNED` for the Tendermint RPC
 /// side — same once-per-process semantics so a flapping primary doesn't
 /// flood the report log.
@@ -605,8 +641,8 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
         .to_string();
 
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
-        for fb in RPC_FALLBACKS_MAINNET {
+    if user_override.is_none() {
+        for fb in rpc_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
             }

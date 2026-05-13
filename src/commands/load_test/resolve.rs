@@ -187,8 +187,15 @@ pub(crate) fn resolve_from_config(
             eyre::eyre!("no RPC URL for destination chain '{destination_chain}' in config")
         })?;
 
-    let resolved_source_rpc = source_rpc_override.unwrap_or(source_rpc);
-    let resolved_destination_rpc = destination_rpc_override.unwrap_or(destination_rpc);
+    // Treat an empty override the same as no override (callers passing
+    // `--source-rpc ""` or an unset env var that became Some("") should fall
+    // through to the config default, not bail with "invalid RPC URL ''").
+    let resolved_source_rpc = source_rpc_override
+        .filter(|s| !s.is_empty())
+        .unwrap_or(source_rpc);
+    let resolved_destination_rpc = destination_rpc_override
+        .filter(|s| !s.is_empty())
+        .unwrap_or(destination_rpc);
     ui::kv("source RPC", &resolved_source_rpc);
     ui::kv("destination RPC", &resolved_destination_rpc);
 
