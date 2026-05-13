@@ -93,6 +93,51 @@ on:
 jobs:
   loadtest:
     runs-on: ubuntu-latest
+    # Optional private RPC overrides via repo secrets. Pattern:
+    # <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC. The composite action picks the
+    # one matching the selected source/destination chain + network and uses it
+    # as the RPC default. Explicit `source_rpc`/`destination_rpc` inputs still
+    # win. Empty `${{ secrets.X }}` (secret not defined) is treated as absent.
+    env:
+      ARBITRUM_MAINNET_RPC:        ${{ secrets.ARBITRUM_MAINNET_RPC }}
+      ARBITRUM_TESTNET_RPC:        ${{ secrets.ARBITRUM_TESTNET_RPC }}
+      ARBITRUM_STAGENET_RPC:       ${{ secrets.ARBITRUM_STAGENET_RPC }}
+      AVALANCHE_MAINNET_RPC:       ${{ secrets.AVALANCHE_MAINNET_RPC }}
+      AVALANCHE_TESTNET_RPC:       ${{ secrets.AVALANCHE_TESTNET_RPC }}
+      AVALANCHE_STAGENET_RPC:      ${{ secrets.AVALANCHE_STAGENET_RPC }}
+      BASE_MAINNET_RPC:            ${{ secrets.BASE_MAINNET_RPC }}
+      BASE_TESTNET_RPC:            ${{ secrets.BASE_TESTNET_RPC }}
+      BASE_STAGENET_RPC:           ${{ secrets.BASE_STAGENET_RPC }}
+      ETHEREUM_MAINNET_RPC:        ${{ secrets.ETHEREUM_MAINNET_RPC }}
+      ETHEREUM_TESTNET_RPC:        ${{ secrets.ETHEREUM_TESTNET_RPC }}
+      ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
+      FLOW_MAINNET_RPC:            ${{ secrets.FLOW_MAINNET_RPC }}
+      FLOW_TESTNET_RPC:            ${{ secrets.FLOW_TESTNET_RPC }}
+      FLOW_STAGENET_RPC:           ${{ secrets.FLOW_STAGENET_RPC }}
+      FLOW_DEVNET_AMPLIFIER_RPC:   ${{ secrets.FLOW_DEVNET_AMPLIFIER_RPC }}
+      HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
+      HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
+      HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
+      OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
+      OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
+      OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
+      SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
+      SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
+      SOLANA_STAGENET_RPC:         ${{ secrets.SOLANA_STAGENET_RPC }}
+      SOLANA_DEVNET_AMPLIFIER_RPC: ${{ secrets.SOLANA_DEVNET_AMPLIFIER_RPC }}
+      STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
+      STELLAR_TESTNET_RPC:         ${{ secrets.STELLAR_TESTNET_RPC }}
+      SUI_MAINNET_RPC:             ${{ secrets.SUI_MAINNET_RPC }}
+      SUI_TESTNET_RPC:             ${{ secrets.SUI_TESTNET_RPC }}
+      SUI_STAGENET_RPC:            ${{ secrets.SUI_STAGENET_RPC }}
+      SUI_DEVNET_AMPLIFIER_RPC:    ${{ secrets.SUI_DEVNET_AMPLIFIER_RPC }}
+      XRPL_MAINNET_RPC:            ${{ secrets.XRPL_MAINNET_RPC }}
+      XRPL_TESTNET_RPC:            ${{ secrets.XRPL_TESTNET_RPC }}
+      XRPL_STAGENET_RPC:           ${{ secrets.XRPL_STAGENET_RPC }}
+      XRPL_DEVNET_AMPLIFIER_RPC:   ${{ secrets.XRPL_DEVNET_AMPLIFIER_RPC }}
+      XRPL_EVM_MAINNET_RPC:        ${{ secrets.XRPL_EVM_MAINNET_RPC }}
+      XRPL_EVM_TESTNET_RPC:        ${{ secrets.XRPL_EVM_TESTNET_RPC }}
+      XRPL_EVM_STAGENET_RPC:       ${{ secrets.XRPL_EVM_STAGENET_RPC }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/run-loadtest

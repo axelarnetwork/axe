@@ -196,8 +196,9 @@ pub(crate) fn resolve_from_config(
     let resolved_destination_rpc = destination_rpc_override
         .filter(|s| !s.is_empty())
         .unwrap_or(destination_rpc);
-    ui::kv("source RPC", &resolved_source_rpc);
-    ui::kv("destination RPC", &resolved_destination_rpc);
+    // RPC URLs are intentionally not printed — keeps secret/private endpoints
+    // out of run logs. GH Actions also auto-masks values that came from
+    // secrets, but we'd rather not surface RPCs at all.
 
     Ok(ResolvedConfig {
         test_type,

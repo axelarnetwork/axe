@@ -35,9 +35,9 @@ pub fn check_solana_balance(
     min_lamports: u64,
 ) -> Result<()> {
     let rpc_client = rpc_client(rpc_url);
-    let balance = rpc_client.get_balance(pubkey).map_err(|e| {
-        eyre::eyre!("failed to query Solana balance for {pubkey} on {rpc_url}: {e}")
-    })?;
+    let balance = rpc_client
+        .get_balance(pubkey)
+        .map_err(|e| eyre::eyre!("failed to query Solana balance for {pubkey}: {e}"))?;
 
     let display = balance as f64 / 1_000_000_000.0;
     let min_display = min_lamports as f64 / 1_000_000_000.0;
@@ -45,16 +45,15 @@ pub fn check_solana_balance(
     if balance < min_lamports {
         ui::error(&format!("{label} Solana wallet underfunded:"));
         ui::error(&format!("  address: {pubkey}"));
-        ui::error(&format!("  rpc:     {rpc_url}"));
         ui::error(&format!(
             "  balance: {display:.6} SOL (need >= {min_display:.6})"
         ));
         if balance == 0 {
             ui::error("  account has zero SOL — fund or airdrop before retrying");
-            ui::error(&format!("    solana airdrop 2 {pubkey} --url {rpc_url}"));
+            ui::error(&format!("    solana airdrop 2 {pubkey}"));
         }
         return Err(eyre::eyre!(
-            "fund {pubkey} with at least {min_display:.6} SOL on {rpc_url} and retry"
+            "fund {pubkey} with at least {min_display:.6} SOL and retry"
         ));
     }
 

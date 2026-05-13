@@ -175,6 +175,8 @@ runs:
       shell: bash
       env:
         NETWORK: ${{ inputs.network }}
+        SOURCE_DISPLAY: ${{ inputs.source_chain }}
+        DEST_DISPLAY: ${{ inputs.destination_chain }}
         SOURCE_CHAIN: ${{ steps.resolve_chains.outputs.source_axelar_id }}
         DESTINATION_CHAIN: ${{ steps.resolve_chains.outputs.destination_axelar_id }}
         PROTOCOL: ${{ inputs.protocol }}
@@ -203,6 +205,30 @@ runs:
                  SUI_PRIVATE_KEY XRPL_PRIVATE_KEY STELLAR_PRIVATE_KEY; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
         done
+
+        # Default RPCs from per-chain repo secrets, if set. Pattern:
+        # <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC (e.g. SOLANA_TESTNET_RPC,
+        # XRPL_EVM_MAINNET_RPC). Only applies when the caller didn't pass an
+        # explicit `source_rpc`/`destination_rpc` input — explicit overrides
+        # always win. Falls through to the public RPC in the chains-config
+        # JSON when neither input nor secret is set.
+        to_env_name() {
+            # "Solana" -> "SOLANA", "XRPL EVM" -> "XRPL_EVM",
+            # "devnet-amplifier" -> "DEVNET_AMPLIFIER"
+            echo "$1" | tr '[:lower:] -' '[:upper:]__'
+        }
+        NETWORK_UPPER=$(to_env_name "$NETWORK")
+        SRC_KEY="$(to_env_name "$SOURCE_DISPLAY")_${NETWORK_UPPER}_RPC"
+        DST_KEY="$(to_env_name "$DEST_DISPLAY")_${NETWORK_UPPER}_RPC"
+        if [ -z "${SOURCE_RPC:-}" ] && [ -n "${!SRC_KEY:-}" ]; then
+            export SOURCE_RPC="${!SRC_KEY}"
+            echo "Using $SRC_KEY for source RPC"
+        fi
+        if [ -z "${DESTINATION_RPC:-}" ] && [ -n "${!DST_KEY:-}" ]; then
+            export DESTINATION_RPC="${!DST_KEY}"
+            echo "Using $DST_KEY for destination RPC"
+        fi
+
         CONFIG_PATH="$RUNNER_TEMP/axelar-contract-deployments/axelar-chains-config/info/${NETWORK}.json"
         if [ ! -f "$CONFIG_PATH" ]; then
           echo "::error::Chains config not found at $CONFIG_PATH" >&2

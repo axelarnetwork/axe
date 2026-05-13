@@ -140,6 +140,35 @@ pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     }
 }
 
+/// Replace any `http://…` / `https://…` substring with `<redacted-url>`,
+/// preserving the surrounding text. Used to keep RPC URLs (which can come
+/// from repo secrets) out of the load-test JSON report and other surfaces
+/// that may include propagated error messages.
+///
+/// Terminators recognised as the end of a URL: whitespace, `'`, `"`, `)`,
+/// `]`, `,`, `;`, `<`, `>`.
+pub(crate) fn scrub_urls(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let rest = &input[i..];
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            let end = rest
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, '\'' | '"' | ')' | ']' | ',' | ';' | '<' | '>')
+                })
+                .unwrap_or(rest.len());
+            out.push_str("<redacted-url>");
+            i += end;
+        } else {
+            let ch_len = rest.chars().next().map_or(1, char::len_utf8);
+            out.push_str(&input[i..i + ch_len]);
+            i += ch_len;
+        }
+    }
+    out
+}
+
 pub(crate) fn finish_report(
     args: &LoadTestArgs,
     report: &mut LoadTestReport,
@@ -148,6 +177,15 @@ pub(crate) fn finish_report(
     report.protocol = format!("{}", args.protocol);
     report.tps = args.tps;
     report.duration_secs = args.duration_secs;
+    // Scrub any URLs that upstream-crate errors may have folded into
+    // per-tx error strings. Belt-and-suspenders alongside the error-template
+    // refactor: private RPC URLs (from repo secrets) must not appear in the
+    // JSON artifact, regardless of where the underlying error came from.
+    for tx in &mut report.transactions {
+        if let Some(err) = tx.error.as_mut() {
+            *err = scrub_urls(err);
+        }
+    }
     print_final_report(report);
 
     // Write full JSON report to a timestamped file so failures can be inspected afterwards.
@@ -219,16 +257,21 @@ pub(crate) fn list_gateway_chains(cfg: &ChainsConfig) -> Vec<String> {
 }
 
 /// Validate that an RPC endpoint speaks EVM JSON-RPC (eth_chainId).
+///
+/// Error messages intentionally omit the URL — RPC endpoints can come from
+/// repo secrets (private/paid providers) and should not surface in logs or
+/// in the JSON load-test report. The URL is still useful for debugging, so
+/// we log the chain it failed for instead.
 pub(crate) async fn validate_evm_rpc(rpc_url: &str) -> Result<()> {
     let provider = ProviderBuilder::new().connect_http(
         rpc_url
             .parse()
-            .map_err(|e| eyre::eyre!("invalid RPC URL '{rpc_url}': {e}"))?,
+            .map_err(|e| eyre::eyre!("invalid EVM RPC URL: {e}"))?,
     );
     provider.get_chain_id().await.map_err(|_| {
         eyre::eyre!(
-            "RPC '{rpc_url}' does not appear to be an EVM endpoint \
-             (eth_chainId failed). Check that you're using the correct RPC URL."
+            "configured EVM RPC does not appear to be a valid endpoint \
+             (eth_chainId failed). Check the chain-config or RPC override."
         )
     })?;
     Ok(())
@@ -253,7 +296,7 @@ pub(crate) async fn ensure_evm_contract_deployed(
         .map_err(|e| eyre::eyre!("eth_getCode for {contract_label} ({addr}) failed: {e}"))?;
     if code.is_empty() {
         eyre::bail!(
-            "{contract_label} at {addr} on {rpc_url} has no bytecode. \
+            "{contract_label} at {addr} has no bytecode on the configured RPC. \
              The chain config likely points at an undeployed/stale address — \
              this environment cannot relay messages to that contract. \
              Pick a different chain pair or update the chain config to a deployed address."

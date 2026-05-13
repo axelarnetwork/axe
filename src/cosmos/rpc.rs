@@ -397,8 +397,9 @@ static LCD_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new()
 /// Print a one-time warning when an LCD response came from a fallback
 /// endpoint instead of the user-configured primary. `idx` is the position
 /// in the candidate list — `0` is the primary (no warning), anything ≥ 1 is
-/// a fallback.
-fn note_lcd_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+/// a fallback. The endpoint URL is intentionally NOT logged — it can be a
+/// private/paid endpoint from a repo secret.
+fn note_lcd_fallback_use(idx: usize, _used: &str, last_err: Option<&eyre::Report>) {
     if idx == 0 {
         return;
     }
@@ -412,7 +413,7 @@ fn note_lcd_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>
         })
         .unwrap_or_else(|| "primary unreachable".to_string());
     ui::warn(&format!(
-        "Axelar LCD primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+        "Axelar LCD primary unhealthy ({cause}); using fallback LCD for the rest of this run"
     ));
 }
 
@@ -446,6 +447,13 @@ pub async fn lcd_cosmwasm_smart_query(
     let mut last_err: Option<eyre::Report> = None;
 
     for (idx, endpoint) in candidates.iter().enumerate() {
+        // Role label keeps logs / report files free of endpoint URLs (which
+        // can be private / paid endpoints supplied via repo secrets).
+        let role = if idx == 0 {
+            "primary LCD"
+        } else {
+            "fallback LCD"
+        };
         let url = format!("{endpoint}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
         match reqwest::get(&url).await {
             Ok(response) => {
@@ -454,7 +462,7 @@ pub async fn lcd_cosmwasm_smart_query(
                     Ok(body) => {
                         if !status.is_success() {
                             last_err = Some(eyre::eyre!(
-                                "LCD {endpoint} returned HTTP {status}. \
+                                "{role} returned HTTP {status}. \
                                  First 200 chars of body: {}",
                                 body.chars().take(200).collect::<String>()
                             ));
@@ -464,7 +472,7 @@ pub async fn lcd_cosmwasm_smart_query(
                             Ok(resp) => {
                                 let data = resp.get("data").cloned().ok_or_else(|| {
                                     eyre::eyre!(
-                                        "LCD {endpoint} response missing data field. \
+                                        "{role} response missing data field. \
                                          First 200 chars: {}",
                                         body.chars().take(200).collect::<String>()
                                     )
@@ -481,7 +489,7 @@ pub async fn lcd_cosmwasm_smart_query(
                             }
                             Err(e) => {
                                 last_err = Some(eyre::eyre!(
-                                    "LCD {endpoint} returned non-JSON body. \
+                                    "{role} returned non-JSON body. \
                                      First 200 chars: {}\nParse error: {e}",
                                     body.chars().take(200).collect::<String>()
                                 ));
@@ -490,13 +498,13 @@ pub async fn lcd_cosmwasm_smart_query(
                         }
                     }
                     Err(e) => {
-                        last_err = Some(eyre::eyre!("LCD {endpoint} body read failed: {e}"));
+                        last_err = Some(eyre::eyre!("{role} body read failed: {e}"));
                         continue;
                     }
                 }
             }
             Err(e) => {
-                last_err = Some(eyre::eyre!("LCD request to {endpoint} failed: {e}"));
+                last_err = Some(eyre::eyre!("{role} request failed: {e}"));
                 continue;
             }
         }
@@ -608,7 +616,7 @@ fn rpc_fallbacks_for(primary: &str) -> &'static [&'static str] {
 /// flood the report log.
 static RPC_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
-fn note_rpc_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+fn note_rpc_fallback_use(idx: usize, _used: &str, last_err: Option<&eyre::Report>) {
     if idx == 0 {
         return;
     }
@@ -622,7 +630,7 @@ fn note_rpc_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>
         })
         .unwrap_or_else(|| "primary unreachable".to_string());
     ui::warn(&format!(
-        "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+        "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback for the rest of this run"
     ));
 }
 
@@ -651,14 +659,18 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
     let mut last_err: Option<eyre::Report> = None;
 
     for (idx, endpoint) in candidates.iter().enumerate() {
+        // Role label keeps URLs out of logs / report (see lcd_cosmwasm_smart_query).
+        let role = if idx == 0 {
+            "primary Tendermint RPC"
+        } else {
+            "fallback Tendermint RPC"
+        };
         let url = format!("{endpoint}/tx_search?query={encoded}&per_page=1");
         match reqwest::get(&url).await {
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() {
-                    last_err = Some(eyre::eyre!(
-                        "Tendermint RPC {endpoint} returned HTTP {status}"
-                    ));
+                    last_err = Some(eyre::eyre!("{role} returned HTTP {status}"));
                     continue;
                 }
                 match response.json::<Value>().await {
@@ -667,13 +679,13 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
                         return Ok(v);
                     }
                     Err(e) => {
-                        last_err = Some(eyre::eyre!("RPC {endpoint} JSON decode failed: {e}"));
+                        last_err = Some(eyre::eyre!("{role} JSON decode failed: {e}"));
                         continue;
                     }
                 }
             }
             Err(e) => {
-                last_err = Some(eyre::eyre!("RPC request to {endpoint} failed: {e}"));
+                last_err = Some(eyre::eyre!("{role} request failed: {e}"));
                 continue;
             }
         }

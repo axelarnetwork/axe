@@ -67,7 +67,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     } else {
         args.source_rpc.clone()
     };
-    ui::kv("Sui RPC", &sui_rpc);
     let sui_client = crate::sui::SuiClient::new(&sui_rpc);
 
     let its_contracts = crate::sui::read_sui_its_config(&args.config, src)?;
