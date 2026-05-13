@@ -82,58 +82,22 @@ inputs:
 runs:
   using: composite
   steps:
-    # Step 1 — try to grab the pre-built binary for this exact commit. Tagged
-    # by `${{ github.sha }}`, so a code change automatically invalidates: new
-    # SHA, no artifact, fall through to the local build.
-    - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
-      id: download_axe
-      uses: dawidd6/action-download-artifact@v6
-      with:
-        workflow: build-axe.yml
-        name: axe-${{ inputs.network }}-${{ github.sha }}
-        commit: ${{ github.sha }}
-        path: target/release
-        if_no_artifact_found: warn
-
-    - name: Mark pre-built axe executable
-      if: steps.download_axe.outputs.found_artifact == 'true'
-      shell: bash
-      run: chmod +x target/release/axe
-
-    # Steps 2a-2c — fallback build. Only runs when the pre-build step didn't
-    # find an artifact (e.g. dispatched from a branch before build-axe ran for
-    # it, or the artifact's 30-day retention lapsed).
-    - name: Set up Rust toolchain (fallback)
-      if: steps.download_axe.outputs.found_artifact != 'true'
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Cargo cache (fallback)
-      if: steps.download_axe.outputs.found_artifact != 'true'
-      uses: Swatinem/rust-cache@v2
-      with:
-        key: ${{ inputs.network }}
-
-    - name: Build axe (fallback, ${{ inputs.network }})
-      if: steps.download_axe.outputs.found_artifact != 'true'
-      shell: bash
-      run: cargo build --release --locked --no-default-features --features "${{ inputs.network }}"
-
-    - name: Clone axelar-contract-deployments
-      shell: bash
-      run: |
-        set -euo pipefail
-        git clone --depth 1 https://github.com/axelarnetwork/axelar-contract-deployments.git "$RUNNER_TEMP/axelar-contract-deployments"
-
-    # Map dropdown display names to the network-specific axelar IDs. The
-    # dropdown is curated to chains we've actually run load tests against;
-    # add new entries here when a new chain is exercised end-to-end.
-    - name: Resolve chain display names to axelar IDs
+    # Step 0 — validate the requested (protocol, source, destination) combination
+    # against axe's dispatcher matrix BEFORE any expensive work (artifact download,
+    # cargo build, repo clone). Unsupported combos bail in <5s with a clear error.
+    # Also resolves the user-friendly display names to the network-specific axelar
+    # IDs that axe expects on the CLI.
+    #
+    # When you extend the dispatcher in src/commands/load_test/mod.rs, update the
+    # ROUTES table below to match.
+    - name: Resolve chain names + validate route
       id: resolve_chains
       shell: bash
       env:
         NETWORK: ${{ inputs.network }}
         SOURCE_DISPLAY: ${{ inputs.source_chain }}
         DEST_DISPLAY: ${{ inputs.destination_chain }}
+        PROTOCOL: ${{ inputs.protocol }}
       run: |
         set -euo pipefail
         CHAIN_MAP=$(cat <<'EOF'
@@ -154,6 +118,50 @@ runs:
         EOF
         )
 
+        # Display name -> axe-side chain-type bucket. Drives the route check.
+        CHAIN_TYPES=$(cat <<'EOF'
+        {
+          "Arbitrum":    "evm",
+          "Avalanche":   "evm",
+          "Base":        "evm",
+          "Ethereum":    "evm",
+          "Flow":        "evm",
+          "Hyperliquid": "evm",
+          "Optimism":    "evm",
+          "Solana":      "sol",
+          "Stellar":     "stellar",
+          "Sui":         "sui",
+          "XRPL":        "xrpl",
+          "XRPL EVM":    "evm"
+        }
+        EOF
+        )
+
+        # Supported routes per protocol. Mirrors the dispatcher in
+        # src/commands/load_test/mod.rs:218. Anything not here bails at axe
+        # runtime; we bail here too to save ~7 min of cargo build.
+        ROUTES=$(cat <<'EOF'
+        {
+          "gmp": {
+            "evm":     ["evm", "sol", "sui", "stellar"],
+            "sol":     ["evm", "sol", "sui", "stellar"],
+            "stellar": ["evm", "sol", "sui"],
+            "sui":     ["evm"]
+          },
+          "its": {
+            "evm":     ["sol", "stellar", "xrpl"],
+            "sol":     ["evm"],
+            "stellar": ["evm", "sol"],
+            "sui":     ["evm"],
+            "xrpl":    ["evm"]
+          },
+          "its-with-data": {
+            "evm": ["sol"]
+          }
+        }
+        EOF
+        )
+
         resolve() {
           local display="$1" role="$2"
           local id
@@ -168,8 +176,68 @@ runs:
         SRC_ID=$(resolve "$SOURCE_DISPLAY" "source")
         DST_ID=$(resolve "$DEST_DISPLAY" "destination")
         echo "Resolved on $NETWORK: $SOURCE_DISPLAY -> $SRC_ID, $DEST_DISPLAY -> $DST_ID"
+
+        # Route validation: cross-check (protocol, src_type, dst_type) against
+        # axe's dispatcher matrix.
+        SRC_TYPE=$(echo "$CHAIN_TYPES" | jq -r --arg c "$SOURCE_DISPLAY" '.[$c] // empty')
+        DST_TYPE=$(echo "$CHAIN_TYPES" | jq -r --arg c "$DEST_DISPLAY" '.[$c] // empty')
+        if [ -z "$SRC_TYPE" ] || [ -z "$DST_TYPE" ]; then
+            echo "::error::Chain type unknown for '$SOURCE_DISPLAY' or '$DEST_DISPLAY' — extend CHAIN_TYPES in .github/actions/run-loadtest/action.yml" >&2
+            exit 1
+        fi
+        ALLOWED=$(echo "$ROUTES" | jq -r --arg p "$PROTOCOL" --arg s "$SRC_TYPE" \
+                                       --arg d "$DST_TYPE" '.[$p][$s] // [] | index($d)')
+        if [ "$ALLOWED" = "null" ]; then
+            echo "::error::Route not supported: $PROTOCOL $SOURCE_DISPLAY -> $DEST_DISPLAY ($SRC_TYPE -> $DST_TYPE)." >&2
+            echo "::error::axe does not implement this combination. See src/commands/load_test/mod.rs:218 for the live dispatch matrix; supported routes for $PROTOCOL are:" >&2
+            echo "$ROUTES" | jq -r --arg p "$PROTOCOL" '.[$p] | to_entries[] | "  \(.key) -> [\(.value | join(", "))]"' >&2
+            exit 1
+        fi
+        echo "Route validated: $PROTOCOL $SRC_TYPE -> $DST_TYPE"
         echo "source_axelar_id=$SRC_ID" >> "$GITHUB_OUTPUT"
         echo "destination_axelar_id=$DST_ID" >> "$GITHUB_OUTPUT"
+
+    # Try to grab the pre-built binary for this exact commit. Tagged by
+    # `${{ github.sha }}`, so a code change automatically invalidates: new
+    # SHA, no artifact, fall through to the local build.
+    - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
+      id: download_axe
+      uses: dawidd6/action-download-artifact@v6
+      with:
+        workflow: build-axe.yml
+        name: axe-${{ inputs.network }}-${{ github.sha }}
+        commit: ${{ github.sha }}
+        path: target/release
+        if_no_artifact_found: warn
+
+    - name: Mark pre-built axe executable
+      if: steps.download_axe.outputs.found_artifact == 'true'
+      shell: bash
+      run: chmod +x target/release/axe
+
+    # Fallback build. Only runs when the pre-build step didn't find an
+    # artifact (e.g. dispatched from a branch before build-axe ran for it,
+    # or the artifact's 30-day retention lapsed).
+    - name: Set up Rust toolchain (fallback)
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cargo cache (fallback)
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.network }}
+
+    - name: Build axe (fallback, ${{ inputs.network }})
+      if: steps.download_axe.outputs.found_artifact != 'true'
+      shell: bash
+      run: cargo build --release --locked --no-default-features --features "${{ inputs.network }}"
+
+    - name: Clone axelar-contract-deployments
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone --depth 1 https://github.com/axelarnetwork/axelar-contract-deployments.git "$RUNNER_TEMP/axelar-contract-deployments"
 
     - name: Run load test
       shell: bash
@@ -205,6 +273,19 @@ runs:
                  SUI_PRIVATE_KEY XRPL_PRIVATE_KEY STELLAR_PRIVATE_KEY; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
         done
+
+        # axe reads SOLANA_PRIVATE_KEY as a *file path* (read_keypair_file),
+        # but the natural way to store a Solana keypair in a GH secret is the
+        # JSON-array form `[12,34,...,255]` from `solana-keygen`. If we
+        # detect that shape, materialize it to a tempfile and point the env
+        # var at the file. chmod 600 so the runner's other steps can't read
+        # it via filesystem if the workflow ever invoked untrusted code.
+        if [ -n "${SOLANA_PRIVATE_KEY:-}" ] && [[ "$SOLANA_PRIVATE_KEY" == \[* ]]; then
+            KEY_FILE="$RUNNER_TEMP/solana_keypair.json"
+            printf '%s' "$SOLANA_PRIVATE_KEY" > "$KEY_FILE"
+            chmod 600 "$KEY_FILE"
+            export SOLANA_PRIVATE_KEY="$KEY_FILE"
+        fi
 
         # Default RPCs from per-chain repo secrets, if set. Pattern:
         # <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC (e.g. SOLANA_TESTNET_RPC,
