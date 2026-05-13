@@ -1,0 +1,219 @@
+name: Test Amplifier Routes
+
+# Fans out a single-tx load test across every wired axe route for the chosen
+# network + protocol, in parallel matrix jobs. Final summary lists each route
+# with ✓ / ✗ so you can spot a fleet-wide regression without dispatching the
+# single-test workflow ten times.
+#
+# Route fleet is curated per (network, protocol) and mirrors the dispatcher in
+# src/commands/load_test/mod.rs:218. EVM-side chain is fixed to one canonical
+# representative per environment (Avalanche on testnet) to avoid evm→evm
+# permutations; XRPL is paired exclusively with XRPL EVM because that's the
+# only EVM destination XRPL ITS routes to in this fleet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Axelar network (only testnet wired so far; mainnet/stagenet/devnet require chain availability audit)
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - testnet
+      protocol:
+        description: Protocol
+        type: choice
+        required: true
+        default: its
+        options:
+          - gmp
+          - its
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.compute.outputs.matrix }}
+    steps:
+      - id: compute
+        env:
+          NETWORK: ${{ inputs.network }}
+          PROTOCOL: ${{ inputs.protocol }}
+        run: |
+          set -euo pipefail
+          # Each fleet is a `matrix.include` JSON: every entry has a display
+          # `name` (shown in the GitHub Actions UI per matrix job) plus
+          # `src` / `dst` keys (forwarded to the composite action's
+          # source_chain / destination_chain inputs).
+          MATRIX_TESTNET_ITS='{"include":[
+            {"name":"Avalanche -> Solana","src":"Avalanche","dst":"Solana"},
+            {"name":"Solana -> Avalanche","src":"Solana","dst":"Avalanche"},
+            {"name":"Avalanche -> Stellar","src":"Avalanche","dst":"Stellar"},
+            {"name":"Stellar -> Avalanche","src":"Stellar","dst":"Avalanche"},
+            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
+            {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
+            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
+            {"name":"Sui -> Avalanche","src":"Sui","dst":"Avalanche"}
+          ]}'
+          MATRIX_TESTNET_GMP='{"include":[
+            {"name":"Avalanche -> Solana","src":"Avalanche","dst":"Solana"},
+            {"name":"Solana -> Avalanche","src":"Solana","dst":"Avalanche"},
+            {"name":"Avalanche -> Sui","src":"Avalanche","dst":"Sui"},
+            {"name":"Sui -> Avalanche","src":"Sui","dst":"Avalanche"},
+            {"name":"Avalanche -> Stellar","src":"Avalanche","dst":"Stellar"},
+            {"name":"Stellar -> Avalanche","src":"Stellar","dst":"Avalanche"},
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
+            {"name":"Solana -> Stellar","src":"Solana","dst":"Stellar"},
+            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
+            {"name":"Stellar -> Sui","src":"Stellar","dst":"Sui"}
+          ]}'
+          case "$NETWORK/$PROTOCOL" in
+            "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;
+            "testnet/gmp") MATRIX="$MATRIX_TESTNET_GMP" ;;
+            *)
+              echo "::error::Route fleet for $NETWORK / $PROTOCOL is not defined yet — extend the matrix in .github/workflows/test-amplifier-routes.yml" >&2
+              exit 1
+              ;;
+          esac
+          echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  loadtest:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    env:
+      # Per-chain private RPC overrides (same block as the other workflows).
+      # Pattern: <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC.
+      ARBITRUM_MAINNET_RPC:        ${{ secrets.ARBITRUM_MAINNET_RPC }}
+      ARBITRUM_TESTNET_RPC:        ${{ secrets.ARBITRUM_TESTNET_RPC }}
+      ARBITRUM_STAGENET_RPC:       ${{ secrets.ARBITRUM_STAGENET_RPC }}
+      AVALANCHE_MAINNET_RPC:       ${{ secrets.AVALANCHE_MAINNET_RPC }}
+      AVALANCHE_TESTNET_RPC:       ${{ secrets.AVALANCHE_TESTNET_RPC }}
+      AVALANCHE_STAGENET_RPC:      ${{ secrets.AVALANCHE_STAGENET_RPC }}
+      BASE_MAINNET_RPC:            ${{ secrets.BASE_MAINNET_RPC }}
+      BASE_TESTNET_RPC:            ${{ secrets.BASE_TESTNET_RPC }}
+      BASE_STAGENET_RPC:           ${{ secrets.BASE_STAGENET_RPC }}
+      ETHEREUM_MAINNET_RPC:        ${{ secrets.ETHEREUM_MAINNET_RPC }}
+      ETHEREUM_TESTNET_RPC:        ${{ secrets.ETHEREUM_TESTNET_RPC }}
+      ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
+      FLOW_MAINNET_RPC:            ${{ secrets.FLOW_MAINNET_RPC }}
+      FLOW_TESTNET_RPC:            ${{ secrets.FLOW_TESTNET_RPC }}
+      FLOW_STAGENET_RPC:           ${{ secrets.FLOW_STAGENET_RPC }}
+      FLOW_DEVNET_AMPLIFIER_RPC:   ${{ secrets.FLOW_DEVNET_AMPLIFIER_RPC }}
+      HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
+      HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
+      HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
+      OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
+      OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
+      OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
+      SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
+      SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
+      SOLANA_STAGENET_RPC:         ${{ secrets.SOLANA_STAGENET_RPC }}
+      SOLANA_DEVNET_AMPLIFIER_RPC: ${{ secrets.SOLANA_DEVNET_AMPLIFIER_RPC }}
+      STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
+      STELLAR_TESTNET_RPC:         ${{ secrets.STELLAR_TESTNET_RPC }}
+      SUI_MAINNET_RPC:             ${{ secrets.SUI_MAINNET_RPC }}
+      SUI_TESTNET_RPC:             ${{ secrets.SUI_TESTNET_RPC }}
+      SUI_STAGENET_RPC:            ${{ secrets.SUI_STAGENET_RPC }}
+      SUI_DEVNET_AMPLIFIER_RPC:    ${{ secrets.SUI_DEVNET_AMPLIFIER_RPC }}
+      XRPL_MAINNET_RPC:            ${{ secrets.XRPL_MAINNET_RPC }}
+      XRPL_TESTNET_RPC:            ${{ secrets.XRPL_TESTNET_RPC }}
+      XRPL_STAGENET_RPC:           ${{ secrets.XRPL_STAGENET_RPC }}
+      XRPL_DEVNET_AMPLIFIER_RPC:   ${{ secrets.XRPL_DEVNET_AMPLIFIER_RPC }}
+      XRPL_EVM_MAINNET_RPC:        ${{ secrets.XRPL_EVM_MAINNET_RPC }}
+      XRPL_EVM_TESTNET_RPC:        ${{ secrets.XRPL_EVM_TESTNET_RPC }}
+      XRPL_EVM_STAGENET_RPC:       ${{ secrets.XRPL_EVM_STAGENET_RPC }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: route_test
+        uses: ./.github/actions/run-loadtest
+        with:
+          network: ${{ inputs.network }}
+          source_chain: ${{ matrix.src }}
+          destination_chain: ${{ matrix.dst }}
+          protocol: ${{ inputs.protocol }}
+          num_txs: "1"
+          # Unique suffix avoids artifact-name collision across matrix jobs.
+          artifact_suffix: -route-${{ strategy.job-index }}
+          evm_private_key: ${{ secrets.EVM_PRIVATE_KEY }}
+          solana_private_key: ${{ secrets.SOLANA_PRIVATE_KEY }}
+          sui_private_key: ${{ secrets.SUI_PRIVATE_KEY }}
+          xrpl_private_key: ${{ secrets.XRPL_PRIVATE_KEY }}
+          stellar_private_key: ${{ secrets.STELLAR_PRIVATE_KEY }}
+
+      - name: Record route result
+        if: always()
+        run: |
+          mkdir -p route-results
+          # job.status reflects whether any prior step in this job failed.
+          # With `if: always()` we run regardless; the value is "success",
+          # "failure", or "cancelled".
+          STATUS="${{ job.status }}"
+          # Use job-index as filename so the summary step can read them in
+          # matrix order.
+          IDX="${{ strategy.job-index }}"
+          printf '%s|%s\n' "${{ matrix.name }}" "$STATUS" > "route-results/$IDX.txt"
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: route-status-${{ strategy.job-index }}
+          path: route-results/${{ strategy.job-index }}.txt
+
+  summary:
+    needs: [setup, loadtest]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect per-route status artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: route-status-*
+          merge-multiple: true
+          path: route-results
+
+      - name: Print summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## Amplifier route fleet — ${{ inputs.network }} / ${{ inputs.protocol }}"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          PASSED=0
+          TOTAL=0
+          # Sort numerically by job-index so the order mirrors the matrix.
+          for f in $(find route-results -name '*.txt' 2>/dev/null | sort -V); do
+            line=$(cat "$f")
+            route="${line%|*}"
+            status="${line#*|}"
+            TOTAL=$((TOTAL + 1))
+            if [ "$status" = "success" ]; then
+              echo "✓ $route" >> "$GITHUB_STEP_SUMMARY"
+              PASSED=$((PASSED + 1))
+            else
+              echo "✗ $route ($status)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::No route results recorded (setup job likely failed)." >&2
+            echo "_No route results recorded; setup job likely failed._" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          {
+            echo ""
+            echo "**$PASSED / $TOTAL passed**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Echo to stdout too so it's visible in the job log, not just the
+          # workflow run summary tab.
+          cat "$GITHUB_STEP_SUMMARY"
+
+          # Exit non-zero if any route failed so the workflow run shows red
+          # and downstream automation can detect regression.
+          [ "$PASSED" -eq "$TOTAL" ] || exit 1
