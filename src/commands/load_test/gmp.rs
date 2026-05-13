@@ -777,7 +777,6 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     let network_type = read_stellar_network_type(&args.config, src)?;
     let use_friendbot = matches!(network_type.as_str(), "testnet" | "futurenet");
     let stellar_client = crate::stellar::StellarClient::new(stellar_rpc, &network_type)?;
-    ui::kv("Stellar RPC", stellar_rpc);
     ui::kv("network", &network_type);
 
     // GMP flow uses `AxelarExample.send(...)` — the high-level wrapper that
@@ -1276,7 +1275,6 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     } else {
         args.source_rpc.clone()
     };
-    ui::kv("Sui RPC", &sui_rpc);
     let sui_client = crate::sui::SuiClient::new(&sui_rpc);
     let chain_id = sui_client
         .get_chain_identifier()

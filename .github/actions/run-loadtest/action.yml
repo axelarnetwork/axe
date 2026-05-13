@@ -6,10 +6,10 @@ inputs:
     description: Axelar network feature flag (mainnet/testnet/stagenet/devnet-amplifier).
     required: true
   source_chain:
-    description: Source chain axelar ID (e.g. solana, solana-stagenet-3, flow, avalanche).
+    description: Source chain display name (resolved to the actual ID by the action)
     required: true
   destination_chain:
-    description: Destination chain axelar ID.
+    description: Destination chain display name.
     required: true
   protocol:
     description: gmp | its | its-with-data
@@ -82,8 +82,123 @@ inputs:
 runs:
   using: composite
   steps:
-    # Step 1 — try to grab the pre-built binary for this exact commit. Tagged
-    # by `${{ github.sha }}`, so a code change automatically invalidates: new
+    # Step 0 — validate the requested (protocol, source, destination) combination
+    # against axe's dispatcher matrix BEFORE any expensive work (artifact download,
+    # cargo build, repo clone). Unsupported combos bail in <5s with a clear error.
+    # Also resolves the user-friendly display names to the network-specific axelar
+    # IDs that axe expects on the CLI.
+    #
+    # When you extend the dispatcher in src/commands/load_test/mod.rs, update the
+    # ROUTES table below to match.
+    - name: Resolve chain names + validate route
+      id: resolve_chains
+      shell: bash
+      env:
+        NETWORK: ${{ inputs.network }}
+        SOURCE_DISPLAY: ${{ inputs.source_chain }}
+        DEST_DISPLAY: ${{ inputs.destination_chain }}
+        PROTOCOL: ${{ inputs.protocol }}
+      run: |
+        set -euo pipefail
+        CHAIN_MAP=$(cat <<'EOF'
+        {
+          "Arbitrum":    {"mainnet": "arbitrum",   "testnet": "arbitrum-sepolia", "stagenet": "arbitrum-sepolia"},
+          "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche"},
+          "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
+          "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
+          "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
+          "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
+          "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
+          "Solana":      {"mainnet": "solana",     "testnet": "solana",           "stagenet": "solana-stagenet-3", "devnet-amplifier": "solana-18"},
+          "Stellar":     {"mainnet": "stellar",    "testnet": "stellar-2026-q1-2"},
+          "Sui":         {"mainnet": "sui",        "testnet": "sui",              "stagenet": "sui", "devnet-amplifier": "sui-2"},
+          "XRPL":        {"mainnet": "xrpl",       "testnet": "xrpl",             "stagenet": "xrpl", "devnet-amplifier": "xrpl-dev"},
+          "XRPL EVM":    {"mainnet": "xrpl-evm",   "testnet": "xrpl-evm",         "stagenet": "xrpl-evm"}
+        }
+        EOF
+        )
+
+        # Display name -> axe-side chain-type bucket. Drives the route check.
+        CHAIN_TYPES=$(cat <<'EOF'
+        {
+          "Arbitrum":    "evm",
+          "Avalanche":   "evm",
+          "Base":        "evm",
+          "Ethereum":    "evm",
+          "Flow":        "evm",
+          "Hyperliquid": "evm",
+          "Optimism":    "evm",
+          "Solana":      "sol",
+          "Stellar":     "stellar",
+          "Sui":         "sui",
+          "XRPL":        "xrpl",
+          "XRPL EVM":    "evm"
+        }
+        EOF
+        )
+
+        # Supported routes per protocol. Mirrors the dispatcher in
+        # src/commands/load_test/mod.rs:218. Anything not here bails at axe
+        # runtime; we bail here too to save ~7 min of cargo build.
+        ROUTES=$(cat <<'EOF'
+        {
+          "gmp": {
+            "evm":     ["evm", "sol", "sui", "stellar"],
+            "sol":     ["evm", "sol", "sui", "stellar"],
+            "stellar": ["evm", "sol", "sui"],
+            "sui":     ["evm"]
+          },
+          "its": {
+            "evm":     ["sol", "stellar", "xrpl"],
+            "sol":     ["evm"],
+            "stellar": ["evm", "sol"],
+            "sui":     ["evm"],
+            "xrpl":    ["evm"]
+          },
+          "its-with-data": {
+            "evm": ["sol"]
+          }
+        }
+        EOF
+        )
+
+        resolve() {
+          local display="$1" role="$2"
+          local id
+          id=$(echo "$CHAIN_MAP" | jq -r --arg n "$display" --arg net "$NETWORK" '.[$n][$net] // empty')
+          if [ -z "$id" ]; then
+            echo "::error::$role chain '$display' is not configured on $NETWORK (extend the chain map in .github/actions/run-loadtest/action.yml if this combination should be supported)" >&2
+            exit 1
+          fi
+          echo "$id"
+        }
+
+        SRC_ID=$(resolve "$SOURCE_DISPLAY" "source")
+        DST_ID=$(resolve "$DEST_DISPLAY" "destination")
+        echo "Resolved on $NETWORK: $SOURCE_DISPLAY -> $SRC_ID, $DEST_DISPLAY -> $DST_ID"
+
+        # Route validation: cross-check (protocol, src_type, dst_type) against
+        # axe's dispatcher matrix.
+        SRC_TYPE=$(echo "$CHAIN_TYPES" | jq -r --arg c "$SOURCE_DISPLAY" '.[$c] // empty')
+        DST_TYPE=$(echo "$CHAIN_TYPES" | jq -r --arg c "$DEST_DISPLAY" '.[$c] // empty')
+        if [ -z "$SRC_TYPE" ] || [ -z "$DST_TYPE" ]; then
+            echo "::error::Chain type unknown for '$SOURCE_DISPLAY' or '$DEST_DISPLAY' — extend CHAIN_TYPES in .github/actions/run-loadtest/action.yml" >&2
+            exit 1
+        fi
+        ALLOWED=$(echo "$ROUTES" | jq -r --arg p "$PROTOCOL" --arg s "$SRC_TYPE" \
+                                       --arg d "$DST_TYPE" '.[$p][$s] // [] | index($d)')
+        if [ "$ALLOWED" = "null" ]; then
+            echo "::error::Route not supported: $PROTOCOL $SOURCE_DISPLAY -> $DEST_DISPLAY ($SRC_TYPE -> $DST_TYPE)." >&2
+            echo "::error::axe does not implement this combination. See src/commands/load_test/mod.rs:218 for the live dispatch matrix; supported routes for $PROTOCOL are:" >&2
+            echo "$ROUTES" | jq -r --arg p "$PROTOCOL" '.[$p] | to_entries[] | "  \(.key) -> [\(.value | join(", "))]"' >&2
+            exit 1
+        fi
+        echo "Route validated: $PROTOCOL $SRC_TYPE -> $DST_TYPE"
+        echo "source_axelar_id=$SRC_ID" >> "$GITHUB_OUTPUT"
+        echo "destination_axelar_id=$DST_ID" >> "$GITHUB_OUTPUT"
+
+    # Try to grab the pre-built binary for this exact commit. Tagged by
+    # `${{ github.sha }}`, so a code change automatically invalidates: new
     # SHA, no artifact, fall through to the local build.
     - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
       id: download_axe
@@ -100,9 +215,9 @@ runs:
       shell: bash
       run: chmod +x target/release/axe
 
-    # Steps 2a-2c — fallback build. Only runs when the pre-build step didn't
-    # find an artifact (e.g. dispatched from a branch before build-axe ran for
-    # it, or the artifact's 30-day retention lapsed).
+    # Fallback build. Only runs when the pre-build step didn't find an
+    # artifact (e.g. dispatched from a branch before build-axe ran for it,
+    # or the artifact's 30-day retention lapsed).
     - name: Set up Rust toolchain (fallback)
       if: steps.download_axe.outputs.found_artifact != 'true'
       uses: dtolnay/rust-toolchain@stable
@@ -128,8 +243,10 @@ runs:
       shell: bash
       env:
         NETWORK: ${{ inputs.network }}
-        SOURCE_CHAIN: ${{ inputs.source_chain }}
-        DESTINATION_CHAIN: ${{ inputs.destination_chain }}
+        SOURCE_DISPLAY: ${{ inputs.source_chain }}
+        DEST_DISPLAY: ${{ inputs.destination_chain }}
+        SOURCE_CHAIN: ${{ steps.resolve_chains.outputs.source_axelar_id }}
+        DESTINATION_CHAIN: ${{ steps.resolve_chains.outputs.destination_axelar_id }}
         PROTOCOL: ${{ inputs.protocol }}
         SOURCE_RPC: ${{ inputs.source_rpc }}
         DESTINATION_RPC: ${{ inputs.destination_rpc }}
@@ -149,6 +266,50 @@ runs:
         STELLAR_PRIVATE_KEY: ${{ inputs.stellar_private_key }}
       run: |
         set -euo pipefail
+        # Unset env vars that are empty so axe falls through to defaults
+        # (e.g. config-default RPCs, ~/.config/solana/id.json). Otherwise
+        # clap reads VAR="" as Some("") rather than None.
+        for v in SOURCE_RPC DESTINATION_RPC EVM_PRIVATE_KEY SOLANA_PRIVATE_KEY \
+                 SUI_PRIVATE_KEY XRPL_PRIVATE_KEY STELLAR_PRIVATE_KEY; do
+            if [ -z "${!v:-}" ]; then unset "$v"; fi
+        done
+
+        # axe reads SOLANA_PRIVATE_KEY as a *file path* (read_keypair_file),
+        # but the natural way to store a Solana keypair in a GH secret is the
+        # JSON-array form `[12,34,...,255]` from `solana-keygen`. If we
+        # detect that shape, materialize it to a tempfile and point the env
+        # var at the file. chmod 600 so the runner's other steps can't read
+        # it via filesystem if the workflow ever invoked untrusted code.
+        if [ -n "${SOLANA_PRIVATE_KEY:-}" ] && [[ "$SOLANA_PRIVATE_KEY" == \[* ]]; then
+            KEY_FILE="$RUNNER_TEMP/solana_keypair.json"
+            printf '%s' "$SOLANA_PRIVATE_KEY" > "$KEY_FILE"
+            chmod 600 "$KEY_FILE"
+            export SOLANA_PRIVATE_KEY="$KEY_FILE"
+        fi
+
+        # Default RPCs from per-chain repo secrets, if set. Pattern:
+        # <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC (e.g. SOLANA_TESTNET_RPC,
+        # XRPL_EVM_MAINNET_RPC). Only applies when the caller didn't pass an
+        # explicit `source_rpc`/`destination_rpc` input — explicit overrides
+        # always win. Falls through to the public RPC in the chains-config
+        # JSON when neither input nor secret is set.
+        to_env_name() {
+            # "Solana" -> "SOLANA", "XRPL EVM" -> "XRPL_EVM",
+            # "devnet-amplifier" -> "DEVNET_AMPLIFIER"
+            echo "$1" | tr '[:lower:] -' '[:upper:]__'
+        }
+        NETWORK_UPPER=$(to_env_name "$NETWORK")
+        SRC_KEY="$(to_env_name "$SOURCE_DISPLAY")_${NETWORK_UPPER}_RPC"
+        DST_KEY="$(to_env_name "$DEST_DISPLAY")_${NETWORK_UPPER}_RPC"
+        if [ -z "${SOURCE_RPC:-}" ] && [ -n "${!SRC_KEY:-}" ]; then
+            export SOURCE_RPC="${!SRC_KEY}"
+            echo "Using $SRC_KEY for source RPC"
+        fi
+        if [ -z "${DESTINATION_RPC:-}" ] && [ -n "${!DST_KEY:-}" ]; then
+            export DESTINATION_RPC="${!DST_KEY}"
+            echo "Using $DST_KEY for destination RPC"
+        fi
+
         CONFIG_PATH="$RUNNER_TEMP/axelar-contract-deployments/axelar-chains-config/info/${NETWORK}.json"
         if [ ! -f "$CONFIG_PATH" ]; then
           echo "::error::Chains config not found at $CONFIG_PATH" >&2
@@ -162,24 +323,39 @@ runs:
           --destination-chain "$DESTINATION_CHAIN"
           --protocol "$PROTOCOL"
         )
-        if [ -n "$SOURCE_RPC" ];       then ARGS+=(--source-rpc "$SOURCE_RPC"); fi
-        if [ -n "$DESTINATION_RPC" ];  then ARGS+=(--destination-rpc "$DESTINATION_RPC"); fi
-        if [ -n "$NUM_TXS" ];          then ARGS+=(--num-txs "$NUM_TXS"); fi
-        if [ -n "$TPS" ];              then ARGS+=(--tps "$TPS"); fi
-        if [ -n "$DURATION_SECS" ];    then ARGS+=(--duration-secs "$DURATION_SECS"); fi
-        if [ -n "$KEY_CYCLE" ];        then ARGS+=(--key-cycle "$KEY_CYCLE"); fi
-        if [ -n "$GAS_VALUE" ];        then ARGS+=(--gas-value "$GAS_VALUE"); fi
-        if [ -n "$TOKEN_ID" ];         then ARGS+=(--token-id "$TOKEN_ID"); fi
-        if [ -n "$PAYLOAD" ];          then ARGS+=(--payload "$PAYLOAD"); fi
-        if [ -n "$COIN_TYPE" ];        then ARGS+=(--coin-type "$COIN_TYPE"); fi
-        if [ -n "$EXTRA_ACCOUNTS" ];   then ARGS+=(--extra-accounts "$EXTRA_ACCOUNTS"); fi
+        # `:-` defaults to empty when the var is unset (the loop above may
+        # have unset the empty optional vars), keeping `set -u` happy.
+        if [ -n "${SOURCE_RPC:-}" ];       then ARGS+=(--source-rpc "$SOURCE_RPC"); fi
+        if [ -n "${DESTINATION_RPC:-}" ];  then ARGS+=(--destination-rpc "$DESTINATION_RPC"); fi
+        if [ -n "${NUM_TXS:-}" ];          then ARGS+=(--num-txs "$NUM_TXS"); fi
+        if [ -n "${TPS:-}" ];              then ARGS+=(--tps "$TPS"); fi
+        if [ -n "${DURATION_SECS:-}" ];    then ARGS+=(--duration-secs "$DURATION_SECS"); fi
+        if [ -n "${KEY_CYCLE:-}" ];        then ARGS+=(--key-cycle "$KEY_CYCLE"); fi
+        if [ -n "${GAS_VALUE:-}" ];        then ARGS+=(--gas-value "$GAS_VALUE"); fi
+        if [ -n "${TOKEN_ID:-}" ];         then ARGS+=(--token-id "$TOKEN_ID"); fi
+        if [ -n "${PAYLOAD:-}" ];          then ARGS+=(--payload "$PAYLOAD"); fi
+        if [ -n "${COIN_TYPE:-}" ];        then ARGS+=(--coin-type "$COIN_TYPE"); fi
+        if [ -n "${EXTRA_ACCOUNTS:-}" ];   then ARGS+=(--extra-accounts "$EXTRA_ACCOUNTS"); fi
 
         ./target/release/axe "${ARGS[@]}"
 
-    - name: Upload load-test report
+    # Only run when there is at least one report to upload; otherwise GitHub's
+    # upload-artifact step prints a misleading "No files were found" warning
+    # on runs that fail before axe writes anything to disk.
+    - name: Check for load-test report
+      id: report_present
       if: always()
+      shell: bash
+      run: |
+        if compgen -G "axe-load-test-logs/*.json" > /dev/null; then
+          echo "found=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload load-test report
+      if: always() && steps.report_present.outputs.found == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}
         path: axe-load-test-logs/*.json
-        if-no-files-found: ignore

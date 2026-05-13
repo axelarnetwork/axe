@@ -368,8 +368,24 @@ const LCD_FALLBACKS_MAINNET: &[&str] = &[
     "https://axelar-rest.publicnode.com",
 ];
 
-fn is_non_mainnet_axelar_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("testnet") || endpoint.contains("stagenet") || endpoint.contains("devnet")
+/// Public Axelar testnet LCD endpoints used the same way as
+/// `LCD_FALLBACKS_MAINNET`. qubelabs (the default in chain configs) returns
+/// HTTP 500 for "message not yet routed" instead of a proper empty response,
+/// so a failover list is essential for testnet runs. Probe with curl before
+/// adding entries — many advertised public testnet LCDs are unreachable,
+/// geo-blocked (`403 administrative rules`), or behind paid API keys.
+const LCD_FALLBACKS_TESTNET: &[&str] = &["https://axelar-testnet-api.polkachu.com"];
+
+/// Returns the fallback LCD list appropriate for a given primary endpoint,
+/// or an empty slice when no public fallbacks exist (stagenet/devnet).
+fn lcd_fallbacks_for(primary: &str) -> &'static [&'static str] {
+    if primary.contains("testnet") {
+        LCD_FALLBACKS_TESTNET
+    } else if primary.contains("stagenet") || primary.contains("devnet") {
+        &[]
+    } else {
+        LCD_FALLBACKS_MAINNET
+    }
 }
 
 /// `OnceLock` flag for the LCD fallback warning. We emit one ui::warn the
@@ -381,8 +397,9 @@ static LCD_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new()
 /// Print a one-time warning when an LCD response came from a fallback
 /// endpoint instead of the user-configured primary. `idx` is the position
 /// in the candidate list — `0` is the primary (no warning), anything ≥ 1 is
-/// a fallback.
-fn note_lcd_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+/// a fallback. The endpoint URL is intentionally NOT logged — it can be a
+/// private/paid endpoint from a repo secret.
+fn note_lcd_fallback_use(idx: usize, _used: &str, last_err: Option<&eyre::Report>) {
     if idx == 0 {
         return;
     }
@@ -396,7 +413,7 @@ fn note_lcd_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>
         })
         .unwrap_or_else(|| "primary unreachable".to_string());
     ui::warn(&format!(
-        "Axelar LCD primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+        "Axelar LCD primary unhealthy ({cause}); using fallback LCD for the rest of this run"
     ));
 }
 
@@ -417,8 +434,8 @@ pub async fn lcd_cosmwasm_smart_query(
     // endpoints. Only the user-set AXELAR_LCD_URL skips fallback — we honor
     // their explicit choice and surface the error directly.
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
-        for fb in LCD_FALLBACKS_MAINNET {
+    if user_override.is_none() {
+        for fb in lcd_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
             }
@@ -430,6 +447,13 @@ pub async fn lcd_cosmwasm_smart_query(
     let mut last_err: Option<eyre::Report> = None;
 
     for (idx, endpoint) in candidates.iter().enumerate() {
+        // Role label keeps logs / report files free of endpoint URLs (which
+        // can be private / paid endpoints supplied via repo secrets).
+        let role = if idx == 0 {
+            "primary LCD"
+        } else {
+            "fallback LCD"
+        };
         let url = format!("{endpoint}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
         match reqwest::get(&url).await {
             Ok(response) => {
@@ -438,7 +462,7 @@ pub async fn lcd_cosmwasm_smart_query(
                     Ok(body) => {
                         if !status.is_success() {
                             last_err = Some(eyre::eyre!(
-                                "LCD {endpoint} returned HTTP {status}. \
+                                "{role} returned HTTP {status}. \
                                  First 200 chars of body: {}",
                                 body.chars().take(200).collect::<String>()
                             ));
@@ -448,7 +472,7 @@ pub async fn lcd_cosmwasm_smart_query(
                             Ok(resp) => {
                                 let data = resp.get("data").cloned().ok_or_else(|| {
                                     eyre::eyre!(
-                                        "LCD {endpoint} response missing data field. \
+                                        "{role} response missing data field. \
                                          First 200 chars: {}",
                                         body.chars().take(200).collect::<String>()
                                     )
@@ -465,7 +489,7 @@ pub async fn lcd_cosmwasm_smart_query(
                             }
                             Err(e) => {
                                 last_err = Some(eyre::eyre!(
-                                    "LCD {endpoint} returned non-JSON body. \
+                                    "{role} returned non-JSON body. \
                                      First 200 chars: {}\nParse error: {e}",
                                     body.chars().take(200).collect::<String>()
                                 ));
@@ -474,13 +498,13 @@ pub async fn lcd_cosmwasm_smart_query(
                         }
                     }
                     Err(e) => {
-                        last_err = Some(eyre::eyre!("LCD {endpoint} body read failed: {e}"));
+                        last_err = Some(eyre::eyre!("{role} body read failed: {e}"));
                         continue;
                     }
                 }
             }
             Err(e) => {
-                last_err = Some(eyre::eyre!("LCD request to {endpoint} failed: {e}"));
+                last_err = Some(eyre::eyre!("{role} request failed: {e}"));
                 continue;
             }
         }
@@ -570,12 +594,29 @@ const RPC_FALLBACKS_MAINNET: &[&str] = &[
     "https://rpc.cosmos.directory/axelar",
 ];
 
+/// Public Axelar testnet Tendermint RPC fallbacks. qubelabs (default) flaps;
+/// polkachu's testnet RPC is the only consistently healthy public endpoint at
+/// the time of writing. Probe with curl before adding entries.
+const RPC_FALLBACKS_TESTNET: &[&str] = &["https://axelar-testnet-rpc.polkachu.com"];
+
+/// Returns the fallback RPC list appropriate for a given primary endpoint.
+/// Stagenet/devnet have no public fallbacks.
+fn rpc_fallbacks_for(primary: &str) -> &'static [&'static str] {
+    if primary.contains("testnet") {
+        RPC_FALLBACKS_TESTNET
+    } else if primary.contains("stagenet") || primary.contains("devnet") {
+        &[]
+    } else {
+        RPC_FALLBACKS_MAINNET
+    }
+}
+
 /// `OnceLock` flag matching `LCD_FALLBACK_WARNED` for the Tendermint RPC
 /// side — same once-per-process semantics so a flapping primary doesn't
 /// flood the report log.
 static RPC_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
-fn note_rpc_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>) {
+fn note_rpc_fallback_use(idx: usize, _used: &str, last_err: Option<&eyre::Report>) {
     if idx == 0 {
         return;
     }
@@ -589,7 +630,7 @@ fn note_rpc_fallback_use(idx: usize, used: &str, last_err: Option<&eyre::Report>
         })
         .unwrap_or_else(|| "primary unreachable".to_string());
     ui::warn(&format!(
-        "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback {used} for the rest of this run"
+        "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback for the rest of this run"
     ));
 }
 
@@ -605,8 +646,8 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
         .to_string();
 
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() && !is_non_mainnet_axelar_endpoint(&primary) {
-        for fb in RPC_FALLBACKS_MAINNET {
+    if user_override.is_none() {
+        for fb in rpc_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
             }
@@ -618,14 +659,18 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
     let mut last_err: Option<eyre::Report> = None;
 
     for (idx, endpoint) in candidates.iter().enumerate() {
+        // Role label keeps URLs out of logs / report (see lcd_cosmwasm_smart_query).
+        let role = if idx == 0 {
+            "primary Tendermint RPC"
+        } else {
+            "fallback Tendermint RPC"
+        };
         let url = format!("{endpoint}/tx_search?query={encoded}&per_page=1");
         match reqwest::get(&url).await {
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() {
-                    last_err = Some(eyre::eyre!(
-                        "Tendermint RPC {endpoint} returned HTTP {status}"
-                    ));
+                    last_err = Some(eyre::eyre!("{role} returned HTTP {status}"));
                     continue;
                 }
                 match response.json::<Value>().await {
@@ -634,13 +679,13 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
                         return Ok(v);
                     }
                     Err(e) => {
-                        last_err = Some(eyre::eyre!("RPC {endpoint} JSON decode failed: {e}"));
+                        last_err = Some(eyre::eyre!("{role} JSON decode failed: {e}"));
                         continue;
                     }
                 }
             }
             Err(e) => {
-                last_err = Some(eyre::eyre!("RPC request to {endpoint} failed: {e}"));
+                last_err = Some(eyre::eyre!("{role} request failed: {e}"));
                 continue;
             }
         }
