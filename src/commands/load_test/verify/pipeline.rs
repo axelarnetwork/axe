@@ -73,6 +73,17 @@ fn is_hub_not_approved_error(error: &eyre::Report) -> bool {
     message.contains("not approved") || message.contains("failed to query executable messages")
 }
 
+/// LCDs (notably qubelabs) sometimes return HTTP 500 with a body like
+/// `"failed to query outgoing messages: message with ID … not found"` while
+/// a freshly-confirmed source-side message is still being routed by the
+/// verifier set. This is a normal pending state, not an outage — treat it
+/// as "not yet routed, keep polling" rather than aborting the whole run.
+fn is_message_not_yet_routed_error(error: &eyre::Report) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("failed to query outgoing messages")
+        || message.contains("message with id") && message.contains("not found")
+}
+
 // ---------------------------------------------------------------------------
 // Destination checker abstraction
 // ---------------------------------------------------------------------------
@@ -1664,7 +1675,11 @@ pub(super) async fn check_cosmos_routed(
         }]
     });
 
-    let resp = lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await?;
+    let resp = match lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await {
+        Ok(resp) => resp,
+        Err(e) if is_message_not_yet_routed_error(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
     let data = resp.get("data").or_else(|| resp.as_array().map(|_| &resp));
     Ok(match data {
         Some(arr) if arr.is_array() => {
@@ -1787,7 +1802,17 @@ async fn batch_check_cosmos_routed_owned(
                 .collect();
             let query = json!({ "outgoing_messages": cc_ids });
             let mut out = Vec::with_capacity(chunk.len());
-            let resp = lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await?;
+            let resp = match lcd_cosmwasm_smart_query(lcd, cosm_gateway, &query).await {
+                Ok(resp) => resp,
+                Err(e) if is_message_not_yet_routed_error(&e) => {
+                    // The whole batch is "not yet routed"; mark all as false.
+                    for (idx, _) in chunk {
+                        out.push((*idx, false));
+                    }
+                    return Ok::<Vec<(usize, bool)>, eyre::Report>(out);
+                }
+                Err(e) => return Err(e),
+            };
             let arr = resp.as_array().ok_or_else(|| {
                 eyre::eyre!("Gateway outgoing_messages returned non-array: {resp}")
             })?;

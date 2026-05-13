@@ -1,4 +1,4 @@
-name: Load test (single)
+name: Single Test
 
 # Runs a single cross-chain transaction end-to-end. Triggerable only by users
 # with write access on the repo (workflow_dispatch is the only entry point).

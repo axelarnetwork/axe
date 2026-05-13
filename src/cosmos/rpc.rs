@@ -371,11 +371,10 @@ const LCD_FALLBACKS_MAINNET: &[&str] = &[
 /// Public Axelar testnet LCD endpoints used the same way as
 /// `LCD_FALLBACKS_MAINNET`. qubelabs (the default in chain configs) returns
 /// HTTP 500 for "message not yet routed" instead of a proper empty response,
-/// so a failover list is essential for testnet runs.
-const LCD_FALLBACKS_TESTNET: &[&str] = &[
-    "https://lcd-axelar-testnet.imperator.co",
-    "https://axelartest-lcd.quickapi.com",
-];
+/// so a failover list is essential for testnet runs. Probe with curl before
+/// adding entries — many advertised public testnet LCDs are unreachable,
+/// geo-blocked (`403 administrative rules`), or behind paid API keys.
+const LCD_FALLBACKS_TESTNET: &[&str] = &["https://axelar-testnet-api.polkachu.com"];
 
 /// Returns the fallback LCD list appropriate for a given primary endpoint,
 /// or an empty slice when no public fallbacks exist (stagenet/devnet).
@@ -588,11 +587,9 @@ const RPC_FALLBACKS_MAINNET: &[&str] = &[
 ];
 
 /// Public Axelar testnet Tendermint RPC fallbacks. qubelabs (default) flaps;
-/// imperator's testnet RPC is generally healthy.
-const RPC_FALLBACKS_TESTNET: &[&str] = &[
-    "https://rpc-axelar-testnet.imperator.co:443",
-    "https://axelartest-rpc.quickapi.com",
-];
+/// polkachu's testnet RPC is the only consistently healthy public endpoint at
+/// the time of writing. Probe with curl before adding entries.
+const RPC_FALLBACKS_TESTNET: &[&str] = &["https://axelar-testnet-rpc.polkachu.com"];
 
 /// Returns the fallback RPC list appropriate for a given primary endpoint.
 /// Stagenet/devnet have no public fallbacks.
