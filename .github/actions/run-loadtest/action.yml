@@ -216,17 +216,19 @@ runs:
           --destination-chain "$DESTINATION_CHAIN"
           --protocol "$PROTOCOL"
         )
-        if [ -n "$SOURCE_RPC" ];       then ARGS+=(--source-rpc "$SOURCE_RPC"); fi
-        if [ -n "$DESTINATION_RPC" ];  then ARGS+=(--destination-rpc "$DESTINATION_RPC"); fi
-        if [ -n "$NUM_TXS" ];          then ARGS+=(--num-txs "$NUM_TXS"); fi
-        if [ -n "$TPS" ];              then ARGS+=(--tps "$TPS"); fi
-        if [ -n "$DURATION_SECS" ];    then ARGS+=(--duration-secs "$DURATION_SECS"); fi
-        if [ -n "$KEY_CYCLE" ];        then ARGS+=(--key-cycle "$KEY_CYCLE"); fi
-        if [ -n "$GAS_VALUE" ];        then ARGS+=(--gas-value "$GAS_VALUE"); fi
-        if [ -n "$TOKEN_ID" ];         then ARGS+=(--token-id "$TOKEN_ID"); fi
-        if [ -n "$PAYLOAD" ];          then ARGS+=(--payload "$PAYLOAD"); fi
-        if [ -n "$COIN_TYPE" ];        then ARGS+=(--coin-type "$COIN_TYPE"); fi
-        if [ -n "$EXTRA_ACCOUNTS" ];   then ARGS+=(--extra-accounts "$EXTRA_ACCOUNTS"); fi
+        # `:-` defaults to empty when the var is unset (the loop above may
+        # have unset the empty optional vars), keeping `set -u` happy.
+        if [ -n "${SOURCE_RPC:-}" ];       then ARGS+=(--source-rpc "$SOURCE_RPC"); fi
+        if [ -n "${DESTINATION_RPC:-}" ];  then ARGS+=(--destination-rpc "$DESTINATION_RPC"); fi
+        if [ -n "${NUM_TXS:-}" ];          then ARGS+=(--num-txs "$NUM_TXS"); fi
+        if [ -n "${TPS:-}" ];              then ARGS+=(--tps "$TPS"); fi
+        if [ -n "${DURATION_SECS:-}" ];    then ARGS+=(--duration-secs "$DURATION_SECS"); fi
+        if [ -n "${KEY_CYCLE:-}" ];        then ARGS+=(--key-cycle "$KEY_CYCLE"); fi
+        if [ -n "${GAS_VALUE:-}" ];        then ARGS+=(--gas-value "$GAS_VALUE"); fi
+        if [ -n "${TOKEN_ID:-}" ];         then ARGS+=(--token-id "$TOKEN_ID"); fi
+        if [ -n "${PAYLOAD:-}" ];          then ARGS+=(--payload "$PAYLOAD"); fi
+        if [ -n "${COIN_TYPE:-}" ];        then ARGS+=(--coin-type "$COIN_TYPE"); fi
+        if [ -n "${EXTRA_ACCOUNTS:-}" ];   then ARGS+=(--extra-accounts "$EXTRA_ACCOUNTS"); fi
 
         ./target/release/axe "${ARGS[@]}"
 
