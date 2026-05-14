@@ -196,6 +196,37 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         args.protocol, args.test_type, args.source_chain, args.destination_chain
     ));
 
+    // Hyperliquid requires the deploying wallet to be opted into "big blocks"
+    // before any contract-deploy tx is accepted. axe deploys SenderReceiver
+    // (GMP) and a fresh ITS token (ITS source-side) on first run, so we
+    // pre-emptively enable big blocks whenever Hyperliquid is on either side.
+    // Idempotent on the API side: calling enable twice in a row is a no-op.
+    if args.source_axelar_id.starts_with("hyperliquid")
+        || args.destination_axelar_id.starts_with("hyperliquid")
+    {
+        let key = args
+            .private_key
+            .clone()
+            .or_else(|| std::env::var("EVM_PRIVATE_KEY").ok());
+        if let Some(key) = key {
+            let env = crate::hyperliquid::env_for_compiled_network();
+            match crate::hyperliquid::enable_big_blocks_from_key(&key, env).await {
+                Ok(addr) => {
+                    ui::info(&format!("Hyperliquid big-blocks enabled for {addr}"));
+                }
+                Err(e) => {
+                    ui::warn(&format!(
+                        "Hyperliquid big-blocks opt-in failed: {e} — contract deploys on Hyperliquid may be rejected"
+                    ));
+                }
+            }
+        } else {
+            ui::warn(
+                "Hyperliquid is in this route but EVM_PRIVATE_KEY is not set; big-blocks opt-in skipped",
+            );
+        }
+    }
+
     // Block consensus chains that have no VotingVerifier — we can't verify them.
     // XRPL uses `XrplVotingVerifier` (not `VotingVerifier`), so we also accept
     // that as evidence of a verifiable source.

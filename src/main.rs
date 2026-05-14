@@ -4,6 +4,7 @@ mod config;
 mod cosmos;
 mod error;
 mod evm;
+mod hyperliquid;
 mod preflight;
 mod solana;
 mod state;
