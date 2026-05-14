@@ -861,10 +861,21 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     };
     ui::info(&format!("deriving {num_keys} Stellar keys..."));
     let wallets = crate::commands::load_test::stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    let txs_per_key = match sustained_params {
+        Some(_) => args.key_cycle,
+        None => 1,
+    };
+    let mainnet_starting_balance =
+        crate::commands::load_test::stellar_sender::mainnet_per_key_balance_stroops(
+            gas_stroops,
+            txs_per_key,
+        );
     crate::commands::load_test::stellar_sender::ensure_funded(
         &stellar_client,
         &wallets,
         use_friendbot,
+        &main_wallet,
+        mainnet_starting_balance,
     )
     .await?;
 
@@ -1140,17 +1151,24 @@ pub(super) async fn run_stellar_to_sol(args: LoadTestArgs, _run_start: Instant) 
     ));
 
     let num_keys = args.num_txs.max(1) as usize;
-    ui::info(&format!("deriving {num_keys} Stellar keys..."));
-    let main_seed = main_wallet.signing_key.to_bytes();
-    let wallets = stellar_sender::derive_wallets(&main_seed, num_keys)?;
-    stellar_sender::ensure_funded(&stellar_client, &wallets, use_friendbot).await?;
-
     let gas_stroops: u64 = match &args.gas_value {
         Some(v) => v
             .parse()
             .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
         None => stellar_sender::DEFAULT_GAS_STROOPS,
     };
+    ui::info(&format!("deriving {num_keys} Stellar keys..."));
+    let main_seed = main_wallet.signing_key.to_bytes();
+    let wallets = stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    let mainnet_starting_balance = stellar_sender::mainnet_per_key_balance_stroops(gas_stroops, 1);
+    stellar_sender::ensure_funded(
+        &stellar_client,
+        &wallets,
+        use_friendbot,
+        &main_wallet,
+        mainnet_starting_balance,
+    )
+    .await?;
 
     let test_start = Instant::now();
     let mut report = stellar_sender::run_burst(
@@ -1679,16 +1697,23 @@ pub(super) async fn run_stellar_to_sui(args: LoadTestArgs, _run_start: Instant) 
     };
 
     let num_keys = args.num_txs.max(1) as usize;
-    let main_seed = main_wallet.signing_key.to_bytes();
-    let wallets = stellar_sender::derive_wallets(&main_seed, num_keys)?;
-    stellar_sender::ensure_funded(&stellar_client, &wallets, use_friendbot).await?;
-
     let gas_stroops: u64 = match &args.gas_value {
         Some(v) => v
             .parse()
             .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
         None => stellar_sender::DEFAULT_GAS_STROOPS,
     };
+    let main_seed = main_wallet.signing_key.to_bytes();
+    let wallets = stellar_sender::derive_wallets(&main_seed, num_keys)?;
+    let mainnet_starting_balance = stellar_sender::mainnet_per_key_balance_stroops(gas_stroops, 1);
+    stellar_sender::ensure_funded(
+        &stellar_client,
+        &wallets,
+        use_friendbot,
+        &main_wallet,
+        mainnet_starting_balance,
+    )
+    .await?;
 
     let test_start = Instant::now();
     let mut report = stellar_sender::run_burst(

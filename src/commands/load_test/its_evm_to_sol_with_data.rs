@@ -34,12 +34,38 @@ const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
 const TOKEN_DECIMALS: u8 = 18;
 
+/// Default gas value: tries the Axelarscan `estimateGasFee` quote for the
+/// route (× 1.5); falls back to a route-agnostic constant when the API
+/// can't be reached.
+async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
+    if let Some(quoted) = quote_route_gas(args).await {
+        return quoted;
+    }
+    fallback_gas_value_wei(&args.source_chain)
+}
+
+async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
+    let cfg = crate::config::ChainsConfig::load(&args.config).ok()?;
+    let symbol = cfg
+        .chains
+        .get(&args.source_chain)?
+        .token_symbol
+        .as_deref()?;
+    super::gas_estimate::estimate_route_gas(
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        symbol,
+        super::gas_estimate::DEFAULT_DEST_GAS_LIMIT,
+    )
+    .await
+}
+
 #[cfg(feature = "devnet-amplifier")]
-fn default_gas_value_wei(_source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
     0
 }
 #[cfg(not(feature = "devnet-amplifier"))]
-fn default_gas_value_wei(source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
         300_000_000_000_000_000
     } else {
@@ -137,7 +163,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("memo program", &memo_program_id.to_string());
     ui::kv("counter PDA", &counter_pda.to_string());
 
-    let (gas_value_wei, gas_value) = parse_gas_value_wei(args.gas_value.as_deref(), src)?;
+    let (gas_value_wei, gas_value) = parse_gas_value_wei(&args).await?;
 
     let sizing = compute_run_sizing(&args);
     let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 1 token
@@ -305,10 +331,10 @@ fn resolve_its_addresses(cfg: &ChainsConfig, src: &str) -> eyre::Result<ItsAddrs
 
 /// Parse the user-supplied gas value (wei), defaulting to
 /// `default_gas_value_wei`, and emit the matching UI line.
-fn parse_gas_value_wei(gas_value: Option<&str>, src: &str) -> eyre::Result<(u128, U256)> {
-    let gas_value_wei: u128 = match gas_value {
+async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<(u128, U256)> {
+    let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => default_gas_value_wei(src),
+        None => default_gas_value_wei(args).await,
     };
     let gas_value = U256::from(gas_value_wei);
 

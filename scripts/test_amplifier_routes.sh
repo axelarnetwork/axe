@@ -119,9 +119,9 @@ ROUTES_MAP=$(cat <<'EOF'
     "sui":     ["evm"]
   },
   "its": {
-    "evm":     ["sol", "stellar", "xrpl"],
-    "sol":     ["evm"],
-    "stellar": ["evm", "sol"],
+    "evm":     ["sol", "stellar", "sui", "xrpl"],
+    "sol":     ["evm", "sui"],
+    "stellar": ["evm", "sol", "sui"],
     "sui":     ["evm"],
     "xrpl":    ["evm"]
   },
