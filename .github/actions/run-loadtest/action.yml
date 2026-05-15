@@ -78,6 +78,10 @@ inputs:
     description: Stellar S... secret key.
     required: false
     default: ""
+  artifact_suffix:
+    description: Suffix appended to the load-test report artifact name. Used by the matrix-style amplifier-routes workflow to avoid collisions across parallel jobs in the same run.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -357,5 +361,5 @@ runs:
       if: always() && steps.report_present.outputs.found == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}
+        name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}${{ inputs.artifact_suffix }}
         path: axe-load-test-logs/*.json
