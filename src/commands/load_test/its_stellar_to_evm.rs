@@ -83,11 +83,17 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("token contract (Stellar)", &token_address);
 
+    // Burst: 1 tx/key. Sustained: each derived key serves `key_cycle` txs in
+    // its rotation slot before rotating out, so fund it for that many gas
+    // payments.
+    let txs_per_key = if sizing.burst_mode { 1 } else { args.key_cycle };
     let wallets = derive_and_fund_wallets(
         &stellar.client,
         &stellar.main_wallet,
         sizing.num_keys,
         stellar.use_friendbot,
+        gas_stroops,
+        txs_per_key,
     )
     .await?;
 
@@ -307,12 +313,23 @@ async fn derive_and_fund_wallets(
     main_wallet: &StellarWallet,
     num_keys: usize,
     use_friendbot: bool,
+    gas_stroops: u64,
+    txs_per_key: u64,
 ) -> Result<Vec<StellarWallet>> {
     ui::info(&format!("deriving {num_keys} Stellar keys..."));
     let main_seed = main_wallet.signing_key.to_bytes();
     let wallets = super::stellar_sender::derive_wallets(&main_seed, num_keys)?;
     let _ = main_seed;
-    super::stellar_sender::ensure_funded(stellar_client, &wallets, use_friendbot).await?;
+    let mainnet_starting_balance =
+        super::stellar_sender::mainnet_per_key_balance_stroops(gas_stroops, txs_per_key);
+    super::stellar_sender::ensure_funded(
+        stellar_client,
+        &wallets,
+        use_friendbot,
+        main_wallet,
+        mainnet_starting_balance,
+    )
+    .await?;
     Ok(wallets)
 }
 

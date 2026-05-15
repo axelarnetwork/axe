@@ -821,6 +821,52 @@ pub(crate) fn sui_dest_lookup(
     Ok((channel, rpc))
 }
 
+/// Same shape as [`sui_dest_lookup`] but resolves the channel id for the
+/// ITS-example contract. Inbound ITS messages are delivered to the
+/// `ItsChannelId` (not the GMP one) — `MessageExecuted` events fire with
+/// this address, and the cgp-sui relayer auto-calls
+/// `example::its::receive_interchain_transfer<T>` against it on
+/// `MessageApproved`.
+pub(crate) fn sui_its_dest_lookup(
+    config: &std::path::Path,
+    sui_chain_id: &str,
+    rpc_override: Option<&str>,
+) -> Result<(String, String)> {
+    let channel = sui_object_id(
+        config,
+        sui_chain_id,
+        "/contracts/Example/objects/ItsChannelId",
+    )?;
+    let (config_rpc, _contracts) = crate::sui::read_sui_chain_config(config, sui_chain_id)?;
+    let rpc = match rpc_override {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => config_rpc,
+    };
+    Ok((channel, rpc))
+}
+
+/// Read the Sui-side AXE token id (32 bytes) from the chain config. The
+/// off-axe `sui/its.js register-coin-from-info` step populates this field
+/// — for *→Sui ITS runs, the source chain must have a matching tokenId
+/// linked via `link-token` so source-side `interchainToken(tokenId)` returns
+/// a non-zero address. CLI overrides via `--token-id` honored.
+pub(crate) fn read_sui_axe_token_id(
+    config: &std::path::Path,
+    sui_chain_id: &str,
+    cli_override: Option<&str>,
+) -> Result<[u8; 32]> {
+    let hex_str = if let Some(s) = cli_override.filter(|s| !s.is_empty()) {
+        s.to_string()
+    } else {
+        sui_object_id(config, sui_chain_id, "/contracts/AXE/objects/TokenId")?
+    };
+    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+        .map_err(|e| eyre::eyre!("Sui AXE TokenId hex decode: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| eyre::eyre!("Sui AXE TokenId must be exactly 32 bytes"))
+}
+
 /// Run the Sui destination verifier and stamp the report. Shared between
 /// `run_evm_to_sui`, `run_sol_to_sui`, `run_stellar_to_sui`.
 pub(crate) async fn finalize_sui_dest_run(
