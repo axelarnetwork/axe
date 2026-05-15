@@ -2,6 +2,8 @@ mod evm_sender;
 mod gas_estimate;
 mod gmp;
 mod helpers;
+mod its_evm_source;
+mod its_evm_to_evm;
 mod its_evm_to_sol;
 mod its_evm_to_sol_with_data;
 mod its_evm_to_stellar;
@@ -286,8 +288,8 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::XrplToEvm) => its_xrpl_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::EvmToXrpl) => its_evm_to_xrpl::run(args, run_start).await,
-        // (kept for clarity — the dispatch line above already wires it up)
-        (Protocol::Its, TestType::EvmToEvm | TestType::SolToSol) => {
+        (Protocol::Its, TestType::EvmToEvm) => its_evm_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::SolToSol) => {
             eyre::bail!(
                 "ITS {}->{} is not yet supported",
                 args.source_chain,

@@ -567,7 +567,7 @@ async fn fund_and_distribute(
     let token_provider = ProviderBuilder::new()
         .wallet(signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, derived, amount_per_key)
+    super::its_evm_source::distribute_tokens(&token_provider, token_addr, derived, amount_per_key)
         .await?;
     Ok(())
 }

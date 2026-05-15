@@ -319,7 +319,7 @@ async fn derive_and_fund_signers(
     let write_provider = ProviderBuilder::new()
         .wallet(evm.main_signer.clone())
         .connect_http(evm.rpc_url.parse()?);
-    super::its_evm_to_sol::distribute_tokens(
+    super::its_evm_source::distribute_tokens(
         &write_provider,
         evm.linked_token_addr,
         &derived,
@@ -368,7 +368,7 @@ async fn run_burst_pipeline(
             let _permit = sem.acquire().await.unwrap();
             let mut last = None;
             for attempt in 0..=MAX_RETRIES {
-                let result = super::its_evm_to_sol::execute_interchain_transfer(
+                let result = super::its_evm_source::execute_interchain_transfer(
                     &provider,
                     its_proxy,
                     tid,
@@ -483,7 +483,7 @@ async fn run_sustained_pipeline(
                 .connect_http(rpc_url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                super::its_evm_to_sol::execute_interchain_transfer(
+                super::its_evm_source::execute_interchain_transfer(
                     &provider, its_proxy, token_id, &dc, &rb, amt, gas_value, nonce,
                 )
                 .await

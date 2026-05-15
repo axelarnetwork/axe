@@ -518,10 +518,10 @@ async fn distribute_and_approve_tokens(
     let token_provider = ProviderBuilder::new()
         .wallet(evm_src.signer.clone())
         .connect_http(evm_rpc_url.parse()?);
-    super::its_evm_to_sol::distribute_tokens(&token_provider, token_addr, derived, amount_per_key)
+    super::its_evm_source::distribute_tokens(&token_provider, token_addr, derived, amount_per_key)
         .await?;
 
-    super::its_evm_to_sol::approve_its_for_keys(
+    super::its_evm_source::approve_its_for_keys(
         evm_rpc_url,
         token_addr,
         evm_src.its_proxy_addr,
@@ -619,7 +619,7 @@ async fn run_sustained_pipeline(
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let mut result = super::its_evm_to_sol::execute_interchain_transfer(
+                let mut result = super::its_evm_source::execute_interchain_transfer(
                     &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
                 )
                 .await;
@@ -717,7 +717,7 @@ async fn run_burst_pipeline(
             let _permit = sem.acquire().await.unwrap();
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result = super::its_evm_to_sol::execute_interchain_transfer(
+                let result = super::its_evm_source::execute_interchain_transfer(
                     &provider, its_proxy, tid, &dc, &rb, amt, gv, None,
                 )
                 .await;

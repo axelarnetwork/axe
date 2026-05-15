@@ -1,3 +1,20 @@
+//! EVM -> EVM ITS load test.
+//!
+//! Mirrors `its_evm_to_sol` on the source side: deploy (or reuse) an
+//! InterchainToken on the source EVM, deploy its remote counterpart on the
+//! destination EVM via the ITS hub, then drive `interchainTransfer` calls
+//! per ephemeral key.
+//!
+//! Differs only in the destination wiring:
+//!   * The `interchainTransfer` `destinationAddress` is a 20-byte EVM
+//!     address (the source signer's address by default, or `DEAD_ADDRESS`
+//!     when no key is configured).
+//!   * Remote-deploy waiting uses `verify::wait_for_its_remote_deploy`
+//!     (EVM-destination variant) instead of the Solana-destination variant.
+//!   * Final verification uses `verify::verify_onchain_evm_its` (and its
+//!     streaming sibling) — the same verifier that backs `its_sol_to_evm`,
+//!     `its_stellar_to_evm`, and `its_xrpl_to_evm`.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -9,7 +26,6 @@ use alloy::{
 };
 use eyre::eyre;
 use futures::future::join_all;
-use solana_sdk::signer::Signer;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::its_evm_source::{
@@ -18,10 +34,13 @@ use super::its_evm_source::{
     verify_axelar_prerequisites,
 };
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::{LoadTestArgs, finish_report, read_its_cache, validate_evm_rpc, validate_solana_rpc};
+use super::{LoadTestArgs, finish_report, read_its_cache, validate_evm_rpc};
 use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenService};
 use crate::ui;
+
+const MAX_CONCURRENT_SENDS: usize = 100;
+const MAX_RETRIES: u32 = 5;
 
 #[cfg(feature = "devnet-amplifier")]
 const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 0;
@@ -39,16 +58,15 @@ fn fallback_gas_value_wei(source_chain: &str) -> u128 {
         FALLBACK_GAS_VALUE_WEI_DEFAULT
     }
 }
-const MAX_CONCURRENT_SENDS: usize = 100;
-const MAX_RETRIES: u32 = 5;
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let evm_rpc_url = args.source_rpc.clone();
-    validate_evm_rpc(&evm_rpc_url).await?;
-    validate_solana_rpc(&args.destination_rpc).await?;
+    let source_rpc_url = args.source_rpc.clone();
+    let dest_rpc_url = args.destination_rpc.clone();
+    validate_evm_rpc(&source_rpc_url).await?;
+    validate_evm_rpc(&dest_rpc_url).await?;
 
     let cfg = ChainsConfig::load(&args.config)?;
     verify_axelar_prerequisites(&cfg, dest)?;
@@ -57,22 +75,34 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("destination", dest);
     ui::kv("protocol", "ITS (interchainTransfer via hub)");
 
-    let evm_source = init_evm_source(&args, &evm_rpc_url).await?;
+    let evm_source = init_evm_source(&args, &source_rpc_url).await?;
     let its = resolve_its_contracts(&cfg, src)?;
+    let dest_gateway_addr = resolve_dest_gateway(&cfg, dest)?;
+    let receiver = derive_receiver(&evm_source);
+    ui::address("receiver", &format!("{receiver}"));
+
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
     let sizing = compute_run_sizing(&args);
 
-    let token =
-        resolve_or_deploy_token(&args, &evm_source, &its, &evm_rpc_url, &sizing, gas_value).await?;
+    let token = resolve_or_deploy_token(
+        &args,
+        &evm_source,
+        &its,
+        &source_rpc_url,
+        &sizing,
+        gas_value,
+    )
+    .await?;
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
-        super::verify::wait_for_its_remote_deploy_to_solana(
+        super::verify::wait_for_its_remote_deploy(
             &args.config,
             src,
             dest,
             deploy_msg_id,
-            &args.destination_rpc,
+            dest_gateway_addr,
+            &dest_rpc_url,
         )
         .await?;
     }
@@ -80,7 +110,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let derived = derive_and_fund_keys(
         &evm_source.signer,
         &evm_source.main_key,
-        &evm_rpc_url,
+        &source_rpc_url,
         sizing.num_keys,
         hub_gas_extra_per_key(&args, &sizing, gas_value_wei),
     )
@@ -88,7 +118,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let token_provider = ProviderBuilder::new()
         .wallet(evm_source.signer.clone())
-        .connect_http(evm_rpc_url.parse()?);
+        .connect_http(source_rpc_url.parse()?);
     distribute_tokens(
         &token_provider,
         token.token_addr,
@@ -97,8 +127,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     )
     .await?;
 
-    let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
-    let receiver_bytes = Bytes::from(sol_keypair.pubkey().to_bytes().to_vec());
+    let receiver_bytes = Bytes::from(receiver.as_slice().to_vec());
 
     let targets = TransferTargets {
         its_proxy_addr: its.its_proxy_addr,
@@ -108,9 +137,28 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     };
 
     if !sizing.burst_mode {
-        run_sustained_pipeline(&args, &cfg, &evm_rpc_url, &derived, &sizing, &targets).await
+        run_sustained_pipeline(
+            &args,
+            &cfg,
+            &source_rpc_url,
+            &dest_rpc_url,
+            dest_gateway_addr,
+            &derived,
+            &sizing,
+            &targets,
+        )
+        .await
     } else {
-        run_burst_pipeline(&args, &evm_rpc_url, &derived, &sizing, &targets).await
+        run_burst_pipeline(
+            &args,
+            &source_rpc_url,
+            &dest_rpc_url,
+            dest_gateway_addr,
+            &derived,
+            &sizing,
+            &targets,
+        )
+        .await
     }
 }
 
@@ -128,17 +176,13 @@ struct RunSizing {
 }
 
 /// Resolved interchain token: cached, user-supplied, or freshly deployed.
-/// `deploy_message_id` is `Some` only when the helper performed a remote
-/// deploy in this run.
 struct TokenIdentity {
     token_id: FixedBytes<32>,
     token_addr: Address,
     deploy_message_id: Option<String>,
 }
 
-/// Per-tx send parameters consumed by both the sustained and burst pipelines:
-/// the ITS service to call, the token to push through it, the gas attached to
-/// each interchain transfer, and the Solana recipient.
+/// Per-tx send parameters consumed by both the sustained and burst pipelines.
 struct TransferTargets {
     its_proxy_addr: Address,
     token_id: FixedBytes<32>,
@@ -146,8 +190,26 @@ struct TransferTargets {
     receiver_bytes: Bytes,
 }
 
-/// Parse the user-supplied gas value (wei), defaulting via the relayer-aware
-/// `estimateGasFee` quote for the route, and emit the matching UI line.
+/// Resolve the EVM AxelarGateway on the destination chain — used by both
+/// the remote-deploy waiter and the per-tx verifier.
+fn resolve_dest_gateway(cfg: &ChainsConfig, dest: &str) -> eyre::Result<Address> {
+    let dest_cfg = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre!("destination chain '{dest}' not found in config"))?;
+    let gw: Address = dest_cfg.contract_address("AxelarGateway", dest)?.parse()?;
+    ui::address("AxelarGateway (destination)", &format!("{gw}"));
+    Ok(gw)
+}
+
+/// Receiver wallet for the InterchainTransfer. Must be an EOA on the
+/// destination chain — passing the ITS proxy reverts EVM estimation since
+/// ITS won't transfer to its own address. Defaults to the source signer's
+/// address so test runs accumulate balance at a wallet the user owns.
+fn derive_receiver(evm_source: &EvmSource) -> Address {
+    evm_source.deployer_address
+}
+
 async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
@@ -156,7 +218,6 @@ async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
                 .await
         }
     };
-
     ui::kv(
         "gas value",
         &format!(
@@ -167,8 +228,6 @@ async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     Ok(gas_value_wei)
 }
 
-/// Decide burst vs sustained, ephemeral wallet count, expected tx count, and
-/// per-tx / per-key / total-supply amounts.
 fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     let sustained_params = args.tps.zip(args.duration_secs);
     let burst_mode = sustained_params.is_none();
@@ -180,15 +239,12 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
         let tps = tps as usize;
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
-    // Keep num_txs as alias for burst compat (equals num_keys in burst mode)
     let num_txs = num_keys;
-    // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
-    // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
-    // Distribute 100x per key so cached tokens last across many runs.
+    // 1 token (10^18 with 18 decimals) per tx. Cross-chain truncation between
+    // mismatched decimals is harmless here because both sides are EVM-18.
+    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128);
     let amount_per_key = amount_per_tx * U256::from(100);
-    // Mint a large fixed supply so the token can be reused across runs without redeploying.
-    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128); // 1M tokens
+    let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 
     RunSizing {
         burst_mode,
@@ -202,10 +258,8 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     }
 }
 
-/// Resolve the ITS token to use this run: honour `--token-id`, then fall back
-/// to the source/dest cache (deploying fresh if the cached token has
-/// insufficient supply or no longer exists), and finally deploy a brand-new
-/// token if no cache hit.
+/// Resolve the ITS token: honour `--token-id`, then fall back to the
+/// source/dest cache, and finally deploy fresh if nothing reusable exists.
 async fn resolve_or_deploy_token(
     args: &LoadTestArgs,
     evm_source: &EvmSource,
@@ -223,7 +277,6 @@ async fn resolve_or_deploy_token(
     let its_service = InterchainTokenService::new(its.its_proxy_addr, &write_provider);
 
     let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
-        // User provided a token ID
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
             .interchainTokenAddress(token_id)
@@ -234,7 +287,6 @@ async fn resolve_or_deploy_token(
         ui::address("token address", &format!("{addr}"));
         (token_id, addr, None)
     } else {
-        // Check cache
         let cache = read_its_cache(src, dest);
         let cached = cache
             .get("tokenId")
@@ -249,7 +301,6 @@ async fn resolve_or_deploy_token(
             });
 
         if let Some((tid, addr)) = cached {
-            // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
             let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
             let balance = token
@@ -261,22 +312,10 @@ async fn resolve_or_deploy_token(
                 ui::info(&format!("reusing cached ITS token: {addr}"));
                 ui::kv("token ID (cached)", &format!("{tid}"));
                 (tid, addr, None)
-            } else if balance > U256::ZERO {
+            } else {
                 ui::warn(&format!(
                     "cached token has insufficient supply ({balance} < {needed}), deploying fresh..."
                 ));
-                deploy_its_token(
-                    &write_provider,
-                    its.its_factory_addr,
-                    evm_source.deployer_address,
-                    dest,
-                    sizing.total_supply,
-                    src,
-                    gas_value,
-                )
-                .await?
-            } else {
-                ui::warn("cached token no longer exists, deploying fresh...");
                 deploy_its_token(
                     &write_provider,
                     its.its_factory_addr,
@@ -324,13 +363,13 @@ fn hub_gas_extra_per_key(args: &LoadTestArgs, sizing: &RunSizing, gas_value_wei:
     }
 }
 
-/// Drive the sustained-mode pipeline: pre-fetch nonces, spawn the streaming
-/// Solana ITS verifier, run the EVM sustained sender loop, stitch amplifier
-/// timings back into the report, and hand off to `finish_report`.
+#[allow(clippy::too_many_arguments)]
 async fn run_sustained_pipeline(
     args: &LoadTestArgs,
     cfg: &ChainsConfig,
-    evm_rpc_url: &str,
+    source_rpc_url: &str,
+    dest_rpc_url: &str,
+    dest_gateway_addr: Address,
     derived: &[PrivateKeySigner],
     sizing: &RunSizing,
     targets: &TransferTargets,
@@ -340,10 +379,9 @@ async fn run_sustained_pipeline(
     let tps = sizing.sustained_params.expect("burst_mode is false").0 as usize;
     let duration_secs = sizing.sustained_params.expect("burst_mode is false").1;
     let key_cycle = args.key_cycle as usize;
-    let rpc_url_str = evm_rpc_url.to_string();
+    let rpc_url_str = source_rpc_url.to_string();
 
-    // Pre-fetch nonces.
-    let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    let nonce_provider = ProviderBuilder::new().connect_http(source_rpc_url.parse()?);
     let mut nonces: Vec<u64> = Vec::with_capacity(sizing.num_keys);
     for signer in derived {
         let n = nonce_provider
@@ -352,7 +390,6 @@ async fn run_sustained_pipeline(
         nonces.push(n);
     }
 
-    // Streaming verification: run concurrently with sends.
     let (verify_tx, verify_rx) = tokio::sync::mpsc::unbounded_channel();
     let send_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (spinner_tx, spinner_rx) = tokio::sync::oneshot::channel::<indicatif::ProgressBar>();
@@ -365,12 +402,19 @@ async fn run_sustained_pipeline(
     let vconfig = args.config.clone();
     let vsource = args.source_axelar_id.clone();
     let vdest = args.destination_axelar_id.clone();
-    let vdest_rpc = args.destination_rpc.clone();
+    let vdest_rpc = dest_rpc_url.to_string();
     let vdone = std::sync::Arc::clone(&send_done);
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
-        super::verify::verify_onchain_solana_its_streaming(
-            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
+        super::verify::verify_onchain_evm_its_streaming(
+            &vconfig,
+            &vsource,
+            &vdest,
+            dest_gateway_addr,
+            &vdest_rpc,
+            verify_rx,
+            vdone,
+            spinner,
         )
         .await
     });
@@ -460,12 +504,12 @@ async fn run_sustained_pipeline(
     finish_report(args, &mut report, test_start)
 }
 
-/// Drive the burst-mode pipeline: fan out parallel ITS interchain transfers
-/// (with retry on rate limits), batch-verify on the Solana destination, and
-/// hand off to `finish_report`.
+#[allow(clippy::too_many_arguments)]
 async fn run_burst_pipeline(
     args: &LoadTestArgs,
-    evm_rpc_url: &str,
+    source_rpc_url: &str,
+    dest_rpc_url: &str,
+    dest_gateway_addr: Address,
     derived: &[PrivateKeySigner],
     sizing: &RunSizing,
     targets: &TransferTargets,
@@ -474,9 +518,6 @@ async fn run_burst_pipeline(
     let dest = &args.destination_chain;
     let num_txs = sizing.num_txs;
 
-    // --- Parallel interchainTransfer sends via ITS Service ---
-    // Each derived key calls ITS.interchainTransfer(tokenId, destChain, destAddr, amount, metadata, gasValue)
-    // The ITS Service handles hub wrapping (SEND_TO_HUB) and emits ContractCall to "axelar".
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
     let confirmed_counter = Arc::new(AtomicU64::new(0));
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_SENDS));
@@ -501,7 +542,7 @@ async fn run_burst_pipeline(
 
         let provider = ProviderBuilder::new()
             .wallet(derived_signer.clone())
-            .connect_http(evm_rpc_url.parse()?);
+            .connect_http(source_rpc_url.parse()?);
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
@@ -516,13 +557,11 @@ async fn run_burst_pipeline(
                     m = Some(result);
                     break;
                 }
-
                 let is_rate_limited = result.error.as_deref().is_some_and(|e| e.contains("429"));
                 if !is_rate_limited {
                     m = Some(result);
                     break;
                 }
-
                 let backoff = Duration::from_secs(1 << attempt);
                 tokio::time::sleep(backoff).await;
             }
@@ -613,13 +652,13 @@ async fn run_burst_pipeline(
         transactions: metrics,
     };
 
-    // --- Verify ---
-    let verification = super::verify::verify_onchain_solana_its(
+    let verification = super::verify::verify_onchain_evm_its(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         &format!("{}", targets.its_proxy_addr),
-        &args.destination_rpc,
+        dest_gateway_addr,
+        dest_rpc_url,
         &mut report.transactions,
     )
     .await?;

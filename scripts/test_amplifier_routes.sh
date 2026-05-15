@@ -77,6 +77,7 @@ CHAIN_MAP=$(cat <<'EOF'
   "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
   "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
   "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
+  "Hedera":      {"testnet": "hedera"},
   "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
   "Monad":       {"mainnet": "monad",      "testnet": "monad-3",          "stagenet": "monad"},
   "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
@@ -97,6 +98,7 @@ CHAIN_TYPES=$(cat <<'EOF'
   "Base":        "evm",
   "Ethereum":    "evm",
   "Flow":        "evm",
+  "Hedera":      "evm",
   "Hyperliquid": "evm",
   "Monad":       "evm",
   "Optimism":    "evm",
@@ -119,7 +121,7 @@ ROUTES_MAP=$(cat <<'EOF'
     "sui":     ["evm"]
   },
   "its": {
-    "evm":     ["sol", "stellar", "sui", "xrpl"],
+    "evm":     ["evm", "sol", "stellar", "sui", "xrpl"],
     "sol":     ["evm", "sui"],
     "stellar": ["evm", "sol", "sui"],
     "sui":     ["evm"],
@@ -149,10 +151,20 @@ EOF
 #     group so same-wallet nonce races don't happen.
 case "$NETWORK/$PROTOCOL" in
     testnet/its)
-        # 3 bidirectional pairs (XRPL↔XRPL-EVM, Hyperliquid↔Stellar,
-        # Hyperliquid↔Solana) + Sui→Hyperliquid (one-way; Sui-as-ITS-dest
-        # is unwired). Hyperliquid is source in 2 ITS routes — those run
-        # sequentially via the source-chain grouping below.
+        # Two hubs and the XRPL pair:
+        #   * XRPL ↔ XRPL EVM — the only XRPL-touching ITS routes (XRPL is
+        #     source/dest only via XRPL EVM at the EVM-bridge layer).
+        #   * Hyperliquid ↔ Stellar / Solana, plus Sui → Hyperliquid (Sui as
+        #     ITS destination is unwired in axe's dispatcher).
+        #   * Hedera ↔ Stellar / Solana, plus Sui → Hedera (Sui-as-ITS-dest
+        #     is unwired). Hedera ↔ Hyperliquid and Hedera ↔ XRPL EVM are
+        #     EVM-to-EVM ITS — dispatched via its_evm_to_evm.
+        #     ITS Hedera→peer routes additionally require the peer's ITS to
+        #     add "hedera" to its trusted-chains set; today only some peers
+        #     do, so a subset of the Hedera→peer routes is expected to fail
+        #     with UntrustedChain() at the destination until the trust is
+        #     added upstream. axe surfaces that as a CANNOT_EXECUTE_MESSAGE
+        #     failure.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
@@ -161,15 +173,30 @@ case "$NETWORK/$PROTOCOL" in
   {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
   {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana"},
   {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"},
-  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"}
+  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"},
+  {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar"},
+  {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera"},
+  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"},
+  {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera"},
+  {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid"},
+  {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera"},
+  {"name":"Hedera -> XRPL EVM","src":"Hedera","dst":"XRPL EVM"},
+  {"name":"XRPL EVM -> Hedera","src":"XRPL EVM","dst":"Hedera"}
 ]
 EOF
 )
         ;;
     testnet/gmp)
-        # 3 bidirectional pairs around the Hyperliquid hub
-        # (H↔Stellar, H↔Solana, H↔Sui). XRPL omitted — no GMP support.
-        # Hyperliquid is source in 3 GMP routes — sequentialised.
+        # Two hubs:
+        #   * Hyperliquid bidirectional with Stellar / Solana / Sui (XRPL has no
+        #     GMP layer so it's absent in this fleet).
+        #   * Hedera bidirectional with the same three non-EVM chains, plus
+        #     Hedera↔Hyperliquid so the EVM-to-EVM dispatch path is exercised
+        #     for Hedera too.
+        # Hyperliquid and Hedera are each source in multiple routes — the
+        # source-chain grouping below serializes within each group so the
+        # same-wallet nonce races don't happen.
         FLEET=$(cat <<'EOF'
 [
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
@@ -177,7 +204,15 @@ EOF
   {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana"},
   {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"},
   {"name":"Hyperliquid -> Sui","src":"Hyperliquid","dst":"Sui"},
-  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"}
+  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"},
+  {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid"},
+  {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera"},
+  {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar"},
+  {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera"},
+  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"},
+  {"name":"Hedera -> Sui","src":"Hedera","dst":"Sui"},
+  {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera"}
 ]
 EOF
 )
