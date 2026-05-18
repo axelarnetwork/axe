@@ -1,13 +1,19 @@
 mod evm_sender;
+mod gas_estimate;
 mod gmp;
 mod helpers;
+mod its_evm_source;
+mod its_evm_to_evm;
 mod its_evm_to_sol;
 mod its_evm_to_sol_with_data;
 mod its_evm_to_stellar;
+mod its_evm_to_sui;
 mod its_evm_to_xrpl;
 mod its_sol_to_evm;
+mod its_sol_to_sui;
 mod its_stellar_to_evm;
 mod its_stellar_to_sol;
+mod its_stellar_to_sui;
 mod its_sui_to_evm;
 mod its_xrpl_to_evm;
 mod keypairs;
@@ -40,7 +46,8 @@ pub(super) use helpers::{
     deploy_sender_receiver, ensure_evm_contract_deployed, ensure_sender_receiver,
     finalize_sui_dest_run, finish_report, load_stellar_main_wallet, load_sui_main_wallet,
     read_stellar_contract_address, read_stellar_network_type, read_stellar_token_address,
-    resolve_sui_axe_token, sui_dest_lookup, validate_evm_rpc, validate_solana_rpc,
+    read_sui_axe_token_id, resolve_sui_axe_token, sui_dest_lookup, sui_its_dest_lookup,
+    validate_evm_rpc, validate_solana_rpc,
 };
 pub(super) use resolve::{
     compiled_network, detect_network_from_config, read_cache, read_its_cache, save_cache,
@@ -281,8 +288,8 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         (Protocol::Its, TestType::SolToEvm) => its_sol_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::XrplToEvm) => its_xrpl_to_evm::run(args, run_start).await,
         (Protocol::Its, TestType::EvmToXrpl) => its_evm_to_xrpl::run(args, run_start).await,
-        // (kept for clarity — the dispatch line above already wires it up)
-        (Protocol::Its, TestType::EvmToEvm | TestType::SolToSol) => {
+        (Protocol::Its, TestType::EvmToEvm) => its_evm_to_evm::run(args, run_start).await,
+        (Protocol::Its, TestType::SolToSol) => {
             eyre::bail!(
                 "ITS {}->{} is not yet supported",
                 args.source_chain,
@@ -300,26 +307,11 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         // verify.rs. EVM -> Sui GMP runs end-to-end. ITS to Sui still
         // needs the receive-side coin type plumbing.
         (Protocol::Gmp, TestType::EvmToSui) => gmp::run_evm_to_sui(args, run_start).await,
-        (Protocol::Its, TestType::EvmToSui) => {
-            eyre::bail!(
-                "evm -> sui ITS still needs Sui-side `interchain_token_service::receive_interchain_transfer<T>` \
-                 type-tag resolution and a registered AXE coin on Sui. GMP (--protocol gmp) works."
-            )
-        }
+        (Protocol::Its, TestType::EvmToSui) => its_evm_to_sui::run(args, run_start).await,
         (Protocol::Gmp, TestType::SolToSui) => gmp::run_sol_to_sui(args, run_start).await,
-        (Protocol::Its, TestType::SolToSui) => {
-            eyre::bail!(
-                "sol -> sui ITS still needs the Sui-side `interchain_token_service::receive_interchain_transfer<T>` \
-                 type-tag resolution. GMP works (--protocol gmp)."
-            )
-        }
+        (Protocol::Its, TestType::SolToSui) => its_sol_to_sui::run(args, run_start).await,
         (Protocol::Gmp, TestType::StellarToSui) => gmp::run_stellar_to_sui(args, run_start).await,
-        (Protocol::Its, TestType::StellarToSui) => {
-            eyre::bail!(
-                "stellar -> sui ITS needs Sui-side AXE coin registration + receive helper. GMP works \
-                 (--protocol gmp), pending Stellar ITS adding 'sui' as trusted-chain upstream."
-            )
-        }
+        (Protocol::Its, TestType::StellarToSui) => its_stellar_to_sui::run(args, run_start).await,
         (_, TestType::XrplToSui) => {
             eyre::bail!(
                 "xrpl -> sui ITS needs the Sui destination verifier plus a registered AXE/XRP \

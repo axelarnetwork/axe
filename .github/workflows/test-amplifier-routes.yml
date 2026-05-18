@@ -43,30 +43,46 @@ jobs:
         run: |
           set -euo pipefail
           # Each fleet is a `matrix.include` JSON: every entry has a display
-          # `name` (shown in the GitHub Actions UI per matrix job) plus
-          # `src` / `dst` keys (forwarded to the composite action's
-          # source_chain / destination_chain inputs).
+          # `name` (shown in the GitHub Actions UI per matrix job), `src` /
+          # `dst` keys forwarded to the composite action, and a `notes` field
+          # describing what the route exercises. The summary step prints
+          # `notes` next to each route's pass/fail status so a fleet-wide
+          # regression is visible alongside the *intent* of every route.
+          #
+          # Keep this in sync with scripts/test_amplifier_routes.sh — that
+          # script is the canonical fleet for local invocation; this workflow
+          # mirrors it for CI runs.
           MATRIX_TESTNET_ITS='{"include":[
-            {"name":"Avalanche -> Solana","src":"Avalanche","dst":"Solana"},
-            {"name":"Solana -> Avalanche","src":"Solana","dst":"Avalanche"},
-            {"name":"Avalanche -> Stellar","src":"Avalanche","dst":"Stellar"},
-            {"name":"Stellar -> Avalanche","src":"Stellar","dst":"Avalanche"},
-            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
-            {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
-            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
-            {"name":"Sui -> Avalanche","src":"Sui","dst":"Avalanche"}
+            {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
+            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
+            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
+            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"},
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm ITS"},
+            {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar","notes":"evm->stellar ITS, hedera source"},
+            {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera","notes":"stellar->evm ITS, hedera destination"},
+            {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana","notes":"evm->sol ITS, hedera source"},
+            {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera","notes":"sol->evm ITS, hedera destination"},
+            {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera","notes":"sui->evm ITS, hedera destination"},
+            {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid","notes":"evm->evm ITS (NEW), needs peer trust(\"hedera\") on Hyperliquid"},
+            {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera","notes":"evm->evm ITS (NEW), Hyperliquid needs trust(\"hedera\") as outbound"}
           ]}'
           MATRIX_TESTNET_GMP='{"include":[
-            {"name":"Avalanche -> Solana","src":"Avalanche","dst":"Solana"},
-            {"name":"Solana -> Avalanche","src":"Solana","dst":"Avalanche"},
-            {"name":"Avalanche -> Sui","src":"Avalanche","dst":"Sui"},
-            {"name":"Sui -> Avalanche","src":"Sui","dst":"Avalanche"},
-            {"name":"Avalanche -> Stellar","src":"Avalanche","dst":"Stellar"},
-            {"name":"Stellar -> Avalanche","src":"Stellar","dst":"Avalanche"},
-            {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
-            {"name":"Solana -> Stellar","src":"Solana","dst":"Stellar"},
-            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
-            {"name":"Stellar -> Sui","src":"Stellar","dst":"Sui"}
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"},
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm GMP"},
+            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol GMP"},
+            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm GMP"},
+            {"name":"Hyperliquid -> Sui","src":"Hyperliquid","dst":"Sui","notes":"evm->sui GMP"},
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
+            {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid","notes":"evm->evm GMP, hedera source"},
+            {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera","notes":"evm->evm GMP, hedera destination"},
+            {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar","notes":"evm->stellar GMP, hedera source"},
+            {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera","notes":"stellar->evm GMP, hedera destination"},
+            {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana","notes":"evm->sol GMP, hedera source"},
+            {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera","notes":"sol->evm GMP, hedera destination"},
+            {"name":"Hedera -> Sui","src":"Hedera","dst":"Sui","notes":"evm->sui GMP, hedera source"},
+            {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera","notes":"sui->evm GMP, hedera destination"}
           ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;
@@ -147,16 +163,20 @@ jobs:
 
       - name: Record route result
         if: always()
+        env:
+          ROUTE_NOTES: ${{ matrix.notes }}
+          ROUTE_NAME: ${{ matrix.name }}
         run: |
           mkdir -p route-results
           # job.status reflects whether any prior step in this job failed.
           # With `if: always()` we run regardless; the value is "success",
           # "failure", or "cancelled".
           STATUS="${{ job.status }}"
-          # Use job-index as filename so the summary step can read them in
-          # matrix order.
           IDX="${{ strategy.job-index }}"
-          printf '%s|%s\n' "${{ matrix.name }}" "$STATUS" > "route-results/$IDX.txt"
+          # Pipe-delimited: name | status | notes. Notes are passed through
+          # env so route names / annotations with shell metacharacters don't
+          # break the format.
+          printf '%s|%s|%s\n' "$ROUTE_NAME" "$STATUS" "$ROUTE_NOTES" > "route-results/$IDX.txt"
 
       - if: always()
         uses: actions/upload-artifact@v4
@@ -187,16 +207,22 @@ jobs:
           PASSED=0
           TOTAL=0
           # Sort numerically by job-index so the order mirrors the matrix.
+          # Result file format: `name|status|notes` (pipe-delimited).
+          # `notes` describes what each route exercises so a reader of the
+          # summary can tell at a glance which capability is broken.
+          {
+            echo "| Status | Route | Exercises |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
           for f in $(find route-results -name '*.txt' 2>/dev/null | sort -V); do
             line=$(cat "$f")
-            route="${line%|*}"
-            status="${line#*|}"
+            IFS='|' read -r route status notes <<< "$line"
             TOTAL=$((TOTAL + 1))
             if [ "$status" = "success" ]; then
-              echo "✓ $route" >> "$GITHUB_STEP_SUMMARY"
+              echo "| ✓ | $route | $notes |" >> "$GITHUB_STEP_SUMMARY"
               PASSED=$((PASSED + 1))
             else
-              echo "✗ $route ($status)" >> "$GITHUB_STEP_SUMMARY"
+              echo "| ✗ ($status) | $route | $notes |" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
 

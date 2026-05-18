@@ -33,15 +33,41 @@ pub fn memo_program_id() -> Pubkey {
 }
 
 /// Default gas value sent with sendPayload for cross-chain gas.
-/// devnet-amplifier: 0 (relayer doesn't check gas).
-/// Flow: 0.1 ETH (higher gas costs).
-/// Other environments: 0.02 ETH.
+///
+/// Strategy: ask Axelarscan's `estimateGasFee` for a relayer-aware quote on
+/// the route (× 1.5 inside the helper) and fall back to a route-agnostic
+/// constant if the API can't be reached. The constant fallback was tuned
+/// for ETH-priced sources and silently underpays routes where source-native
+/// is cheap (XRP) or destination-native is volatile (HYPE).
+async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
+    if let Some(quoted) = quote_route_gas(args).await {
+        return quoted;
+    }
+    fallback_gas_value_wei(&args.source_chain)
+}
+
+async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
+    let cfg = crate::config::ChainsConfig::load(&args.config).ok()?;
+    let symbol = cfg
+        .chains
+        .get(&args.source_chain)?
+        .token_symbol
+        .as_deref()?;
+    super::gas_estimate::estimate_route_gas(
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        symbol,
+        super::gas_estimate::DEFAULT_DEST_GAS_LIMIT,
+    )
+    .await
+}
+
 #[cfg(feature = "devnet-amplifier")]
-fn default_gas_value_wei(_source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
     0 // devnet-amplifier relayer doesn't require gas payment
 }
 #[cfg(not(feature = "devnet-amplifier"))]
-fn default_gas_value_wei(source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(source_chain: &str) -> u128 {
     if source_chain.starts_with("flow") {
         400_000_000_000_000_000 // 0.4 FLOW
     } else {
@@ -133,7 +159,7 @@ pub async fn run_load_test_with_metrics(
         .connect_http(evm_rpc_url.parse()?);
     let gas_value_wei: u128 = match &args.gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => default_gas_value_wei(&args.source_chain),
+        None => default_gas_value_wei(args).await,
     };
     keypairs::ensure_funded_evm_with_extra(
         &funding_provider,
@@ -417,7 +443,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     };
     let gas_value_wei: u128 = match &args.gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => default_gas_value_wei(&args.source_chain),
+        None => default_gas_value_wei(args).await,
     };
 
     // Derive pool

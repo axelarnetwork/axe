@@ -29,7 +29,8 @@ pub use balance::{
     MIN_SOL_ITS_LAMPORTS, MIN_SOL_RELAY_LAMPORTS, MIN_SOL_SEND_LAMPORTS, check_solana_balance,
 };
 pub use encoding::{
-    find_interchain_token_pda, find_its_root_pda, interchain_token_id, load_keypair,
+    find_interchain_token_pda, find_its_root_pda, get_associated_token_address,
+    interchain_token_id, load_keypair,
 };
 #[cfg(not(feature = "devnet-amplifier"))]
 pub use gateway::pay_gas_lamports;

@@ -372,6 +372,26 @@ pub(super) async fn run_sustained(
     .await
 }
 
+/// Compute the per-derived-key starting balance for mainnet bootstrap, based
+/// on the run's planned gas spend. Each derived key must hold:
+///   * the 1 XLM base reserve (account stays alive),
+///   * the cross-chain gas value it forwards to GasService for each tx,
+///   * a 3 XLM Soroban-fee buffer for the interchain_transfer call(s).
+///
+/// Callers pass `txs_per_key = 1` for burst mode or `key_cycle` for sustained.
+#[must_use]
+pub fn mainnet_per_key_balance_stroops(gas_stroops_per_tx: u64, txs_per_key: u64) -> i64 {
+    const BASE_RESERVE: i64 = 10_000_000; // 1 XLM
+    const SOROBAN_BUFFER: i64 = 30_000_000; // 3 XLM
+    let gas: i64 = gas_stroops_per_tx
+        .saturating_mul(txs_per_key)
+        .try_into()
+        .unwrap_or(i64::MAX);
+    BASE_RESERVE
+        .saturating_add(SOROBAN_BUFFER)
+        .saturating_add(gas)
+}
+
 /// Derive deterministic Stellar wallets from a 32-byte main seed.
 /// Uses the same `keccak256(main_seed || index)` pattern as the rest of axe
 /// (Solana/EVM/XRPL) so re-runs recover the same ephemeral accounts.
@@ -388,11 +408,16 @@ pub fn derive_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<StellarW
 }
 
 /// Ensure all derived wallets are activated (have a minimum XLM balance).
-/// Testnet/futurenet: use Friendbot. Mainnet: caller must pre-fund.
+/// Testnet/futurenet: use Friendbot. Mainnet: classic `CreateAccount` op
+/// signed by `main_wallet` for each missing key, funded with
+/// `mainnet_starting_balance_stroops` so the derived key can pay the
+/// cross-chain gas value + Soroban resource fees the run plans to spend.
 pub async fn ensure_funded(
     client: &StellarClient,
     derived: &[StellarWallet],
     use_friendbot: bool,
+    main_wallet: &StellarWallet,
+    mainnet_starting_balance_stroops: i64,
 ) -> Result<()> {
     let check_pb = indicatif::ProgressBar::new(derived.len() as u64);
     check_pb.set_style(
@@ -402,55 +427,123 @@ pub async fn ensure_funded(
         .unwrap()
         .progress_chars("=> "),
     );
+    // missing: account doesn't exist yet (needs CreateAccount).
+    // underfunded: account exists but balance < required (needs Payment top-up).
+    // Only the mainnet branch consumes `underfunded`; testnet/futurenet
+    // Friendbot grants 10,000 XLM per call so any existing account is always
+    // over-budget for our tests.
     let mut missing: Vec<usize> = Vec::new();
+    let mut underfunded: Vec<(usize, i64)> = Vec::new();
     for (i, w) in derived.iter().enumerate() {
-        if client.account_sequence(&w.address()).await?.is_none() {
-            missing.push(i);
+        match client.native_balance_stroops(&w.address()).await? {
+            None => missing.push(i),
+            Some(bal) if !use_friendbot && bal < mainnet_starting_balance_stroops => {
+                underfunded.push((i, mainnet_starting_balance_stroops - bal));
+            }
+            Some(_) => {}
         }
         check_pb.inc(1);
     }
     check_pb.finish_and_clear();
 
-    if missing.is_empty() {
+    if missing.is_empty() && underfunded.is_empty() {
         ui::success(&format!(
-            "all {} derived Stellar keys are activated",
+            "all {} derived Stellar keys are activated and funded",
             derived.len()
         ));
         return Ok(());
     }
 
-    if !use_friendbot {
-        return Err(eyre!(
-            "{} Stellar wallet(s) are not activated and no faucet available on this network. \
-             Fund them manually first (need a classic `create_account` op).",
+    if use_friendbot {
+        ui::info(&format!(
+            "funding {}/{} Stellar keys via Friendbot...",
+            missing.len(),
+            derived.len()
+        ));
+        let pb = indicatif::ProgressBar::new(missing.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "  {bar:40.cyan/dim} {pos}/{len} Stellar keys funded",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        for &i in &missing {
+            client
+                .friendbot_fund(&derived[i].address())
+                .await
+                .map_err(|e| eyre!("friendbot fund failed for key {i}: {e}"))?;
+            pb.inc(1);
+        }
+        pb.finish_and_clear();
+        ui::success(&format!(
+            "funded {} Stellar keys via Friendbot",
+            missing.len()
+        ));
+        return Ok(());
+    }
+
+    // Mainnet path: main wallet bootstraps each missing derived key via a
+    // classic CreateAccount op + tops up under-funded ones via Payment.
+    // Sequenced one at a time because each op increments the funder's
+    // sequence number.
+    if !missing.is_empty() {
+        ui::info(&format!(
+            "creating {}/{} Stellar derived accounts from main wallet ({} XLM each)...",
+            missing.len(),
+            derived.len(),
+            mainnet_starting_balance_stroops / 10_000_000,
+        ));
+        let pb = indicatif::ProgressBar::new(missing.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "  {bar:40.cyan/dim} {pos}/{len} Stellar accounts created",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        for &i in &missing {
+            client
+                .create_account_classic(
+                    main_wallet,
+                    &derived[i].public_key_bytes,
+                    mainnet_starting_balance_stroops,
+                )
+                .await
+                .map_err(|e| eyre!("create_account failed for derived key {i}: {e}"))?;
+            pb.inc(1);
+        }
+        pb.finish_and_clear();
+        ui::success(&format!(
+            "created {} Stellar derived accounts from main wallet",
             missing.len()
         ));
     }
-
-    ui::info(&format!(
-        "funding {}/{} Stellar keys via Friendbot...",
-        missing.len(),
-        derived.len()
-    ));
-    let pb = indicatif::ProgressBar::new(missing.len() as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::with_template(
-            "  {bar:40.cyan/dim} {pos}/{len} Stellar keys funded",
-        )
-        .unwrap()
-        .progress_chars("=> "),
-    );
-    for &i in &missing {
-        client
-            .friendbot_fund(&derived[i].address())
-            .await
-            .map_err(|e| eyre!("friendbot fund failed for key {i}: {e}"))?;
-        pb.inc(1);
+    if !underfunded.is_empty() {
+        ui::info(&format!(
+            "topping up {} under-funded Stellar derived account(s) from main wallet...",
+            underfunded.len()
+        ));
+        let pb = indicatif::ProgressBar::new(underfunded.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "  {bar:40.cyan/dim} {pos}/{len} Stellar accounts topped up",
+            )
+            .unwrap()
+            .progress_chars("=> "),
+        );
+        for &(i, top_up) in &underfunded {
+            client
+                .pay_native_classic(main_wallet, &derived[i].public_key_bytes, top_up)
+                .await
+                .map_err(|e| eyre!("top-up payment failed for derived key {i}: {e}"))?;
+            pb.inc(1);
+        }
+        pb.finish_and_clear();
+        ui::success(&format!(
+            "topped up {} Stellar derived account(s) from main wallet",
+            underfunded.len()
+        ));
     }
-    pb.finish_and_clear();
-    ui::success(&format!(
-        "funded {} Stellar keys via Friendbot",
-        missing.len()
-    ));
     Ok(())
 }

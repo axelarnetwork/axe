@@ -11,11 +11,12 @@ use eyre::{Result, eyre};
 use sha2::{Digest, Sha256};
 use stellar_rpc_client::Client as RpcClient;
 use stellar_xdr::curr::{
-    BytesM, ContractId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs,
-    InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions,
-    ScAddress, ScVal, SequenceNumber, Signature, SorobanAuthorizationEntry, Transaction,
-    TransactionEnvelope, TransactionExt, TransactionMeta, TransactionSignaturePayload,
-    TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    AccountId, Asset, BytesM, ContractId, CreateAccountOp, DecoratedSignature, Hash, HostFunction,
+    InvokeContractArgs, InvokeHostFunctionOp, Limits, Memo, MuxedAccount, Operation, OperationBody,
+    PaymentOp, Preconditions, PublicKey, ScAddress, ScVal, SequenceNumber, Signature,
+    SorobanAuthorizationEntry, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
+    TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
 use super::scval::{
@@ -78,6 +79,173 @@ impl StellarClient {
                     Err(eyre!("get_account({address}) failed: {msg}"))
                 }
             }
+        }
+    }
+
+    /// Activate `destination` by submitting a classic `CreateAccount` op
+    /// signed by `funder`. Used on mainnet (where Friendbot doesn't exist)
+    /// to bootstrap derived ephemeral signing keys from the main wallet.
+    ///
+    /// `starting_balance_stroops` is the initial XLM transferred (1e7 stroops =
+    /// 1 XLM). Stellar requires at least the base reserve (1 XLM today) — the
+    /// caller should pick a value above that with enough headroom for the
+    /// derived key's expected fees + Soroban auth costs.
+    pub async fn create_account_classic(
+        &self,
+        funder: &StellarWallet,
+        destination_pubkey: &[u8; 32],
+        starting_balance_stroops: i64,
+    ) -> Result<String> {
+        let seq = self
+            .account_sequence(&funder.address())
+            .await?
+            .ok_or_else(|| {
+                eyre!(
+                    "funder Stellar account {} is not activated",
+                    funder.address()
+                )
+            })?;
+
+        let destination = AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
+            *destination_pubkey,
+        )));
+        let op = Operation {
+            source_account: None,
+            body: OperationBody::CreateAccount(CreateAccountOp {
+                destination,
+                starting_balance: starting_balance_stroops,
+            }),
+        };
+        let ops: VecM<Operation, 100> = vec![op].try_into().map_err(|e| eyre!("ops: {e}"))?;
+        let tx = Transaction {
+            source_account: funder.muxed_account(),
+            // Classic ops use only the per-op base fee. Stellar mainnet base
+            // fee is 100 stroops/op; bump it 10x for headroom against
+            // network fee spikes — still cheap (1000 stroops = 0.0001 XLM).
+            fee: 1_000,
+            seq_num: SequenceNumber(seq + 1),
+            cond: Preconditions::None,
+            memo: Memo::None,
+            operations: ops,
+            ext: TransactionExt::V0,
+        };
+        let signed = self.sign(funder, tx)?;
+        let hash = self
+            .rpc
+            .send_transaction(&signed)
+            .await
+            .map_err(|e| eyre!("send_transaction: {e}"))?;
+        let tx_hash_hex = hex::encode(hash.0);
+
+        let start = Instant::now();
+        loop {
+            if let Ok(resp) = self.rpc.get_transaction(&hash).await
+                && let Some(status) = extract_status(&resp)
+            {
+                match status.as_str() {
+                    "SUCCESS" => return Ok(tx_hash_hex),
+                    "FAILED" => {
+                        return Err(eyre!("create_account tx {tx_hash_hex} failed on chain"));
+                    }
+                    _ => {}
+                }
+            }
+            if start.elapsed() >= VALIDATE_TIMEOUT {
+                return Err(eyre!(
+                    "create_account tx {tx_hash_hex} not validated within {:?}",
+                    VALIDATE_TIMEOUT
+                ));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Native-XLM balance of `address` in stroops. Returns `None` if the
+    /// account does not exist yet.
+    pub async fn native_balance_stroops(&self, address: &str) -> Result<Option<i64>> {
+        match self.rpc.get_account(address).await {
+            Ok(entry) => Ok(Some(entry.balance)),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("not found")
+                    || msg.contains("NotFound")
+                    || msg.contains("Account not found")
+                {
+                    Ok(None)
+                } else {
+                    Err(eyre!("get_account({address}) balance: {msg}"))
+                }
+            }
+        }
+    }
+
+    /// Send `amount_stroops` of native XLM from `funder` to `destination`
+    /// using a classic Payment op. Used to top up derived signers that were
+    /// previously activated but are now below the threshold for their next
+    /// run (e.g. spent their gas budget).
+    pub async fn pay_native_classic(
+        &self,
+        funder: &StellarWallet,
+        destination_pubkey: &[u8; 32],
+        amount_stroops: i64,
+    ) -> Result<String> {
+        let seq = self
+            .account_sequence(&funder.address())
+            .await?
+            .ok_or_else(|| {
+                eyre!(
+                    "funder Stellar account {} is not activated",
+                    funder.address()
+                )
+            })?;
+
+        let destination = MuxedAccount::Ed25519(Uint256(*destination_pubkey));
+        let op = Operation {
+            source_account: None,
+            body: OperationBody::Payment(PaymentOp {
+                destination,
+                asset: Asset::Native,
+                amount: amount_stroops,
+            }),
+        };
+        let ops: VecM<Operation, 100> = vec![op].try_into().map_err(|e| eyre!("ops: {e}"))?;
+        let tx = Transaction {
+            source_account: funder.muxed_account(),
+            fee: 1_000,
+            seq_num: SequenceNumber(seq + 1),
+            cond: Preconditions::None,
+            memo: Memo::None,
+            operations: ops,
+            ext: TransactionExt::V0,
+        };
+        let signed = self.sign(funder, tx)?;
+        let hash = self
+            .rpc
+            .send_transaction(&signed)
+            .await
+            .map_err(|e| eyre!("send_transaction: {e}"))?;
+        let tx_hash_hex = hex::encode(hash.0);
+
+        let start = Instant::now();
+        loop {
+            if let Ok(resp) = self.rpc.get_transaction(&hash).await
+                && let Some(status) = extract_status(&resp)
+            {
+                match status.as_str() {
+                    "SUCCESS" => return Ok(tx_hash_hex),
+                    "FAILED" => {
+                        return Err(eyre!("payment tx {tx_hash_hex} failed on chain"));
+                    }
+                    _ => {}
+                }
+            }
+            if start.elapsed() >= VALIDATE_TIMEOUT {
+                return Err(eyre!(
+                    "payment tx {tx_hash_hex} not validated within {:?}",
+                    VALIDATE_TIMEOUT
+                ));
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
     }
 

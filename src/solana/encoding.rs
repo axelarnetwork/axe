@@ -42,7 +42,7 @@ pub(super) fn mpl_token_metadata_program_id() -> Pubkey {
     Pubkey::from_str_const("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
 }
 
-pub(super) fn get_associated_token_address(
+pub fn get_associated_token_address(
     wallet: &Pubkey,
     mint: &Pubkey,
     token_program: &Pubkey,
