@@ -134,6 +134,8 @@ struct BlockBody {
 
 #[derive(Deserialize)]
 struct BlockHeader {
+    #[serde(default)]
+    height: Option<String>,
     time: Option<String>,
 }
 
@@ -752,6 +754,87 @@ pub async fn rpc_block_time(rpc: &str, height: u64) -> Result<String> {
         .ok_or_else(|| {
             eyre::eyre!("RPC response missing /result/block/header/time at height {height}")
         })
+}
+
+/// Query Tendermint RPC `block` endpoint. Pass `Some(N)` to fetch a specific
+/// height, or `None` to fetch the latest block. Returns `(height, time)` where
+/// `time` is the raw RFC3339 timestamp from the header. Silently falls back
+/// to public RPCs when the configured primary errors and `AXELAR_RPC_URL` is
+/// not explicitly set, matching `rpc_tx_search` behaviour.
+pub async fn rpc_block_info(rpc: &str, height: Option<u64>) -> Result<(u64, String)> {
+    let user_override = std::env::var("AXELAR_RPC_URL").ok();
+    let primary = user_override
+        .clone()
+        .unwrap_or_else(|| rpc.to_string())
+        .trim_end_matches('/')
+        .to_string();
+
+    let mut candidates: Vec<String> = vec![primary.clone()];
+    if user_override.is_none() {
+        for fb in rpc_fallbacks_for(&primary) {
+            if *fb != primary {
+                candidates.push((*fb).to_string());
+            }
+        }
+    }
+
+    let path = match height {
+        Some(h) => format!("block?height={h}"),
+        None => "block".to_string(),
+    };
+
+    let mut last_err: Option<eyre::Report> = None;
+    for (idx, endpoint) in candidates.iter().enumerate() {
+        let role = if idx == 0 {
+            "primary Tendermint RPC"
+        } else {
+            "fallback Tendermint RPC"
+        };
+        let url = format!("{endpoint}/{path}");
+        let response = match reqwest::get(&url).await {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(eyre::eyre!("{role} request failed: {e}"));
+                continue;
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            last_err = Some(eyre::eyre!("{role} returned HTTP {status}"));
+            continue;
+        }
+        let resp: BlockResponse = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = Some(eyre::eyre!("{role} JSON decode failed: {e}"));
+                continue;
+            }
+        };
+        let Some(header) = resp.result.and_then(|r| r.block).and_then(|b| b.header) else {
+            last_err = Some(eyre::eyre!("{role} response missing /result/block/header"));
+            continue;
+        };
+        let Some(time) = header.time else {
+            last_err = Some(eyre::eyre!("{role} response missing block header time"));
+            continue;
+        };
+        let Some(height_str) = header.height else {
+            last_err = Some(eyre::eyre!("{role} response missing block header height"));
+            continue;
+        };
+        let height: u64 = parse_required("block.header.height", Some(&height_str))?;
+        note_rpc_fallback_use(idx, endpoint, last_err.as_ref());
+        return Ok((height, time));
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| eyre::eyre!("Tendermint RPC block query exhausted all endpoints")))
+    .map_err(|e| {
+        eyre::eyre!(
+            "{e}\nTip: set AXELAR_RPC_URL to a working endpoint (e.g. \
+                 `https://axelar-rpc.publicnode.com` for mainnet)."
+        )
+    })
 }
 
 /// Fetch the current verifier set from Axelar chain via LCD REST endpoint.
