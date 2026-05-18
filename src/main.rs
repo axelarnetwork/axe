@@ -72,6 +72,13 @@ async fn main() -> Result<()> {
                 json,
             } => commands::decode_evm_activity::run(contract, network, chain, limit, json).await,
         },
+        cli::Commands::Info { subcommand } => match subcommand {
+            cli::InfoCommands::Block {
+                number,
+                network,
+                at_time,
+            } => commands::info_block::run(network, number, at_time).await,
+        },
         cli::Commands::Verifiers {
             network,
             chain,

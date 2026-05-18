@@ -5,6 +5,7 @@ pub mod decode_sol_tx;
 pub mod decode_tx;
 pub mod deploy;
 pub mod event_extractors;
+pub mod info_block;
 pub mod init;
 pub mod load_test;
 pub mod reset;

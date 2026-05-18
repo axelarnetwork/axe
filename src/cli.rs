@@ -43,6 +43,12 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Show network info (e.g. block height + timestamp)
+    Info {
+        #[command(subcommand)]
+        subcommand: InfoCommands,
+    },
+
     /// Show recent votes cast by a single verifier on a given chain
     VerifierVotes {
         /// Axelar network (testnet, mainnet)
@@ -249,6 +255,28 @@ pub enum TestCommands {
         /// remaining accounts are random pubkeys. Useful for testing ALT paths.
         #[arg(long, default_value = "0")]
         extra_accounts: u32,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum InfoCommands {
+    /// Show info about a block. With no arguments, shows the current head.
+    /// With a height, shows that block's timestamp (predicted if the height
+    /// is in the future). With `--at-time`, predicts the block at that time.
+    Block {
+        /// Block height. Omit to show the current head. Mutually exclusive
+        /// with `--at-time`.
+        number: Option<u64>,
+
+        /// Axelar network (mainnet, testnet, stagenet, devnet-amplifier)
+        #[arg(long, default_value = "mainnet")]
+        network: String,
+
+        /// Predict the block at this time (RFC3339, e.g.
+        /// `2026-05-18T14:00:00Z`, or unix seconds). Mutually exclusive
+        /// with the positional height.
+        #[arg(long, conflicts_with = "number")]
+        at_time: Option<String>,
     },
 }
 
