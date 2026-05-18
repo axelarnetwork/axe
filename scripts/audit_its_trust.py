@@ -88,10 +88,15 @@ def load_config(args) -> tuple[dict, str]:
 
 
 def classify_chain(chain_id: str, value: dict) -> str:
-    """Return one of: evm, solana, sui, xrpl, stellar, unknown."""
-    its = value.get("contracts", {}).get("InterchainTokenService", {})
-    addr = its.get("address", "")
-    if addr.startswith("0x"):
+    """Return one of: evm, solana, sui, xrpl, stellar, unknown.
+
+    Order matters: check chain_id (which is canonical and unambiguous) before
+    falling back to the contract-address shape. Sui's ITS address is a 32-byte
+    hex with `0x` prefix that would otherwise be misread as EVM-shaped.
+    """
+    # xrpl-evm is an EVM-side chain that happens to start with "xrpl-", check
+    # this first so it doesn't fall into the XRPL branch.
+    if chain_id == "xrpl-evm" or chain_id.startswith("xrpl-evm"):
         return "evm"
     if chain_id == "solana" or chain_id.startswith("solana"):
         return "solana"
@@ -99,8 +104,12 @@ def classify_chain(chain_id: str, value: dict) -> str:
         return "sui"
     if chain_id.startswith("stellar"):
         return "stellar"
-    if chain_id.startswith("xrpl") and not chain_id.startswith("xrpl-evm"):
+    if chain_id.startswith("xrpl"):
         return "xrpl"
+    its = value.get("contracts", {}).get("InterchainTokenService", {})
+    addr = its.get("address", "")
+    if addr.startswith("0x"):
+        return "evm"
     return "unknown"
 
 
