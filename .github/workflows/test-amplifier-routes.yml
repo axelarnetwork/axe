@@ -75,19 +75,19 @@ jobs:
             {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
             {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"}
           ]}'
-          # GMP fleet: Stellar ↔ Solana pair + Sui → Hyperliquid.
+          # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
+          # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
+          # and sui→sol GMP both implemented). Adds Solana↔Sui edge coverage.
           #
-          # TODO(hedera): re-add `Hyperliquid -> Hedera` and `Hedera -> Sui` to
-          # complete the Sui → HL → Hedera → Sui 3-cycle once the Hedera ITS
-          # blocker is resolved upstream (same root cause as the ITS fleet —
-          # Hedera GMP destination works, but pairing it as source needs the
-          # ITS deploy path healthy). Hyperliquid stays as a Sui-only target
-          # until then, so Hyperliquid currently has 1×src and 1×dst with the
-          # extra Sui-source route.
+          # TODO(hedera): once the Hedera ITS deploy blocker is resolved
+          # upstream, slot Hedera back in (it works fine as GMP destination
+          # today). A 5-cycle Stellar→Sol→Sui→HL→Hedera→Stellar keeps strict
+          # 1/1 and covers an extra chain.
           MATRIX_TESTNET_GMP='{"include":[
             {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
-            {"name":"Solana -> Stellar","src":"Solana","dst":"Stellar","notes":"sol->stellar GMP"},
-            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"}
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
           ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;

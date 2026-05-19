@@ -777,6 +777,65 @@ pub(crate) fn resolve_sui_axe_token(
     Ok((parse_tid(tid_str)?, coin_type))
 }
 
+/// Read a pre-registered AXE ITS token id from chains-config, if one is
+/// recorded for `<chain_axelar_id>`. Returns `None` when the entry is absent
+/// — callers fall through to their normal cache-or-deploy path.
+///
+/// Schema (per source chain in chains-config):
+/// ```json
+/// "chains": { "<axelar_id>": { "contracts": { "AXE": { "tokenId": "0x..." } } } }
+/// ```
+///
+/// Once an AXE token has been deployed on a source chain (and its remote
+/// counterparts registered on each destination of interest), recording the
+/// tokenId here lets axe skip the full deploy + hub-routed remote-deploy
+/// dance on every CI run. Each run then collapses to a single
+/// `interchainTransfer` call — much smaller surface area for transient
+/// Amplifier failures (e.g. "message not approved" race during execute).
+pub(crate) fn read_pre_registered_axe_token(
+    config: &std::path::Path,
+    chain_axelar_id: &str,
+) -> Result<Option<alloy::primitives::FixedBytes<32>>> {
+    let content = std::fs::read_to_string(config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    let tid_str = root
+        .pointer(&format!("/chains/{chain_axelar_id}/contracts/AXE/tokenId"))
+        .and_then(|v| v.as_str());
+    match tid_str {
+        Some(s) => {
+            let stripped = s.strip_prefix("0x").unwrap_or(s);
+            let bytes = hex::decode(stripped).map_err(|e| {
+                eyre::eyre!("invalid AXE.tokenId hex for chain {chain_axelar_id}: {e}")
+            })?;
+            if bytes.len() != 32 {
+                eyre::bail!(
+                    "AXE.tokenId for chain {chain_axelar_id} must be 32 bytes (got {})",
+                    bytes.len()
+                );
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            Ok(Some(alloy::primitives::FixedBytes::from(out)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Print a hint suggesting the caller add the freshly-deployed AXE tokenId to
+/// chains-config so subsequent CI runs skip the deploy. Called from the
+/// per-chain deploy helpers right after the source-side deploy succeeds.
+pub(crate) fn hint_persist_axe_token(
+    chain_axelar_id: &str,
+    token_id: &alloy::primitives::FixedBytes<32>,
+) {
+    ui::info(&format!(
+        "💡 To skip the deploy on future runs, add to chains-config:\n  \
+         chains.{chain_axelar_id}.contracts.AXE.tokenId = \"{token_id}\"\n  \
+         (assumes the destination chains you care about already have the remote registered)"
+    ));
+}
+
 /// Resolve the pre-registered AXE token ID for Hedera-source ITS runs.
 ///
 /// axe can't auto-deploy on Hedera because the Hedera fork of the

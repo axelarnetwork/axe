@@ -223,11 +223,16 @@ async fn resolve_or_deploy_token(
 
     let its_service = InterchainTokenService::new(its.its_proxy_addr, &write_provider);
 
-    // Hedera source: auto-deploy reverts with InitialSupplyUnsupported because
-    // the Hedera fork of ITS requires initialSupply=0 and a separate HTS mint
-    // (plus WHBAR fund + factory approval). Require a pre-registered token
-    // instead — either via --token-id or `chains.<id>.contracts.AXE.tokenId`
-    // in chains-config. Set it up via the deployments-repo Hedera scripts.
+    // Resolution order: --token-id (CLI override) → chains-config
+    // `contracts.AXE.tokenId` (per-source pre-registration, lets CI skip the
+    // deploy + hub-routed remote-deploy and collapse to a single
+    // interchainTransfer) → local file cache (per src+dst) → fresh deploy.
+    //
+    // Hedera special-cases: auto-deploy reverts with
+    // `InitialSupplyUnsupported` (and the broader path is currently broken
+    // upstream — see TODOs in the workflow + script). For Hedera-source we
+    // require an explicit pre-registered token; the error message points at
+    // the deployments-repo Hedera setup.
     let (token_id, token_addr, deploy_message_id) = if args.source_axelar_id == "hedera" {
         // Hedera ITS uses `registeredTokenAddress` (HTS tokens lack
         // deterministic addresses, so `interchainTokenAddress` was removed
@@ -254,6 +259,15 @@ async fn resolve_or_deploy_token(
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
         (token_id, addr, None)
+    } else if let Some(tid) = super::helpers::read_pre_registered_axe_token(&args.config, src)? {
+        let addr = its_service
+            .interchainTokenAddress(tid)
+            .call()
+            .await
+            .map_err(|e| eyre!("failed to look up token address for {tid}: {e}"))?;
+        ui::kv("token ID (chains-config)", &format!("{tid}"));
+        ui::address("token address", &format!("{addr}"));
+        (tid, addr, None)
     } else {
         // Check cache
         let cache = read_its_cache(src, dest);

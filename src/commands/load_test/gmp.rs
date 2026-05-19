@@ -1536,6 +1536,254 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 }
 
 // ===========================================================================
+// Sui -> Solana GMP
+// ===========================================================================
+
+/// Sui source -> Solana destination, GMP only (sequential burst).
+///
+/// Mirrors `run_sui_to_evm`: same Sui-side PTB (`example::gmp::send_call`),
+/// but targets the Solana memo program and uses `verify_onchain_solana` for
+/// the destination-side polling. Payload format matches what `run_evm_to_sol`
+/// sends — the memo program accepts the same ABI-string framing.
+pub(super) async fn run_sui_to_sol(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
+    let src = &args.source_chain;
+    let dest = &args.destination_chain;
+    let cfg = ChainsConfig::load(&args.config)?;
+
+    let solana_rpc = args.destination_rpc.clone();
+    validate_solana_rpc(&solana_rpc).await?;
+
+    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+        eyre::bail!(
+            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+        );
+    }
+
+    ui::kv("source", src);
+    ui::kv("destination", dest);
+    ui::kv("protocol", "GMP (Sui → Solana via memo)");
+
+    let (sui_rpc, sui_contracts) = crate::sui::read_sui_chain_config(&args.config, src)?;
+    let sui_rpc = if args.source_rpc.is_empty() {
+        sui_rpc
+    } else {
+        args.source_rpc.clone()
+    };
+    let sui_client = crate::sui::SuiClient::new(&sui_rpc);
+    let chain_id = sui_client
+        .get_chain_identifier()
+        .await
+        .unwrap_or_else(|_| "?".to_string());
+    ui::kv("Sui chain id", &chain_id);
+
+    let main_wallet = load_sui_main_wallet()?;
+    ui::kv("Sui wallet", &main_wallet.address_hex());
+    let bal = sui_client.get_balance(&main_wallet.address).await?;
+    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+    let sui_amount = bal as f64 / 1e9;
+    ui::kv("Sui balance", &format!("{bal} mist ({sui_amount:.4} SUI)"));
+    if bal < SUI_DEFAULT_GAS_VALUE_MIST + SUI_DEFAULT_GAS_BUDGET_MIST {
+        eyre::bail!(
+            "Sui wallet {} has insufficient SUI: {bal} mist. Need ≥ {} mist.",
+            main_wallet.address_hex(),
+            SUI_DEFAULT_GAS_VALUE_MIST + SUI_DEFAULT_GAS_BUDGET_MIST,
+        );
+    }
+
+    // Destination on Solana: the memo program (resolved per feature flag).
+    // Same target `run_evm_to_sol` uses, so the receive-side flow on Solana
+    // is identical (memo program acks via gateway).
+    let destination_address = evm_sender::memo_program_id().to_string();
+    ui::kv("destination program", &destination_address);
+
+    // The Solana axelar gateway needs the executable-payload framing
+    // (1-byte scheme prefix + ABI-encoded SolanaGatewayPayload with the
+    // counter PDA as a writable account). Building the bytes here matches
+    // what `run_evm_to_sol` sends so the Solana relayer can execute it.
+    let memo_program_id = evm_sender::memo_program_id();
+    let (counter_pda, _) =
+        solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program_id);
+
+    let gas_value_mist: u64 = match &args.gas_value {
+        Some(v) => v
+            .parse()
+            .map_err(|e| eyre::eyre!("invalid --gas-value: {e}"))?,
+        None => SUI_DEFAULT_GAS_VALUE_MIST,
+    };
+    ui::kv(
+        "cross-chain gas",
+        &format!("{gas_value_mist} mist (paid via Sui GasService)"),
+    );
+
+    // `--payload`, if provided, overrides the memo body inside the
+    // executable-payload wrapper. Otherwise `make_executable_payload`
+    // picks a random "hello from axe load test ..." string.
+    let inner_payload: Option<Vec<u8>> = match &args.payload {
+        Some(hex_str) => Some(
+            hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))
+                .map_err(|e| eyre::eyre!("invalid --payload hex: {e}"))?,
+        ),
+        None => None,
+    };
+
+    let num_txs = args.num_txs.max(1) as usize;
+
+    let test_start = Instant::now();
+    let spinner = ui::wait_spinner(&format!("sending (0/{num_txs} confirmed)..."));
+    let mut metrics: Vec<TxMetrics> = Vec::with_capacity(num_txs);
+
+    for i in 0..num_txs {
+        let send_start = Instant::now();
+        let payload_bytes = evm_sender::make_executable_payload(&inner_payload, &counter_pda);
+        let result = crate::sui::send_gmp_call(
+            &sui_client,
+            &main_wallet,
+            &sui_contracts,
+            &crate::sui::SuiGmpCall {
+                destination_chain: args.destination_axelar_id.clone(),
+                destination_address: destination_address.clone(),
+                payload: payload_bytes.clone(),
+                gas_value_mist,
+                gas_budget_mist: SUI_DEFAULT_GAS_BUDGET_MIST,
+            },
+        )
+        .await;
+
+        match result {
+            Ok(r) if r.success => {
+                #[allow(clippy::cast_possible_truncation)]
+                let latency_ms = send_start.elapsed().as_millis() as u64;
+                let message_id = format!("{}-{}", r.digest, r.event_index);
+                metrics.push(TxMetrics {
+                    signature: message_id,
+                    submit_time_ms: latency_ms,
+                    confirm_time_ms: Some(latency_ms),
+                    latency_ms: Some(latency_ms),
+                    compute_units: None,
+                    slot: None,
+                    success: true,
+                    error: None,
+                    payload: payload_bytes.clone(),
+                    payload_hash: r.payload_hash_hex.clone(),
+                    source_address: format!("0x{}", r.source_address_hex),
+                    gmp_destination_chain: args.destination_axelar_id.clone(),
+                    gmp_destination_address: destination_address.clone(),
+                    send_instant: Some(send_start),
+                    amplifier_timing: None,
+                });
+                spinner.set_message(format!("sending ({}/{num_txs} confirmed)...", i + 1));
+            }
+            Ok(r) => {
+                metrics.push(TxMetrics {
+                    signature: String::new(),
+                    submit_time_ms: 0,
+                    confirm_time_ms: None,
+                    latency_ms: None,
+                    compute_units: None,
+                    slot: None,
+                    success: false,
+                    error: r.error.or_else(|| Some("Sui tx failed".to_string())),
+                    payload: payload_bytes.clone(),
+                    payload_hash: String::new(),
+                    source_address: String::new(),
+                    gmp_destination_chain: String::new(),
+                    gmp_destination_address: String::new(),
+                    send_instant: None,
+                    amplifier_timing: None,
+                });
+            }
+            Err(e) => {
+                metrics.push(TxMetrics {
+                    signature: String::new(),
+                    submit_time_ms: 0,
+                    confirm_time_ms: None,
+                    latency_ms: None,
+                    compute_units: None,
+                    slot: None,
+                    success: false,
+                    error: Some(e.to_string()),
+                    payload: payload_bytes.clone(),
+                    payload_hash: String::new(),
+                    source_address: String::new(),
+                    gmp_destination_chain: String::new(),
+                    gmp_destination_address: String::new(),
+                    send_instant: None,
+                    amplifier_timing: None,
+                });
+            }
+        }
+    }
+
+    spinner.finish_and_clear();
+    let total_submitted = metrics.len() as u64;
+    let total_confirmed = metrics.iter().filter(|m| m.success).count() as u64;
+    let total_failed = total_submitted - total_confirmed;
+    ui::success(&format!(
+        "sent {total_confirmed}/{total_submitted} confirmed"
+    ));
+
+    let test_duration = test_start.elapsed().as_secs_f64();
+    let latencies: Vec<u64> = metrics.iter().filter_map(|m| m.latency_ms).collect();
+
+    #[allow(clippy::cast_precision_loss, clippy::float_arithmetic)]
+    let mut report = crate::commands::load_test::metrics::LoadTestReport {
+        source_chain: src.to_string(),
+        destination_chain: dest.to_string(),
+        destination_address: destination_address.clone(),
+        protocol: String::new(),
+        tps: None,
+        duration_secs: None,
+        num_txs: total_submitted,
+        num_keys: 1,
+        total_submitted,
+        total_confirmed,
+        total_failed,
+        test_duration_secs: test_duration,
+        tps_submitted: if test_duration > 0.0 {
+            total_submitted as f64 / test_duration
+        } else {
+            0.0
+        },
+        tps_confirmed: if test_duration > 0.0 {
+            total_confirmed as f64 / test_duration
+        } else {
+            0.0
+        },
+        landing_rate: if total_submitted > 0 {
+            total_confirmed as f64 / total_submitted as f64
+        } else {
+            0.0
+        },
+        avg_latency_ms: if latencies.is_empty() {
+            None
+        } else {
+            Some(latencies.iter().sum::<u64>() as f64 / latencies.len() as f64)
+        },
+        min_latency_ms: latencies.iter().min().copied(),
+        max_latency_ms: latencies.iter().max().copied(),
+        avg_compute_units: None,
+        min_compute_units: None,
+        max_compute_units: None,
+        verification: None,
+        transactions: metrics,
+    };
+
+    let verification = verify::verify_onchain_solana(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        &destination_address,
+        &solana_rpc,
+        &mut report.transactions,
+        verify::SourceChainType::Sui,
+    )
+    .await?;
+    report.verification = Some(verification);
+
+    finish_report(&args, &mut report, test_start)
+}
+
+// ===========================================================================
 // EVM -> Sui GMP
 // ===========================================================================
 

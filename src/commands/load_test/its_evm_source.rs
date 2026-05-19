@@ -293,6 +293,8 @@ pub(super) async fn deploy_its_token<P: Provider>(
     });
     save_its_cache(source_chain, dest_chain, &cache)?;
 
+    super::helpers::hint_persist_axe_token(source_chain, &token_id);
+
     Ok((token_id, token_addr, deploy_message_id))
 }
 

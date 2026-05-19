@@ -173,19 +173,18 @@ EOF
 )
         ;;
     testnet/gmp)
-        # Stellar ↔ Solana pair + Sui → Hyperliquid.
+        # Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
+        # Strict 1×src + 1×dst per chain. Every leg wired in axe; adds the
+        # Sol↔Sui edge coverage now that gmp::run_sui_to_sol is implemented.
         #
-        # TODO(hedera): re-add `Hyperliquid -> Hedera` and `Hedera -> Sui` to
-        # complete the Sui → HL → Hedera → Sui 3-cycle (which gives Sui dst
-        # coverage and balances Hyperliquid) once the Hedera ITS deploy
-        # blocker is resolved upstream. Hedera GMP destination works fine
-        # today; it's the Hedera-as-source path that's currently broken
-        # alongside the ITS deploy.
+        # TODO(hedera): when the Hedera ITS deploy blocker is fixed upstream
+        # add Hedera back via a 5-cycle (Stellar→Sol→Sui→HL→Hedera→Stellar).
         FLEET=$(cat <<'EOF'
 [
   {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
-  {"name":"Solana -> Stellar","src":"Solana","dst":"Stellar"},
-  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"}
+  {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
+  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"},
+  {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"}
 ]
 EOF
 )

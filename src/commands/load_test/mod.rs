@@ -15,6 +15,7 @@ mod its_stellar_to_evm;
 mod its_stellar_to_sol;
 mod its_stellar_to_sui;
 mod its_sui_to_evm;
+mod its_sui_to_sol;
 mod its_xrpl_to_evm;
 mod keypairs;
 pub mod metrics;
@@ -184,6 +185,7 @@ pub struct LoadTestArgs {
     pub extra_accounts: u32,
 }
 
+#[allow(clippy::cognitive_complexity)] // wide match over (protocol, test-type) pairs; flat by design
 pub async fn run(args: LoadTestArgs) -> Result<()> {
     // Check for network mismatch between compiled binary and config
     if let Some(target_network) = detect_network_from_config(&args.config) {
@@ -324,23 +326,24 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         // and pass `--token-id`. `--coin-type` resolves automatically via
         // dev-inspect when omitted.
         (Protocol::Its, TestType::SuiToEvm) => its_sui_to_evm::run(args, run_start).await,
-        (Protocol::Its, TestType::SuiToSol)
-        | (Protocol::Its, TestType::SuiToStellar)
-        | (Protocol::Its, TestType::SuiToXrpl) => {
+        (Protocol::Its, TestType::SuiToSol) => its_sui_to_sol::run(args, run_start).await,
+        (Protocol::Its, TestType::SuiToStellar) | (Protocol::Its, TestType::SuiToXrpl) => {
             eyre::bail!(
-                "sui -> {} ITS not yet wired (only sui -> evm is). Source-side PTB construction is identical, \
-                 only the destination verifier differs — follow the its_sui_to_evm.rs pattern to add it.",
+                "sui -> {} ITS not yet wired. Source-side PTB construction is identical to \
+                 sui -> evm / sui -> sol, only the destination verifier differs — follow the \
+                 its_sui_to_sol.rs pattern (verify_onchain_solana_its-style swap).",
                 args.destination_chain
             )
         }
-        // Sui-source GMP variants other than SuiToEvm — same upstream voter
-        // gap as SuiToEvm GMP, so just route to a friendly bail.
-        (Protocol::Gmp, TestType::SuiToSol)
-        | (Protocol::Gmp, TestType::SuiToStellar)
-        | (Protocol::Gmp, TestType::SuiToXrpl) => {
+        // Sui-source GMP. SuiToSol is wired (sends via Example::gmp::send_call,
+        // verified on Solana with SourceChainType::Sui). SuiToStellar and
+        // SuiToXrpl still need implementations (Stellar verify path differs
+        // from Sol; XRPL has no GMP layer).
+        (Protocol::Gmp, TestType::SuiToSol) => gmp::run_sui_to_sol(args, run_start).await,
+        (Protocol::Gmp, TestType::SuiToStellar) | (Protocol::Gmp, TestType::SuiToXrpl) => {
             eyre::bail!(
-                "sui -> {} GMP not implemented (and Example::gmp::send_call voting is upstream-stale on testnet). \
-                 Use ITS via axelar-contract-deployments while the voter set catches up.",
+                "sui -> {} GMP not implemented yet. Follow the run_sui_to_sol pattern in gmp.rs \
+                 (Sui-side PTB stays identical, only destination verification swaps in).",
                 args.destination_chain
             )
         }

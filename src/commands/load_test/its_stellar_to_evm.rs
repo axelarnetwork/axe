@@ -608,6 +608,22 @@ async fn setup_its_token(
         return Ok((token_id, [0u8; 32], token_addr));
     }
 
+    // chains-config pre-registered AXE: per-source override that lets CI skip
+    // the full deploy + hub-routed remote-deploy and collapse to a single
+    // interchainTransfer. Salt is unknown when we adopt a pre-registered
+    // token, so the second return value is the zero salt — call sites that
+    // need the salt for re-deploy paths fall through to the local cache
+    // branch instead.
+    if let Some(tid) = super::helpers::read_pre_registered_axe_token(config, src)?
+        && let Some(token_addr) = client
+            .its_query_token_address(main_wallet, its_contract, tid.0)
+            .await?
+    {
+        ui::kv("token ID (chains-config)", &format!("{tid}"));
+        ui::address("token contract (Stellar)", &token_addr);
+        return Ok((tid.0, [0u8; 32], token_addr));
+    }
+
     let cache = read_its_cache(src, dest);
     if let Some(tid_hex) = cache.get("tokenId").and_then(|v| v.as_str())
         && let Some(salt_hex) = cache.get("salt").and_then(|v| v.as_str())
@@ -722,6 +738,8 @@ async fn setup_its_token(
     cache["salt"] = serde_json::json!(format!("0x{}", hex::encode(salt)));
     cache["tokenAddress"] = serde_json::json!(token_address);
     save_its_cache(src, dest, &cache)?;
+
+    super::helpers::hint_persist_axe_token(src, &alloy::primitives::FixedBytes::from(token_id));
 
     Ok((token_id, salt, token_address))
 }
