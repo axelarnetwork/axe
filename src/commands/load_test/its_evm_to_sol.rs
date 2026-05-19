@@ -83,6 +83,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &evm_rpc_url,
         sizing.num_keys,
         hub_gas_extra_per_key(&args, &sizing, gas_value_wei),
+        &args.source_axelar_id,
     )
     .await?;
 
@@ -222,7 +223,27 @@ async fn resolve_or_deploy_token(
 
     let its_service = InterchainTokenService::new(its.its_proxy_addr, &write_provider);
 
-    let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
+    // Hedera source: auto-deploy reverts with InitialSupplyUnsupported because
+    // the Hedera fork of ITS requires initialSupply=0 and a separate HTS mint
+    // (plus WHBAR fund + factory approval). Require a pre-registered token
+    // instead — either via --token-id or `chains.<id>.contracts.AXE.tokenId`
+    // in chains-config. Set it up via the deployments-repo Hedera scripts.
+    let (token_id, token_addr, deploy_message_id) = if args.source_axelar_id == "hedera" {
+        // Hedera ITS uses `registeredTokenAddress` (HTS tokens lack
+        // deterministic addresses, so `interchainTokenAddress` was removed
+        // in the fork — see contracts/hedera/README.md in commonprefix's
+        // interchain-token-service@hedera-its).
+        let token_id =
+            super::helpers::resolve_hedera_axe_token(&args.config, src, args.token_id.as_deref())?;
+        let addr = its_service
+            .registeredTokenAddress(token_id)
+            .call()
+            .await
+            .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
+        ui::kv("token ID (Hedera, pre-registered)", &format!("{token_id}"));
+        ui::address("token address", &format!("{addr}"));
+        (token_id, addr, None)
+    } else if let Some(ref tid) = args.token_id {
         // User provided a token ID
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service

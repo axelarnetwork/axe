@@ -147,11 +147,6 @@ pub async fn run_load_test_with_metrics(
         None => None,
     };
 
-    // Derive N EVM signers from main private key
-    let derived = keypairs::derive_evm_signers(main_key, num_txs)?;
-    ui::info(&format!("derived {} EVM signing keys", derived.len()));
-
-    // Fund derived wallets from main wallet
     let main_signer = PrivateKeySigner::from_bytes(&(*main_key).into())
         .map_err(|e| eyre!("invalid main EVM key: {e}"))?;
     let funding_provider = ProviderBuilder::new()
@@ -161,13 +156,25 @@ pub async fn run_load_test_with_metrics(
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => default_gas_value_wei(args).await,
     };
-    keypairs::ensure_funded_evm_with_extra(
-        &funding_provider,
-        &main_signer,
-        &derived,
-        gas_value_wei,
-    )
-    .await?;
+
+    // Hedera quirk: sending HBAR to a fresh EVM address auto-creates a Hedera
+    // account, but the mirror node lags before the new account is visible to
+    // the JSON-RPC relay — so a tx FROM a just-funded derived key reverts
+    // with "Sender account not found" during simulation. The deployment
+    // scripts in axelar-contract-deployments avoid this by using a single
+    // pre-existing wallet; we mirror that here. Loses parallelism for
+    // num_txs > 1 on Hedera (sequential nonce), acceptable for the smoke
+    // fleet which uses num_txs = 1.
+    let derived = if args.source_axelar_id == "hedera" {
+        ui::info("Hedera source: using main wallet directly (no key derivation)");
+        vec![main_signer.clone(); num_txs]
+    } else {
+        let d = keypairs::derive_evm_signers(main_key, num_txs)?;
+        ui::info(&format!("derived {} EVM signing keys", d.len()));
+        keypairs::ensure_funded_evm_with_extra(&funding_provider, &main_signer, &d, gas_value_wei)
+            .await?;
+        d
+    };
 
     // Fire txs in parallel, capped to avoid overwhelming the RPC.
     // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),

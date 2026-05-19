@@ -175,7 +175,20 @@ pub(super) async fn derive_and_fund_keys(
     evm_rpc_url: &str,
     num_keys: usize,
     hub_gas_extra_per_key: u128,
+    source_axelar_id: &str,
 ) -> eyre::Result<Vec<PrivateKeySigner>> {
+    // Hedera quirk: a freshly funded EVM address auto-creates a Hedera
+    // account but the mirror node lags before the JSON-RPC relay sees it,
+    // so a tx FROM a just-funded derived key reverts with "Sender account
+    // not found" during simulation. The deployments-repo scripts avoid
+    // this by using a single pre-existing wallet — mirror that here.
+    // (Loses parallelism for num_txs > 1 on Hedera; acceptable for the
+    // smoke fleet which uses num_txs = 1.)
+    if source_axelar_id == "hedera" {
+        ui::info("Hedera source: using main wallet directly (no key derivation)");
+        return Ok(vec![main_signer.clone(); num_keys]);
+    }
+
     let derived = keypairs::derive_evm_signers(main_key, num_keys)?;
     ui::info(&format!("derived {} EVM signing keys", derived.len()));
 

@@ -113,6 +113,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &source_rpc_url,
         sizing.num_keys,
         hub_gas_extra_per_key(&args, &sizing, gas_value_wei),
+        &args.source_axelar_id,
     )
     .await?;
 
