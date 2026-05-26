@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -44,6 +45,15 @@ impl ItsChainKind {
         }
     }
 
+    const fn config_label(self) -> &'static str {
+        match self {
+            Self::Evm => "evm",
+            Self::Solana => "svm",
+            Self::Sui => "sui",
+            Self::Stellar => "stellar",
+        }
+    }
+
     const fn sort_rank(self) -> u8 {
         match self {
             Self::Evm => 0,
@@ -56,6 +66,7 @@ impl ItsChainKind {
 
 #[derive(Clone, Debug)]
 struct GovernanceContract {
+    name: &'static str,
     label: &'static str,
     address: String,
 }
@@ -91,6 +102,39 @@ impl GovernanceStatus {
     const fn is_owner(&self) -> bool {
         matches!(self, Self::Owner(_))
     }
+
+    const fn json_status(&self) -> &'static str {
+        match self {
+            Self::Owner(_) => "owner",
+            Self::Deployed(_) => "deployed",
+            Self::NotDeployed => "not_deployed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldSource {
+    OnChain,
+    Config,
+    Missing,
+}
+
+impl FieldSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OnChain => "on_chain",
+            Self::Config => "config",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddressRole {
+    Its,
+    Owner,
+    Operator,
+    Governance,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +143,7 @@ struct ItsEntry {
     axelar_id: String,
     kind: ItsChainKind,
     rpc_url: Option<String>,
+    explorer_url: Option<String>,
     address: String,
     version: Option<String>,
     deployer: Option<String>,
@@ -130,6 +175,7 @@ impl ItsEntry {
             axelar_id: chain.axelar_id_or(chain_key),
             kind,
             rpc_url: non_empty(chain.rpc.clone()),
+            explorer_url: explorer_url(chain),
             address,
             version: contract_string(contract, "version"),
             deployer: contract_string(contract, "deployer"),
@@ -168,21 +214,36 @@ enum OwnershipStatus {
     Missing,
 }
 
+impl OwnershipStatus {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OnChain => "on_chain",
+            Self::Partial => "partial",
+            Self::Config => "config",
+            Self::Missing => "missing",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct OwnershipRow {
     chain_key: String,
     axelar_id: String,
     kind: ItsChainKind,
     its_address: String,
+    explorer_url: Option<String>,
     owner: Option<String>,
+    owner_source: FieldSource,
     operator: Option<String>,
+    operator_source: FieldSource,
     governance: GovernanceStatus,
+    governance_contracts: Vec<GovernanceContract>,
     version: Option<String>,
     status: OwnershipStatus,
     note: String,
 }
 
-pub async fn run(network: String) -> Result<()> {
+pub async fn run(network: String, json_output: bool) -> Result<()> {
     let network: Network = network.parse()?;
     let config_path = resolve_config(network)?;
     let config = ChainsConfig::load(&config_path)?;
@@ -195,25 +256,40 @@ pub async fn run(network: String) -> Result<()> {
         ));
     }
 
-    ui::section(&format!("ITS ownership: {network}"));
-    ui::kv("config", &config_path.display().to_string());
+    if !json_output {
+        ui::section(&format!("ITS ownership: {network}"));
+        ui::kv("config", &config_path.display().to_string());
+    }
 
-    let spinner = ui::wait_spinner(&format!(
-        "querying {} ITS deployments (read-only)...",
-        entries.len()
-    ));
-    let mut rows: Vec<OwnershipRow> = stream::iter(entries)
+    let mut rows = if json_output {
+        query_entries(entries).await
+    } else {
+        let spinner = ui::wait_spinner(&format!(
+            "querying {} ITS deployments (read-only)...",
+            entries.len()
+        ));
+        let rows = query_entries(entries).await;
+        spinner.finish_and_clear();
+        rows
+    };
+
+    sort_rows(&mut rows);
+    if json_output {
+        render_json(network, &config_path, &rows)?;
+    } else {
+        render_table(&rows);
+        render_summary(&rows);
+    }
+
+    Ok(())
+}
+
+async fn query_entries(entries: Vec<ItsEntry>) -> Vec<OwnershipRow> {
+    stream::iter(entries)
         .map(query_entry)
         .buffer_unordered(QUERY_CONCURRENCY)
         .collect()
-        .await;
-    spinner.finish_and_clear();
-
-    sort_rows(&mut rows);
-    render_table(&rows);
-    render_summary(&rows);
-
-    Ok(())
+        .await
 }
 
 fn resolve_config(network: Network) -> Result<PathBuf> {
@@ -360,7 +436,17 @@ fn solana_config_row(entry: ItsEntry) -> OwnershipRow {
     } else {
         OwnershipStatus::Missing
     };
-    OwnershipRow::from_entry(entry, owner, operator, status, note)
+    let owner_source = source_for_value(owner.as_ref(), FieldSource::Config);
+    let operator_source = source_for_value(operator.as_ref(), FieldSource::Config);
+    OwnershipRow::from_entry(
+        entry,
+        owner,
+        owner_source,
+        operator,
+        operator_source,
+        status,
+        note,
+    )
 }
 
 async fn query_sui_entry(entry: ItsEntry) -> OwnershipRow {
@@ -511,6 +597,8 @@ fn row_from_probe(
     let operator_on_chain = probe.operator.ok();
     let owner_from_chain = owner_on_chain.is_some();
     let operator_from_chain = operator_on_chain.is_some();
+    let owner_source = field_source(owner_from_chain, owner_fallback.is_some());
+    let operator_source = field_source(operator_from_chain, operator_fallback.is_some());
     let owner = owner_on_chain.or(owner_fallback);
     let operator = operator_on_chain.or(operator_fallback);
     let status = ownership_status(owner_from_chain, operator_from_chain, &owner, &operator);
@@ -521,7 +609,33 @@ fn row_from_probe(
         operator_error.as_deref(),
     );
 
-    OwnershipRow::from_entry(entry, owner, operator, status, note)
+    OwnershipRow::from_entry(
+        entry,
+        owner,
+        owner_source,
+        operator,
+        operator_source,
+        status,
+        note,
+    )
+}
+
+fn field_source(from_chain: bool, has_fallback: bool) -> FieldSource {
+    if from_chain {
+        FieldSource::OnChain
+    } else if has_fallback {
+        FieldSource::Config
+    } else {
+        FieldSource::Missing
+    }
+}
+
+fn source_for_value(value: Option<&String>, source: FieldSource) -> FieldSource {
+    if value.is_some() {
+        source
+    } else {
+        FieldSource::Missing
+    }
 }
 
 fn ownership_status(
@@ -577,7 +691,9 @@ impl OwnershipRow {
     fn from_entry(
         entry: ItsEntry,
         owner: Option<String>,
+        owner_source: FieldSource,
         operator: Option<String>,
+        operator_source: FieldSource,
         status: OwnershipStatus,
         note: String,
     ) -> Self {
@@ -588,9 +704,13 @@ impl OwnershipRow {
             axelar_id: entry.axelar_id,
             kind: entry.kind,
             its_address: entry.address,
+            explorer_url: entry.explorer_url,
             owner,
+            owner_source,
             operator,
+            operator_source,
             governance,
+            governance_contracts: entry.governance_contracts,
             version: entry.version,
             status,
             note,
@@ -600,8 +720,9 @@ impl OwnershipRow {
 
 fn render_table(rows: &[OwnershipRow]) {
     let mut table = Table::new();
-    table.load_preset(comfy_table::presets::UTF8_FULL_CONDENSED);
+    table.load_preset(comfy_table::presets::UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
+    let hyperlinks = terminal_hyperlinks_enabled();
     table.set_header(vec![
         header_cell("#"),
         header_cell("Chain"),
@@ -622,10 +743,25 @@ fn render_table(rows: &[OwnershipRow]) {
             Cell::new(row.chain_key.as_str()).add_attribute(Attribute::Bold),
             Cell::new(row.axelar_id.as_str()).fg(Color::Cyan),
             Cell::new(row.kind.label()),
-            Cell::new(short_address(&row.its_address)),
-            Cell::new(optional_address(row.owner.as_deref())),
+            Cell::new(address_cell(
+                row,
+                &row.its_address,
+                AddressRole::Its,
+                hyperlinks,
+            )),
+            Cell::new(optional_address_cell(
+                row,
+                row.owner.as_deref(),
+                AddressRole::Owner,
+                hyperlinks,
+            )),
             Cell::new(governance_label).fg(row.governance.color()),
-            Cell::new(optional_address(row.operator.as_deref())),
+            Cell::new(optional_address_cell(
+                row,
+                row.operator.as_deref(),
+                AddressRole::Operator,
+                hyperlinks,
+            )),
             Cell::new(row.version.as_deref().unwrap_or("-")),
             Cell::new(row.note.as_str()).fg(Color::DarkGrey),
         ]);
@@ -660,6 +796,121 @@ fn render_summary(rows: &[OwnershipRow]) {
             "{missing} {noun} missing both owner and operator; check notes/RPCs"
         ));
     }
+}
+
+fn render_json(
+    network: Network,
+    config_path: &std::path::Path,
+    rows: &[OwnershipRow],
+) -> Result<()> {
+    let output = json!({
+        "network": network.to_string(),
+        "config": config_path.display().to_string(),
+        "rows": rows.iter().map(row_json).collect::<Vec<_>>(),
+        "summary": {
+            "rows": rows.len(),
+            "evm": count_kind(rows, ItsChainKind::Evm),
+            "solana": count_kind(rows, ItsChainKind::Solana),
+            "sui": count_kind(rows, ItsChainKind::Sui),
+            "stellar": count_kind(rows, ItsChainKind::Stellar),
+            "governance": governance_summary_json(rows),
+        },
+    });
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn row_json(row: &OwnershipRow) -> Value {
+    json!({
+        "chain": row.chain_key,
+        "axelarId": row.axelar_id,
+        "chainType": row.kind.config_label(),
+        "displayType": row.kind.label(),
+        "rpcQueryStatus": row.status.label(),
+        "explorer": {
+            "baseUrl": row.explorer_url,
+        },
+        "its": address_json(row, &row.its_address, FieldSource::Config, AddressRole::Its),
+        "owner": optional_field_json(row, row.owner.as_deref(), row.owner_source, AddressRole::Owner),
+        "operator": optional_field_json(
+            row,
+            row.operator.as_deref(),
+            row.operator_source,
+            AddressRole::Operator,
+        ),
+        "governance": {
+            "status": row.governance.json_status(),
+            "label": row.governance.label(),
+            "deployed": row.governance.is_deployed(),
+            "ownerMatches": row.governance.is_owner(),
+            "contracts": row.governance_contracts
+                .iter()
+                .map(|contract| governance_contract_json(row, contract))
+                .collect::<Vec<_>>(),
+        },
+        "version": row.version,
+        "note": row.note,
+    })
+}
+
+fn address_json(
+    row: &OwnershipRow,
+    address: &str,
+    source: FieldSource,
+    role: AddressRole,
+) -> Value {
+    json!({
+        "address": address,
+        "source": source.label(),
+        "explorerUrl": address_explorer_url(row.kind, row.explorer_url.as_deref(), address, role),
+    })
+}
+
+fn optional_field_json(
+    row: &OwnershipRow,
+    address: Option<&str>,
+    source: FieldSource,
+    role: AddressRole,
+) -> Value {
+    match address {
+        Some(address) => address_json(row, address, source, role),
+        None => json!({
+            "address": null,
+            "source": source.label(),
+            "explorerUrl": null,
+        }),
+    }
+}
+
+fn governance_contract_json(row: &OwnershipRow, contract: &GovernanceContract) -> Value {
+    json!({
+        "name": contract.name,
+        "label": contract.label,
+        "address": contract.address,
+        "ownerMatches": row
+            .owner
+            .as_deref()
+            .is_some_and(|owner| same_address(owner, &contract.address)),
+        "explorerUrl": address_explorer_url(
+            row.kind,
+            row.explorer_url.as_deref(),
+            &contract.address,
+            AddressRole::Governance,
+        ),
+    })
+}
+
+fn governance_summary_json(rows: &[OwnershipRow]) -> Value {
+    let deployed = rows
+        .iter()
+        .filter(|row| row.governance.is_deployed())
+        .count();
+    let owner_matches = rows.iter().filter(|row| row.governance.is_owner()).count();
+    json!({
+        "deployed": deployed,
+        "notDeployed": rows.len() - deployed,
+        "ownerMatches": owner_matches,
+    })
 }
 
 fn row_count_summary(rows: &[OwnershipRow]) -> String {
@@ -727,6 +978,15 @@ fn contract_path_string(contract: &ContractEntry, path: &[&str]) -> Option<Strin
         .and_then(|value| non_empty(Some(value.to_string())))
 }
 
+fn explorer_url(chain: &ChainConfig) -> Option<String> {
+    chain
+        .extra
+        .get("explorer")
+        .and_then(|explorer| explorer.get("url"))
+        .and_then(Value::as_str)
+        .and_then(|value| non_empty(Some(value.to_string())))
+}
+
 fn governance_contracts(chain: &ChainConfig) -> Vec<GovernanceContract> {
     let Some(contracts) = chain.contracts.as_ref() else {
         return Vec::new();
@@ -738,7 +998,11 @@ fn governance_contracts(chain: &ChainConfig) -> Vec<GovernanceContract> {
             let address = contracts
                 .get(*contract_name)
                 .and_then(|contract| contract_string(contract, "address"))?;
-            Some(GovernanceContract { label, address })
+            Some(GovernanceContract {
+                name: contract_name,
+                label,
+                address,
+            })
         })
         .collect()
 }
@@ -823,15 +1087,9 @@ fn unique_values(values: [Option<&str>; 3]) -> Vec<String> {
     unique
 }
 
-fn optional_address(address: Option<&str>) -> String {
-    address
-        .map(short_address)
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn short_address(address: &str) -> String {
-    const HEAD: usize = 14;
-    const TAIL: usize = 8;
+fn compact_address(address: &str) -> String {
+    const HEAD: usize = 10;
+    const TAIL: usize = 6;
     if address.len() <= HEAD + TAIL + 3 {
         return address.to_string();
     }
@@ -840,6 +1098,87 @@ fn short_address(address: &str) -> String {
         &address[..HEAD],
         &address[address.len() - TAIL..]
     )
+}
+
+fn optional_address_cell(
+    row: &OwnershipRow,
+    address: Option<&str>,
+    role: AddressRole,
+    hyperlinks: bool,
+) -> String {
+    address
+        .map(|address| address_cell(row, address, role, hyperlinks))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn address_cell(row: &OwnershipRow, address: &str, role: AddressRole, hyperlinks: bool) -> String {
+    let label = compact_address(address);
+    if !hyperlinks {
+        return label;
+    }
+
+    let Some(url) = address_explorer_url(row.kind, row.explorer_url.as_deref(), address, role)
+    else {
+        return label;
+    };
+    terminal_link(&label, &url)
+}
+
+fn terminal_link(label: &str, url: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{label}\x1b]8;;\x1b\\")
+}
+
+fn terminal_hyperlinks_enabled() -> bool {
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_OSC8").is_none()
+        && std::env::var("TERM").map_or(true, |term| term != "dumb")
+}
+
+fn address_explorer_url(
+    kind: ItsChainKind,
+    explorer_url: Option<&str>,
+    address: &str,
+    role: AddressRole,
+) -> Option<String> {
+    let base = explorer_url?.trim();
+    if base.is_empty() {
+        return None;
+    }
+
+    Some(match kind {
+        ItsChainKind::Evm => format!("{}/address/{address}", trim_url_path(base)),
+        ItsChainKind::Solana => solana_explorer_address_url(base, address),
+        ItsChainKind::Sui => {
+            let segment = if role == AddressRole::Its {
+                "object"
+            } else {
+                "address"
+            };
+            format!("{}/{segment}/{address}", trim_url_path(base))
+        }
+        ItsChainKind::Stellar => {
+            let segment = if role == AddressRole::Its || address.starts_with('C') {
+                "contract"
+            } else {
+                "account"
+            };
+            format!("{}/{segment}/{address}", trim_url_path(base))
+        }
+    })
+}
+
+fn solana_explorer_address_url(base: &str, address: &str) -> String {
+    let (path, query) = base.split_once('?').unwrap_or((base, ""));
+    let suffix = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{query}")
+    };
+    format!("{}/address/{address}{suffix}", trim_url_path(path))
+}
+
+fn trim_url_path(url: &str) -> &str {
+    url.trim_end_matches('/')
 }
 
 fn short_error(error: &str) -> String {
@@ -871,21 +1210,64 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn short_address_keeps_small_values_readable() {
-        assert_eq!(short_address("0x1234"), "0x1234");
+    fn compact_address_truncates_more_aggressively() {
+        assert_eq!(
+            compact_address("0x1234567890abcdef1234567890abcdef12345678"),
+            "0x12345678...345678"
+        );
     }
 
     #[test]
-    fn short_address_truncates_middle() {
+    fn compact_address_keeps_small_values_readable() {
+        assert_eq!(compact_address("0x1234"), "0x1234");
+    }
+
+    #[test]
+    fn explorer_urls_use_chain_specific_paths() {
         assert_eq!(
-            short_address("0x1234567890abcdef1234567890abcdef12345678"),
-            "0x1234567890ab...12345678"
+            address_explorer_url(
+                ItsChainKind::Evm,
+                Some("https://sepolia.etherscan.io/"),
+                "0x1234",
+                AddressRole::Owner,
+            )
+            .as_deref(),
+            Some("https://sepolia.etherscan.io/address/0x1234")
+        );
+        assert_eq!(
+            address_explorer_url(
+                ItsChainKind::Solana,
+                Some("https://explorer.solana.com/?cluster=testnet"),
+                "pubkey",
+                AddressRole::Operator,
+            )
+            .as_deref(),
+            Some("https://explorer.solana.com/address/pubkey?cluster=testnet")
+        );
+        assert_eq!(
+            address_explorer_url(
+                ItsChainKind::Sui,
+                Some("https://suiscan.xyz/testnet"),
+                "0x1234",
+                AddressRole::Its,
+            )
+            .as_deref(),
+            Some("https://suiscan.xyz/testnet/object/0x1234")
+        );
+    }
+
+    #[test]
+    fn terminal_link_wraps_label_without_changing_visible_text() {
+        assert_eq!(
+            terminal_link("0x1234...abcd", "https://example.com/address/0x1234"),
+            "\x1b]8;;https://example.com/address/0x1234\x1b\\0x1234...abcd\x1b]8;;\x1b\\"
         );
     }
 
     #[test]
     fn matching_governance_detects_owner_case_insensitively() {
         let governance_contracts = vec![GovernanceContract {
+            name: "AxelarServiceGovernance",
             label: "service gov",
             address: "0xAbCd".to_string(),
         }];

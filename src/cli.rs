@@ -47,6 +47,9 @@ pub enum Commands {
     ItsOwnership {
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
         network: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show network info (e.g. block height + timestamp)

@@ -115,6 +115,7 @@ axe its-ownership devnet-amplifier
 axe its-ownership stagenet
 axe its-ownership testnet
 axe its-ownership mainnet
+axe its-ownership stagenet --json
 ```
 
 Reads the sibling `axelar-contract-deployments/axelar-chains-config/info/<network>.json`
@@ -123,7 +124,9 @@ and prints a compact table of ITS owner/operator addresses. EVM rows query
 Solana, and Stellar are included where their config/RPC data exposes the same
 fields. The Governance column marks chains where governance is not deployed,
 where a governance contract is deployed, and where the ITS owner is that
-governance contract.
+governance contract. Address cells use terminal hyperlinks when the chain config
+has an explorer URL. Use `--json` for full uncompressed addresses, explorer URLs,
+query sources, and governance contract details.
 
 ## Deploy
 
