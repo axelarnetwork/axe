@@ -122,11 +122,11 @@ Reads the sibling `axelar-contract-deployments/axelar-chains-config/info/<networ
 and prints a compact table of ITS owner/operator addresses. EVM rows query
 `owner()` and verify configured candidates with `isOperator(address)`; Sui,
 Solana, and Stellar are included where their config/RPC data exposes the same
-fields. The Governance column marks chains where governance is not deployed,
-where a governance contract is deployed, and where the ITS owner is that
-governance contract. Address cells use terminal hyperlinks when the chain config
-has an explorer URL. Use `--json` for full uncompressed addresses, explorer URLs,
-query sources, and governance contract details.
+fields. The Owner Type column makes the ITS owner explicit as `gov: <contract>`,
+`EOA`, `contract`, `account`, or `missing`; the summary still counts governance
+deployments and owner matches. Address cells use terminal hyperlinks when the
+chain config has an explorer URL. Use `--json` for full uncompressed addresses,
+explorer URLs, owner type, query sources, and governance contract details.
 
 ## Deploy
 

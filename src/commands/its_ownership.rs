@@ -22,9 +22,9 @@ const ITS_CONTRACT: &str = "InterchainTokenService";
 const QUERY_CONCURRENCY: usize = 8;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 const GOVERNANCE_CONTRACTS: [(&str, &str); 3] = [
-    ("AxelarServiceGovernance", "service gov"),
-    ("InterchainGovernance", "interchain gov"),
-    ("AxelarGovernance", "governance"),
+    ("AxelarServiceGovernance", "AxelarServiceGov"),
+    ("InterchainGovernance", "InterchainGov"),
+    ("AxelarGovernance", "AxelarGov"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,20 +78,56 @@ enum GovernanceStatus {
     NotDeployed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnerKind {
+    Governance(String),
+    Eoa,
+    Contract,
+    Account,
+    Unknown,
+    Missing,
+}
+
+impl OwnerKind {
+    fn label(&self) -> String {
+        match self {
+            Self::Governance(label) => format!("gov: {label}"),
+            Self::Eoa => "EOA".to_string(),
+            Self::Contract => "contract".to_string(),
+            Self::Account => "account".to_string(),
+            Self::Unknown => "unknown".to_string(),
+            Self::Missing => "missing".to_string(),
+        }
+    }
+
+    const fn json_label(&self) -> &'static str {
+        match self {
+            Self::Governance(_) => "governance_contract",
+            Self::Eoa => "eoa",
+            Self::Contract => "contract",
+            Self::Account => "account",
+            Self::Unknown => "unknown",
+            Self::Missing => "missing",
+        }
+    }
+
+    const fn color(&self) -> Color {
+        match self {
+            Self::Governance(_) => Color::Green,
+            Self::Eoa => Color::Yellow,
+            Self::Contract | Self::Account => Color::Cyan,
+            Self::Unknown => Color::DarkGrey,
+            Self::Missing => Color::Red,
+        }
+    }
+}
+
 impl GovernanceStatus {
     fn label(&self) -> String {
         match self {
             Self::Owner(label) => format!("owner: {label}"),
             Self::Deployed(label) => format!("deployed: {label}"),
             Self::NotDeployed => "not deployed".to_string(),
-        }
-    }
-
-    const fn color(&self) -> Color {
-        match self {
-            Self::Owner(_) => Color::Green,
-            Self::Deployed(_) => Color::Cyan,
-            Self::NotDeployed => Color::DarkGrey,
         }
     }
 
@@ -135,6 +171,12 @@ enum AddressRole {
     Owner,
     Operator,
     Governance,
+}
+
+#[derive(Clone, Debug)]
+struct AddressLink {
+    label: String,
+    url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -195,6 +237,7 @@ type FieldResult = std::result::Result<String, String>;
 struct OwnershipProbe {
     owner: FieldResult,
     operator: FieldResult,
+    owner_has_code: Option<std::result::Result<bool, String>>,
 }
 
 impl OwnershipProbe {
@@ -202,6 +245,7 @@ impl OwnershipProbe {
         Self {
             owner: Err(message.clone()),
             operator: Err(message),
+            owner_has_code: None,
         }
     }
 }
@@ -236,9 +280,20 @@ struct OwnershipRow {
     owner_source: FieldSource,
     operator: Option<String>,
     operator_source: FieldSource,
+    owner_kind: OwnerKind,
     governance: GovernanceStatus,
     governance_contracts: Vec<GovernanceContract>,
     version: Option<String>,
+    status: OwnershipStatus,
+    note: String,
+}
+
+struct OwnershipFields {
+    owner: Option<String>,
+    owner_source: FieldSource,
+    operator: Option<String>,
+    operator_source: FieldSource,
+    owner_has_code: Option<std::result::Result<bool, String>>,
     status: OwnershipStatus,
     note: String,
 }
@@ -373,13 +428,32 @@ async fn probe_evm(entry: &ItsEntry) -> Result<OwnershipProbe> {
     let its = InterchainTokenService::new(its_address, &provider);
     let owner_call = its.owner();
     let (owner, operator) = tokio::join!(owner_call.call(), probe_evm_operator(&its, entry));
+    let owner = owner
+        .map(|address| address.to_string())
+        .map_err(|err| err.to_string());
+    let owner_for_code = owner.as_deref().ok().or(entry.config_owner.as_deref());
+    let owner_has_code = match owner_for_code {
+        Some(owner) => Some(query_evm_owner_has_code(&provider, owner).await),
+        None => None,
+    };
 
     Ok(OwnershipProbe {
-        owner: owner
-            .map(|address| address.to_string())
-            .map_err(|err| err.to_string()),
+        owner,
         operator,
+        owner_has_code,
     })
+}
+
+async fn query_evm_owner_has_code<P>(provider: &P, owner: &str) -> std::result::Result<bool, String>
+where
+    P: alloy::providers::Provider,
+{
+    let address = Address::from_str(owner).map_err(|err| err.to_string())?;
+    provider
+        .get_code_at(address)
+        .await
+        .map(|code| !code.is_empty())
+        .map_err(|err| err.to_string())
 }
 
 async fn probe_evm_operator<P>(
@@ -440,12 +514,15 @@ fn solana_config_row(entry: ItsEntry) -> OwnershipRow {
     let operator_source = source_for_value(operator.as_ref(), FieldSource::Config);
     OwnershipRow::from_entry(
         entry,
-        owner,
-        owner_source,
-        operator,
-        operator_source,
-        status,
-        note,
+        OwnershipFields {
+            owner,
+            owner_source,
+            operator,
+            operator_source,
+            owner_has_code: None,
+            status,
+            note,
+        },
     )
 }
 
@@ -481,7 +558,11 @@ async fn probe_sui(entry: &ItsEntry) -> Result<OwnershipProbe> {
         query_sui_object_owner(&client, operator_cap)
     );
 
-    Ok(OwnershipProbe { owner, operator })
+    Ok(OwnershipProbe {
+        owner,
+        operator,
+        owner_has_code: None,
+    })
 }
 
 async fn query_sui_object_owner(client: &SuiClient, object_id: &str) -> FieldResult {
@@ -531,7 +612,11 @@ async fn probe_stellar(entry: &ItsEntry) -> Result<OwnershipProbe> {
         query_stellar_address_view(&client, &source, &entry.address, "operator")
     );
 
-    Ok(OwnershipProbe { owner, operator })
+    Ok(OwnershipProbe {
+        owner,
+        operator,
+        owner_has_code: None,
+    })
 }
 
 async fn query_stellar_address_view(
@@ -602,6 +687,7 @@ fn row_from_probe(
     let owner = owner_on_chain.or(owner_fallback);
     let operator = operator_on_chain.or(operator_fallback);
     let status = ownership_status(owner_from_chain, operator_from_chain, &owner, &operator);
+    let owner_has_code = probe.owner_has_code;
     let note = ownership_note(
         status,
         fallback_note,
@@ -611,12 +697,15 @@ fn row_from_probe(
 
     OwnershipRow::from_entry(
         entry,
-        owner,
-        owner_source,
-        operator,
-        operator_source,
-        status,
-        note,
+        OwnershipFields {
+            owner,
+            owner_source,
+            operator,
+            operator_source,
+            owner_has_code,
+            status,
+            note,
+        },
     )
 }
 
@@ -688,16 +777,14 @@ fn probe_error_note(owner_error: Option<&str>, operator_error: Option<&str>) -> 
 }
 
 impl OwnershipRow {
-    fn from_entry(
-        entry: ItsEntry,
-        owner: Option<String>,
-        owner_source: FieldSource,
-        operator: Option<String>,
-        operator_source: FieldSource,
-        status: OwnershipStatus,
-        note: String,
-    ) -> Self {
-        let governance = governance_status(owner.as_deref(), &entry.governance_contracts);
+    fn from_entry(entry: ItsEntry, fields: OwnershipFields) -> Self {
+        let governance = governance_status(fields.owner.as_deref(), &entry.governance_contracts);
+        let owner_kind = owner_kind(
+            fields.owner.as_deref(),
+            entry.kind,
+            &governance,
+            fields.owner_has_code.as_ref(),
+        );
 
         Self {
             chain_key: entry.chain_key,
@@ -705,15 +792,16 @@ impl OwnershipRow {
             kind: entry.kind,
             its_address: entry.address,
             explorer_url: entry.explorer_url,
-            owner,
-            owner_source,
-            operator,
-            operator_source,
+            owner: fields.owner,
+            owner_source: fields.owner_source,
+            operator: fields.operator,
+            operator_source: fields.operator_source,
+            owner_kind,
             governance,
             governance_contracts: entry.governance_contracts,
             version: entry.version,
-            status,
-            note,
+            status: fields.status,
+            note: fields.note,
         }
     }
 }
@@ -723,24 +811,23 @@ fn render_table(rows: &[OwnershipRow]) {
     table.load_preset(comfy_table::presets::UTF8_FULL);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     let hyperlinks = terminal_hyperlinks_enabled();
+    let mut links = Vec::new();
     table.set_header(vec![
         header_cell("#"),
-        header_cell("Chain"),
         header_cell("Axelar ID"),
         header_cell("Type"),
         header_cell("ITS"),
         header_cell("Owner"),
-        header_cell("Governance"),
+        header_cell("Owner Type"),
         header_cell("Operator"),
         header_cell("Version"),
         header_cell("Note"),
     ]);
 
     for (index, row) in rows.iter().enumerate() {
-        let governance_label = row.governance.label();
+        let owner_type = owner_type_cell(row);
         table.add_row(vec![
             Cell::new(index + 1).fg(Color::DarkGrey),
-            Cell::new(row.chain_key.as_str()).add_attribute(Attribute::Bold),
             Cell::new(row.axelar_id.as_str()).fg(Color::Cyan),
             Cell::new(row.kind.label()),
             Cell::new(address_cell(
@@ -748,19 +835,22 @@ fn render_table(rows: &[OwnershipRow]) {
                 &row.its_address,
                 AddressRole::Its,
                 hyperlinks,
+                &mut links,
             )),
             Cell::new(optional_address_cell(
                 row,
                 row.owner.as_deref(),
                 AddressRole::Owner,
                 hyperlinks,
+                &mut links,
             )),
-            Cell::new(governance_label).fg(row.governance.color()),
+            Cell::new(owner_type).fg(row.owner_kind.color()),
             Cell::new(optional_address_cell(
                 row,
                 row.operator.as_deref(),
                 AddressRole::Operator,
                 hyperlinks,
+                &mut links,
             )),
             Cell::new(row.version.as_deref().unwrap_or("-")),
             Cell::new(row.note.as_str()).fg(Color::DarkGrey),
@@ -768,7 +858,12 @@ fn render_table(rows: &[OwnershipRow]) {
     }
 
     println!();
-    println!("{table}");
+    let rendered = if hyperlinks {
+        overlay_terminal_links(&table.to_string(), &links)
+    } else {
+        table.to_string()
+    };
+    println!("{rendered}");
 }
 
 fn header_cell(label: &str) -> Cell {
@@ -831,7 +926,7 @@ fn row_json(row: &OwnershipRow) -> Value {
             "baseUrl": row.explorer_url,
         },
         "its": address_json(row, &row.its_address, FieldSource::Config, AddressRole::Its),
-        "owner": optional_field_json(row, row.owner.as_deref(), row.owner_source, AddressRole::Owner),
+        "owner": owner_field_json(row),
         "operator": optional_field_json(
             row,
             row.operator.as_deref(),
@@ -850,6 +945,18 @@ fn row_json(row: &OwnershipRow) -> Value {
         },
         "version": row.version,
         "note": row.note,
+    })
+}
+
+fn owner_field_json(row: &OwnershipRow) -> Value {
+    json!({
+        "address": row.owner,
+        "source": row.owner_source.label(),
+        "kind": row.owner_kind.json_label(),
+        "kindLabel": row.owner_kind.label(),
+        "explorerUrl": row.owner.as_deref().and_then(|owner| {
+            address_explorer_url(row.kind, row.explorer_url.as_deref(), owner, AddressRole::Owner)
+        }),
     })
 }
 
@@ -1040,6 +1147,46 @@ fn governance_status(
     }
 }
 
+fn owner_kind(
+    owner: Option<&str>,
+    kind: ItsChainKind,
+    governance: &GovernanceStatus,
+    owner_has_code: Option<&std::result::Result<bool, String>>,
+) -> OwnerKind {
+    let Some(_) = owner else {
+        return OwnerKind::Missing;
+    };
+
+    if let GovernanceStatus::Owner(label) = governance {
+        return OwnerKind::Governance(label.clone());
+    }
+
+    match kind {
+        ItsChainKind::Evm => match owner_has_code {
+            Some(Ok(false)) => OwnerKind::Eoa,
+            Some(Ok(true)) => OwnerKind::Contract,
+            Some(Err(_)) | None => OwnerKind::Unknown,
+        },
+        ItsChainKind::Solana | ItsChainKind::Sui | ItsChainKind::Stellar => OwnerKind::Account,
+    }
+}
+
+fn owner_type_cell(row: &OwnershipRow) -> String {
+    let label = row.owner_kind.label();
+    if matches!(
+        row.owner_kind,
+        OwnerKind::Governance(_) | OwnerKind::Missing | OwnerKind::Unknown
+    ) {
+        return label;
+    }
+
+    if row.governance.is_deployed() {
+        format!("{label}; gov deployed")
+    } else {
+        format!("{label}; no gov")
+    }
+}
+
 fn governance_labels(governance_contracts: &[GovernanceContract]) -> String {
     governance_contracts
         .iter()
@@ -1105,13 +1252,20 @@ fn optional_address_cell(
     address: Option<&str>,
     role: AddressRole,
     hyperlinks: bool,
+    links: &mut Vec<AddressLink>,
 ) -> String {
     address
-        .map(|address| address_cell(row, address, role, hyperlinks))
+        .map(|address| address_cell(row, address, role, hyperlinks, links))
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn address_cell(row: &OwnershipRow, address: &str, role: AddressRole, hyperlinks: bool) -> String {
+fn address_cell(
+    row: &OwnershipRow,
+    address: &str,
+    role: AddressRole,
+    hyperlinks: bool,
+    links: &mut Vec<AddressLink>,
+) -> String {
     let label = compact_address(address);
     if !hyperlinks {
         return label;
@@ -1121,7 +1275,29 @@ fn address_cell(row: &OwnershipRow, address: &str, role: AddressRole, hyperlinks
     else {
         return label;
     };
-    terminal_link(&label, &url)
+    links.push(AddressLink {
+        label: label.clone(),
+        url,
+    });
+    label
+}
+
+fn overlay_terminal_links(rendered: &str, links: &[AddressLink]) -> String {
+    let mut output = String::with_capacity(rendered.len());
+    let mut cursor = 0;
+
+    for link in links {
+        let Some(relative_position) = rendered[cursor..].find(&link.label) else {
+            continue;
+        };
+        let position = cursor + relative_position;
+        output.push_str(&rendered[cursor..position]);
+        output.push_str(&terminal_link(&link.label, &link.url));
+        cursor = position + link.label.len();
+    }
+
+    output.push_str(&rendered[cursor..]);
+    output
 }
 
 fn terminal_link(label: &str, url: &str) -> String {
@@ -1261,6 +1437,59 @@ mod tests {
         assert_eq!(
             terminal_link("0x1234...abcd", "https://example.com/address/0x1234"),
             "\x1b]8;;https://example.com/address/0x1234\x1b\\0x1234...abcd\x1b]8;;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn overlay_terminal_links_replaces_only_visible_labels() {
+        let rendered = "ITS Owner\n0x1234...abcd 0xabcd...1234";
+        let links = vec![AddressLink {
+            label: "0x1234...abcd".to_string(),
+            url: "https://example.com/address/0x1234".to_string(),
+        }];
+
+        assert_eq!(
+            overlay_terminal_links(rendered, &links),
+            "ITS Owner\n\x1b]8;;https://example.com/address/0x1234\x1b\\0x1234...abcd\x1b]8;;\x1b\\ 0xabcd...1234"
+        );
+    }
+
+    #[test]
+    fn owner_kind_prefers_matching_governance_contract() {
+        let governance = GovernanceStatus::Owner("AxelarServiceGov".to_string());
+
+        assert_eq!(
+            owner_kind(
+                Some("0xabc"),
+                ItsChainKind::Evm,
+                &governance,
+                Some(&Ok(false))
+            ),
+            OwnerKind::Governance("AxelarServiceGov".to_string())
+        );
+    }
+
+    #[test]
+    fn owner_kind_classifies_evm_code_presence() {
+        let governance = GovernanceStatus::Deployed("InterchainGov".to_string());
+
+        assert_eq!(
+            owner_kind(
+                Some("0xabc"),
+                ItsChainKind::Evm,
+                &governance,
+                Some(&Ok(false))
+            ),
+            OwnerKind::Eoa
+        );
+        assert_eq!(
+            owner_kind(
+                Some("0xabc"),
+                ItsChainKind::Evm,
+                &governance,
+                Some(&Ok(true))
+            ),
+            OwnerKind::Contract
         );
     }
 
