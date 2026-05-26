@@ -105,7 +105,25 @@ workspace/
 | `axe decode sol-activity`| Recent Solana program activity            | -       |
 | `axe decode evm-activity`| Recent EVM contract events               | -       |
 | `axe verifiers`      | List active verifiers for a chain             | -       |
+| `axe its-ownership`  | Show ITS owner/operator table for a network   | -       |
 | `axe verifier-votes` | Show recent votes cast by a single verifier   | -       |
+
+## ITS Ownership
+
+```bash
+axe its-ownership devnet-amplifier
+axe its-ownership stagenet
+axe its-ownership testnet
+axe its-ownership mainnet
+```
+
+Reads the sibling `axelar-contract-deployments/axelar-chains-config/info/<network>.json`
+and prints a compact table of ITS owner/operator addresses. EVM rows query
+`owner()` and verify configured candidates with `isOperator(address)`; Sui,
+Solana, and Stellar are included where their config/RPC data exposes the same
+fields. The Governance column marks chains where governance is not deployed,
+where a governance contract is deployed, and where the ITS owner is that
+governance contract.
 
 ## Deploy
 

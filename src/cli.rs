@@ -43,6 +43,12 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Show ITS owner/operator addresses across a network
+    ItsOwnership {
+        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        network: String,
+    },
+
     /// Show network info (e.g. block height + timestamp)
     Info {
         #[command(subcommand)]
