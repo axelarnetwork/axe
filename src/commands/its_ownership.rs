@@ -819,6 +819,7 @@ fn render_table(rows: &[OwnershipRow]) {
         header_cell("ITS"),
         header_cell("Owner"),
         header_cell("Owner Type"),
+        header_cell("Gov"),
         header_cell("Operator"),
         header_cell("Version"),
         header_cell("Note"),
@@ -845,6 +846,7 @@ fn render_table(rows: &[OwnershipRow]) {
                 &mut links,
             )),
             Cell::new(owner_type).fg(row.owner_kind.color()),
+            Cell::new(governance_address_cell(row, hyperlinks, &mut links)),
             Cell::new(optional_address_cell(
                 row,
                 row.operator.as_deref(),
@@ -1185,6 +1187,30 @@ fn owner_type_cell(row: &OwnershipRow) -> String {
     } else {
         format!("{label}; no gov")
     }
+}
+
+fn governance_address_cell(
+    row: &OwnershipRow,
+    hyperlinks: bool,
+    links: &mut Vec<AddressLink>,
+) -> String {
+    if row.governance_contracts.is_empty() {
+        return "-".to_string();
+    }
+
+    row.governance_contracts
+        .iter()
+        .map(|contract| {
+            address_cell(
+                row,
+                &contract.address,
+                AddressRole::Governance,
+                hyperlinks,
+                links,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn governance_labels(governance_contracts: &[GovernanceContract]) -> String {
