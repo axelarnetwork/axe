@@ -83,6 +83,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &evm_rpc_url,
         sizing.num_keys,
         hub_gas_extra_per_key(&args, &sizing, gas_value_wei),
+        &args.source_axelar_id,
     )
     .await?;
 
@@ -222,7 +223,32 @@ async fn resolve_or_deploy_token(
 
     let its_service = InterchainTokenService::new(its.its_proxy_addr, &write_provider);
 
-    let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
+    // Resolution order: --token-id (CLI override) → chains-config
+    // `contracts.AXE.tokenId` (per-source pre-registration, lets CI skip the
+    // deploy + hub-routed remote-deploy and collapse to a single
+    // interchainTransfer) → local file cache (per src+dst) → fresh deploy.
+    //
+    // Hedera special-cases: auto-deploy reverts with
+    // `InitialSupplyUnsupported` (and the broader path is currently broken
+    // upstream — see TODOs in the workflow + script). For Hedera-source we
+    // require an explicit pre-registered token; the error message points at
+    // the deployments-repo Hedera setup.
+    let (token_id, token_addr, deploy_message_id) = if args.source_axelar_id == "hedera" {
+        // Hedera ITS uses `registeredTokenAddress` (HTS tokens lack
+        // deterministic addresses, so `interchainTokenAddress` was removed
+        // in the fork — see contracts/hedera/README.md in commonprefix's
+        // interchain-token-service@hedera-its).
+        let token_id =
+            super::helpers::resolve_hedera_axe_token(&args.config, src, args.token_id.as_deref())?;
+        let addr = its_service
+            .registeredTokenAddress(token_id)
+            .call()
+            .await
+            .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
+        ui::kv("token ID (Hedera, pre-registered)", &format!("{token_id}"));
+        ui::address("token address", &format!("{addr}"));
+        (token_id, addr, None)
+    } else if let Some(ref tid) = args.token_id {
         // User provided a token ID
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
@@ -233,6 +259,15 @@ async fn resolve_or_deploy_token(
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
         (token_id, addr, None)
+    } else if let Some(tid) = super::helpers::read_pre_registered_axe_token(&args.config, src)? {
+        let addr = its_service
+            .interchainTokenAddress(tid)
+            .call()
+            .await
+            .map_err(|e| eyre!("failed to look up token address for {tid}: {e}"))?;
+        ui::kv("token ID (chains-config)", &format!("{tid}"));
+        ui::address("token address", &format!("{addr}"));
+        (tid, addr, None)
     } else {
         // Check cache
         let cache = read_its_cache(src, dest);

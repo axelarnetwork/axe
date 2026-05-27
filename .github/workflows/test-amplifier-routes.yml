@@ -1,15 +1,15 @@
 name: Test Amplifier Routes
 
-# Fans out a single-tx load test across every wired axe route for the chosen
-# network + protocol, in parallel matrix jobs. Final summary lists each route
-# with ✓ / ✗ so you can spot a fleet-wide regression without dispatching the
-# single-test workflow ten times.
+# Fans out a single-tx route smoke test across the wired axe routes for the
+# chosen network + protocol, in parallel matrix jobs. Final summary lists each
+# route with ✓ / ✗ so you can spot a fleet-wide regression without dispatching
+# the single-test workflow ten times.
 #
-# Route fleet is curated per (network, protocol) and mirrors the dispatcher in
-# src/commands/load_test/mod.rs:218. EVM-side chain is fixed to one canonical
-# representative per environment (Avalanche on testnet) to avoid evm→evm
-# permutations; XRPL is paired exclusively with XRPL EVM because that's the
-# only EVM destination XRPL ITS routes to in this fleet.
+# Fleet shape is the minimum that exercises every chain at least once as a
+# source and at least once as a destination, preferring bidirectional pairs.
+# Mirrors scripts/test_amplifier_routes.sh, the canonical fleet for local
+# invocation. Routes must satisfy the dispatcher matrix in
+# src/commands/load_test/mod.rs:218.
 
 on:
   workflow_dispatch:
@@ -52,37 +52,42 @@ jobs:
           # Keep this in sync with scripts/test_amplifier_routes.sh — that
           # script is the canonical fleet for local invocation; this workflow
           # mirrors it for CI runs.
+          # Fleet shape: strict 1×source + 1×destination per chain. Bidirectional
+          # pairs where every chain can pair; a 3-cycle absorbs the "odd one out"
+          # without doubling any chain.
+          #
+          # ITS exception: Sui is omitted entirely. Sui-source ITS in axe needs
+          # a pre-registered AXE token (no Move publish from Rust — see
+          # src/commands/load_test/mod.rs:323-326) and Sui-as-ITS-destination is
+          # unwired in the dispatcher.
+          #
+          # TODO(hedera): re-add the Hedera↔Solana ITS pair below once the
+          # Hedera ITS factory's `deployInterchainToken` path is fixed upstream
+          # on testnet. Currently every deploy reverts with
+          # `TokenManagerDeploymentFailed(empty)` (see commit history of this
+          # file for the failed-tx evidence). axe already has the wiring —
+          # `chains.hedera.contracts.AXE.tokenId` lookup + no-derivation on
+          # Hedera source + registeredTokenAddress for the Hedera fork —
+          # so flipping these back on is a one-line revert once upstream lands.
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
             {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
-            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
-            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"},
-            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm ITS"},
-            {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar","notes":"evm->stellar ITS, hedera source"},
-            {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera","notes":"stellar->evm ITS, hedera destination"},
-            {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana","notes":"evm->sol ITS, hedera source"},
-            {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera","notes":"sol->evm ITS, hedera destination"},
-            {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera","notes":"sui->evm ITS, hedera destination"},
-            {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid","notes":"evm->evm ITS (NEW), needs peer trust(\"hedera\") on Hyperliquid"},
-            {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera","notes":"evm->evm ITS (NEW), Hyperliquid needs trust(\"hedera\") as outbound"}
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"}
           ]}'
+          # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
+          # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
+          # and sui→sol GMP both implemented). Adds Solana↔Sui edge coverage.
+          #
+          # TODO(hedera): once the Hedera ITS deploy blocker is resolved
+          # upstream, slot Hedera back in (it works fine as GMP destination
+          # today). A 5-cycle Stellar→Sol→Sui→HL→Hedera→Stellar keeps strict
+          # 1/1 and covers an extra chain.
           MATRIX_TESTNET_GMP='{"include":[
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm GMP"},
-            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol GMP"},
-            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm GMP"},
-            {"name":"Hyperliquid -> Sui","src":"Hyperliquid","dst":"Sui","notes":"evm->sui GMP"},
+            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
             {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
-            {"name":"Hedera -> Hyperliquid","src":"Hedera","dst":"Hyperliquid","notes":"evm->evm GMP, hedera source"},
-            {"name":"Hyperliquid -> Hedera","src":"Hyperliquid","dst":"Hedera","notes":"evm->evm GMP, hedera destination"},
-            {"name":"Hedera -> Stellar","src":"Hedera","dst":"Stellar","notes":"evm->stellar GMP, hedera source"},
-            {"name":"Stellar -> Hedera","src":"Stellar","dst":"Hedera","notes":"stellar->evm GMP, hedera destination"},
-            {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana","notes":"evm->sol GMP, hedera source"},
-            {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera","notes":"sol->evm GMP, hedera destination"},
-            {"name":"Hedera -> Sui","src":"Hedera","dst":"Sui","notes":"evm->sui GMP, hedera source"},
-            {"name":"Sui -> Hedera","src":"Sui","dst":"Hedera","notes":"sui->evm GMP, hedera destination"}
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
           ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;
@@ -94,7 +99,7 @@ jobs:
           esac
           echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
 
-  loadtest:
+  test-route:
     needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -185,7 +190,7 @@ jobs:
           path: route-results/${{ strategy.job-index }}.txt
 
   summary:
-    needs: [setup, loadtest]
+    needs: [setup, test-route]
     if: always()
     runs-on: ubuntu-latest
     steps:

@@ -148,6 +148,11 @@ sol! {
         function owner() external view returns (address);
         function isOperator(address account) external view returns (bool);
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
+        /// Hedera-fork variant — `interchainTokenAddress` was removed because
+        /// HTS tokens don't have deterministic addresses. The Hedera ITS exposes
+        /// `registeredTokenAddress` instead; same semantics for our purposes
+        /// (returns the deployed token's address for a given token id).
+        function registeredTokenAddress(bytes32 tokenId) external view returns (address);
         /// Address of the deployed `TokenManager` for the given token id. The
         /// token manager — not the ITS proxy — is the spender that pulls
         /// tokens via `safeTransferFrom(from, address(this), amount)` for
