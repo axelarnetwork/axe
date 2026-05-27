@@ -123,7 +123,7 @@ and prints a compact table of ITS owner/operator addresses. EVM rows query
 `owner()` and verify configured candidates with `isOperator(address)`; Sui,
 Solana, and Stellar are included where their config/RPC data exposes the same
 fields. The Owner Type column makes the ITS owner explicit as `gov: <contract>`,
-`EOA`, `contract`, `account`, or `missing`; the Gov column shows deployed
+`EOA`, `contract`, `account`, or `-`; the Gov column shows deployed
 governance contract addresses. The summary still counts governance deployments
 and owner matches. Address cells use terminal hyperlinks when the chain config
 has an explorer URL. Use `--json` for full uncompressed addresses, explorer

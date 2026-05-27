@@ -1174,10 +1174,14 @@ fn owner_kind(
 }
 
 fn owner_type_cell(row: &OwnershipRow) -> String {
+    if row.owner_kind == OwnerKind::Missing {
+        return "-".to_string();
+    }
+
     let label = row.owner_kind.label();
     if matches!(
         row.owner_kind,
-        OwnerKind::Governance(_) | OwnerKind::Missing | OwnerKind::Unknown
+        OwnerKind::Governance(_) | OwnerKind::Unknown
     ) {
         return label;
     }
