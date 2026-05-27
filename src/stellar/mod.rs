@@ -24,5 +24,8 @@ mod tx;
 mod wallet;
 
 pub use rpc::StellarClient;
-pub use scval::{parse_contract_id, scval_address_account, scval_bytes, scval_string, scval_token};
+pub use scval::{
+    parse_contract_id, scval_address_account, scval_bytes, scval_string, scval_to_address_string,
+    scval_token,
+};
 pub use wallet::StellarWallet;

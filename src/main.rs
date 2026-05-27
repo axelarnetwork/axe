@@ -84,6 +84,9 @@ async fn main() -> Result<()> {
             chain,
             json,
         } => commands::verifiers::run(network, chain, json).await,
+        cli::Commands::ItsOwnership { network, json } => {
+            commands::its_ownership::run(network, json).await
+        }
         cli::Commands::VerifierVotes {
             network,
             chain,

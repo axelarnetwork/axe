@@ -145,6 +145,8 @@ sol! {
 
     #[sol(rpc)]
     contract InterchainTokenService {
+        function owner() external view returns (address);
+        function isOperator(address account) external view returns (bool);
         function interchainTokenAddress(bytes32 tokenId) external view returns (address);
         /// Address of the deployed `TokenManager` for the given token id. The
         /// token manager — not the ITS proxy — is the spender that pulls
