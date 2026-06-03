@@ -9,6 +9,7 @@ pub mod info_block;
 pub mod init;
 pub mod its_ownership;
 pub mod load_test;
+pub mod propose;
 pub mod reset;
 pub mod status;
 pub mod test_gmp;

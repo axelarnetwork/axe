@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use eyre::Result;
 
 use crate::commands::load_test::{Protocol, TestType};
+use crate::commands::propose::ProposeArgs;
 
 #[derive(Parser)]
 #[command(name = "axe")]
@@ -73,6 +74,9 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Submit an AxelarServiceGovernance proposal to an edge chain's ASG
+    Propose(ProposeArgs),
 }
 
 #[derive(Subcommand)]

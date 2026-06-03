@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
             limit,
             json,
         } => commands::verifier_votes::run(network, chain, verifier, limit, json).await,
+        cli::Commands::Propose(args) => commands::propose::run(args).await,
         cli::Commands::Test { subcommand } => match subcommand {
             cli::TestCommands::Gmp {
                 axelar_id,
