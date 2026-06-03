@@ -306,13 +306,12 @@ async fn resolve_or_deploy_token(
             .get("tokenId")
             .and_then(|v| v.as_str())
             .and_then(|tid| tid.parse::<FixedBytes<32>>().ok())
-            .and_then(|tid| {
+            .zip(
                 cache
                     .get("tokenAddress")
                     .and_then(|v| v.as_str())
-                    .and_then(|a| a.parse::<Address>().ok())
-                    .map(|addr| (tid, addr))
-            });
+                    .and_then(|a| a.parse::<Address>().ok()),
+            );
 
         if let Some((tid, addr)) = cached {
             let token = ERC20::new(addr, &write_provider);
