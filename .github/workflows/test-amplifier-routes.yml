@@ -132,8 +132,102 @@ jobs:
           esac
           echo "matrix=$(echo "$MATRIX" | jq -c .)" >> "$GITHUB_OUTPUT"
 
+  # Wallet-balance pre-flight. Fails the whole workflow before the matrix
+  # fans out if any wallet on a chain in the fleet is below its per-chain
+  # threshold (mirrored from the removed `axelar-contract-deployments/
+  # scripts/check-wallet-balances.js`). Stops us burning ~10 min of matrix
+  # time only to hit a confusing on-chain "tx failed" mid-test.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # check-balances reaches the EVM RPCs via the chains-config's `rpc`
+      # field by default; per-chain secret overrides apply the same way they
+      # do for `test-route` (same naming convention).
+      HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
+      HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
+      SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
+      SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
+      STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
+      STELLAR_TESTNET_RPC:         ${{ secrets.STELLAR_TESTNET_RPC }}
+      SUI_MAINNET_RPC:             ${{ secrets.SUI_MAINNET_RPC }}
+      SUI_TESTNET_RPC:             ${{ secrets.SUI_TESTNET_RPC }}
+      XRPL_MAINNET_RPC:            ${{ secrets.XRPL_MAINNET_RPC }}
+      XRPL_TESTNET_RPC:            ${{ secrets.XRPL_TESTNET_RPC }}
+      XRPL_EVM_MAINNET_RPC:        ${{ secrets.XRPL_EVM_MAINNET_RPC }}
+      XRPL_EVM_TESTNET_RPC:        ${{ secrets.XRPL_EVM_TESTNET_RPC }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match `run-loadtest`'s build-or-download strategy so the preflight
+      # uses the same binary as the matrix and a code change automatically
+      # invalidates a stale prebuilt artifact.
+      - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
+        id: download_axe
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build-axe.yml
+          name: axe-${{ inputs.network }}-${{ github.sha }}
+          commit: ${{ github.sha }}
+          path: target/release
+          if_no_artifact_found: warn
+
+      - name: Mark pre-built axe executable
+        if: steps.download_axe.outputs.found_artifact == 'true'
+        shell: bash
+        run: chmod +x target/release/axe
+
+      - name: Set up Rust toolchain (fallback)
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache (fallback)
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.network }}
+
+      - name: Build axe (fallback, ${{ inputs.network }})
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        shell: bash
+        run: cargo build --release --locked --no-default-features --features "${{ inputs.network }}"
+
+      # check-balances reads chains-config from `../axelar-contract-deployments`
+      # relative to CWD — same convention as `axe its-ownership`, `axe info`,
+      # etc. Clone as a sibling of the axe workspace to satisfy that.
+      - name: Clone axelar-contract-deployments (sibling)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            https://github.com/axelarnetwork/axelar-contract-deployments.git \
+            "$GITHUB_WORKSPACE/../axelar-contract-deployments"
+
+      - name: Check wallet balances
+        shell: bash
+        env:
+          EVM_PRIVATE_KEY:     ${{ secrets.EVM_PRIVATE_KEY }}
+          SOLANA_PRIVATE_KEY:  ${{ secrets.SOLANA_PRIVATE_KEY }}
+          SUI_PRIVATE_KEY:     ${{ secrets.SUI_PRIVATE_KEY }}
+          XRPL_PRIVATE_KEY:    ${{ secrets.XRPL_PRIVATE_KEY }}
+          STELLAR_PRIVATE_KEY: ${{ secrets.STELLAR_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          # Same SOLANA_PRIVATE_KEY → file conversion as `run-loadtest`:
+          # the secret is stored as `[1,2,...]` JSON, axe reads it as a file path.
+          if [ -n "${SOLANA_PRIVATE_KEY:-}" ] && [[ "$SOLANA_PRIVATE_KEY" == \[* ]]; then
+              KEY_FILE="$RUNNER_TEMP/solana_keypair.json"
+              printf '%s' "$SOLANA_PRIVATE_KEY" > "$KEY_FILE"
+              chmod 600 "$KEY_FILE"
+              export SOLANA_PRIVATE_KEY="$KEY_FILE"
+          fi
+          ./target/release/axe check-balances "${{ inputs.network }}"
+
   test-route:
-    needs: setup
+    # Wait for BOTH the matrix builder and the wallet preflight. If any
+    # wallet is underfunded the matrix never runs (and we don't waste
+    # ~10 min of CI on routes that would all fail mid-tx).
+    needs: [setup, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -223,7 +317,7 @@ jobs:
           path: route-results/${{ strategy.job-index }}.txt
 
   summary:
-    needs: [setup, test-route]
+    needs: [setup, preflight, test-route]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -265,8 +359,11 @@ jobs:
           done
 
           if [ "$TOTAL" -eq 0 ]; then
-            echo "::error::No route results recorded (setup job likely failed)." >&2
-            echo "_No route results recorded; setup job likely failed._" >> "$GITHUB_STEP_SUMMARY"
+            # No matrix output: either `setup` couldn't build the matrix, or
+            # `preflight` failed (underfunded wallet / unreachable RPC) and
+            # test-route was skipped. The earlier job's log has the detail.
+            echo "::error::No route results recorded — check the setup / preflight job logs." >&2
+            echo "_No route results recorded; check the setup / preflight job logs._" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
