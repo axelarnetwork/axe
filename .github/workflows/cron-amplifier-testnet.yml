@@ -1,6 +1,6 @@
-name: Cron — Mainnet Amplifier Routes (twice daily)
+name: Cron — Testnet Amplifier Routes (twice daily)
 
-# Twice-daily mainnet smoke test of the wired ITS and GMP route fleets.
+# Twice-daily testnet smoke test of the wired ITS and GMP route fleets.
 # Two independent reusable-workflow calls into `test-amplifier-routes.yml`
 # (one per protocol) so a regression in one protocol still surfaces results
 # for the other. Each child run produces its own ✓ / ✗ step-summary table and
@@ -17,24 +17,24 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  mainnet-its:
+  testnet-its:
     uses: ./.github/workflows/test-amplifier-routes.yml
     with:
-      network: mainnet
+      network: testnet
       protocol: its
     # `inherit` is required so the child workflow can read the per-chain RPC
     # overrides and the EVM/Solana/Sui/XRPL/Stellar private keys it needs.
     secrets: inherit
 
-  mainnet-gmp:
+  testnet-gmp:
     # Serialised after ITS so the two protocols don't race on the same
     # source-chain wallets. HL and Stellar both appear as source in BOTH
     # fleets, and a parallel run would collide on the EVM nonce / Stellar
     # sequence number → "replacement transaction underpriced" / on-chain
-    # payment failures. `needs:` waits for `mainnet-its` to finish first.
-    needs: mainnet-its
+    # payment failures. `needs:` waits for `testnet-its` to finish first.
+    needs: testnet-its
     uses: ./.github/workflows/test-amplifier-routes.yml
     with:
-      network: mainnet
+      network: testnet
       protocol: gmp
     secrets: inherit
