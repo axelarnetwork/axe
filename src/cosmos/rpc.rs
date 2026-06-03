@@ -218,6 +218,15 @@ pub(super) async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> 
 
 /// Preflight: ensure the Axelar relayer wallet exists on-chain and holds enough fee-denom to relay.
 /// Errors with a clear "fund this address" message if the account is missing or balance is below `min_amount`.
+/// Macro denom for display: a micro-denom (`uaxl`, 1e6 base) is shown as its
+/// whole unit (`AXL`); a denom without the `u` prefix is returned verbatim.
+fn display_denom(fee_denom: &str) -> String {
+    fee_denom
+        .strip_prefix('u')
+        .map(str::to_uppercase)
+        .unwrap_or_else(|| fee_denom.to_string())
+}
+
 pub async fn check_axelar_balance(
     lcd: &str,
     chain_id: &str,
@@ -238,26 +247,30 @@ pub async fn check_axelar_balance(
         0
     };
 
+    // Both figures are scaled from micro-units (uaxl) to whole units for
+    // display, so label them with the macro denom (uaxl -> AXL) rather than the
+    // raw `fee_denom`. The comparison itself stays in raw micro-units.
     let display = balance as f64 / 1_000_000.0;
     let min_display = min_amount as f64 / 1_000_000.0;
+    let unit = display_denom(fee_denom);
 
     if !account_exists || balance < min_amount {
         ui::error(&format!("axelar relayer wallet underfunded on {chain_id}:"));
         ui::error(&format!("  address: {address}"));
         ui::error(&format!(
-            "  balance: {display:.6} {fee_denom} (need >= {min_display:.6})"
+            "  balance: {display:.6} {unit} (need >= {min_display:.6})"
         ));
         if !account_exists {
             ui::error("  account does not exist on-chain — send any amount to create it");
         }
         return Err(eyre::eyre!(
-            "fund {address} with at least {min_display:.6} {fee_denom} on {chain_id} and retry"
+            "fund {address} with at least {min_display:.6} {unit} on {chain_id} and retry"
         ));
     }
 
     ui::kv(
         "relayer balance",
-        &format!("{display:.6} {fee_denom} (>= {min_display:.6})"),
+        &format!("{display:.6} {unit} (>= {min_display:.6})"),
     );
     Ok(())
 }
