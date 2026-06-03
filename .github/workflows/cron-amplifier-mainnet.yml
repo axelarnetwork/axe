@@ -1,14 +1,17 @@
 name: Cron — Mainnet Amplifier Routes (twice daily)
 
-# Twice-daily mainnet smoke test of the wired ITS and GMP route fleets.
-# Two independent reusable-workflow calls into `test-amplifier-routes.yml`
-# (one per protocol) so a regression in one protocol still surfaces results
-# for the other. Each child run produces its own ✓ / ✗ step-summary table and
-# fails red on any failed route; the parent cron run aggregates those signals
-# in the standard GitHub Actions UI (no extra Slack/email wiring — matches the
-# notification model used elsewhere in the axelar org).
+# Twice-daily mainnet smoke test of the wired ITS route fleet.
+# Calls `test-amplifier-routes.yml` as a reusable workflow. The child run
+# produces a ✓ / ✗ step-summary table and fails red on any failed route;
+# the parent cron run shows the same red status in the Actions tab (no extra
+# Slack/email wiring — matches the notification model used elsewhere in the
+# axelar org).
 #
 # Cron expressions are UTC. 00:00 + 12:00 UTC = midnight + midday daily.
+#
+# GMP is deliberately NOT included here — the `test-amplifier-routes.yml`
+# workflow still supports `workflow_dispatch` with `protocol: gmp` for
+# manual / ad-hoc runs, but it isn't fired on schedule.
 
 on:
   schedule:
@@ -24,17 +27,4 @@ jobs:
       protocol: its
     # `inherit` is required so the child workflow can read the per-chain RPC
     # overrides and the EVM/Solana/Sui/XRPL/Stellar private keys it needs.
-    secrets: inherit
-
-  mainnet-gmp:
-    # Serialised after ITS so the two protocols don't race on the same
-    # source-chain wallets. HL and Stellar both appear as source in BOTH
-    # fleets, and a parallel run would collide on the EVM nonce / Stellar
-    # sequence number → "replacement transaction underpriced" / on-chain
-    # payment failures. `needs:` waits for `mainnet-its` to finish first.
-    needs: mainnet-its
-    uses: ./.github/workflows/test-amplifier-routes.yml
-    with:
-      network: mainnet
-      protocol: gmp
     secrets: inherit
