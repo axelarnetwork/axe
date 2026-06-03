@@ -325,6 +325,17 @@ pub fn send_its_interchain_transfer(
 
     let (compute_units, slot) = fetch_tx_details(&rpc_client, &signature).unwrap_or((None, None));
 
+    // The ITS program builds the cross-chain payload inside the CPI to the
+    // gateway, so we don't know it client-side. Pull it from the gateway's
+    // `CallContractEvent` in the confirmed tx so the verify pipeline (which
+    // needs payload_hash to match the source-side ITS message against the
+    // Amplifier vote) has what it needs. If the event isn't found (extremely
+    // rare — would indicate the tx didn't actually emit a gateway call), we
+    // surface that as an error rather than silently dropping it, because the
+    // downstream verify step would fail just as confusingly.
+    let event =
+        super::gateway::extract_gateway_call_contract_payload(rpc_url, &signature.to_string())?;
+
     let metrics = TxMetrics {
         signature: signature.to_string(),
         submit_time_ms,
@@ -334,11 +345,11 @@ pub fn send_its_interchain_transfer(
         slot,
         success: true,
         error: None,
-        payload_hash: String::new(),
-        source_address: String::new(),
-        gmp_destination_chain: String::new(),
-        gmp_destination_address: String::new(),
-        payload: Vec::new(),
+        payload_hash: format!("0x{}", hex::encode(event.payload_hash)),
+        source_address: event.sender,
+        gmp_destination_chain: event.destination_chain,
+        gmp_destination_address: event.destination_address,
+        payload: event.payload,
         send_instant: None,
         amplifier_timing: None,
     };

@@ -157,9 +157,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     }
 
     // --- Cosmos hub address (for `gmp_destination_*` book-keeping) ---
-    let axelarnet_gw_addr = cfg
+    // The ITS-via-hub destination on Axelar is the ITS-hub CosmWasm contract,
+    // NOT AxelarnetGateway. The Amplifier voting verifier matches
+    // `messages_status` against the exact destination_address recorded in the
+    // source-side ContractCall, so anything else makes vote lookup miss.
+    let its_hub_addr = cfg
         .axelar
-        .global_contract_address("AxelarnetGateway")?
+        .global_contract_address("InterchainTokenService")?
         .to_string();
 
     // --- Sequential burst loop ---
@@ -205,7 +209,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
                     // book the second-leg destination as `axelar` so the
                     // verifier can pick up the hub-forwarded message id.
                     gmp_destination_chain: "axelar".to_string(),
-                    gmp_destination_address: axelarnet_gw_addr.clone(),
+                    gmp_destination_address: its_hub_addr.clone(),
                     send_instant: Some(send_start),
                     amplifier_timing: None,
                 });

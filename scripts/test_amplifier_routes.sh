@@ -189,6 +189,34 @@ EOF
 EOF
 )
         ;;
+    mainnet/its)
+        # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
+        # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
+        # canonical XRP; HL↔Stellar uses the per-chain mainnet AXE entries.
+        FLEET=$(cat <<'EOF'
+[
+  {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
+  {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
+  {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+]
+EOF
+)
+        ;;
+    mainnet/gmp)
+        # Mainnet GMP fleet — mirrors MATRIX_MAINNET_GMP in
+        # .github/workflows/test-amplifier-routes.yml. Stellar → Solana →
+        # Sui → Hyperliquid → Stellar 4-cycle (strict 1×src + 1×dst).
+        FLEET=$(cat <<'EOF'
+[
+  {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana"},
+  {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
+  {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid"},
+  {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"}
+]
+EOF
+)
+        ;;
     *)
         echo "::error::No route fleet defined for $NETWORK/$PROTOCOL yet — extend the case block in $0" >&2
         exit 1

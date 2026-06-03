@@ -17,7 +17,12 @@ use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
 /// Resets every time a tx makes progress, so large batches naturally get more time.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
+// Mainnet Amplifier voters can sit behind a queue of other messages for 5+ min
+// before they confirm a new vote, especially on cold routes (first message of
+// the day for a given source). 600s of stalled-progress patience covers what
+// we've observed on Sui-mainnet ITS without making slow-failures egregiously
+// long to surface.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(600);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

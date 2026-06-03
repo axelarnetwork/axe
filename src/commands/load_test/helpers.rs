@@ -6,7 +6,7 @@
 //! `commands::test_gmp` calls into it for the `--config` sol→evm flow.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alloy::{
     network::TransactionBuilder,
@@ -80,6 +80,25 @@ pub(crate) async fn ensure_sender_receiver_on_evm_chain(
 }
 
 /// Deploy or reuse a cached SenderReceiver contract.
+/// Read `eth_getCode` at `addr`, retrying transient `0x` (empty) responses
+/// with a short backoff. Some EVM RPCs (Hyperliquid mainnet observed) return
+/// empty code for live contracts under concurrent load; without retries that
+/// triggers a wasteful on-chain redeploy of a SenderReceiver that's still there.
+async fn get_code_with_retry<P: Provider>(provider: &P, addr: Address) -> Result<Bytes> {
+    const ATTEMPTS: u32 = 3;
+    let mut last = Bytes::new();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt))).await;
+        }
+        last = provider.get_code_at(addr).await?;
+        if !last.is_empty() {
+            return Ok(last);
+        }
+    }
+    Ok(last)
+}
+
 pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     cache: &serde_json::Value,
     cache_key: &str,
@@ -91,7 +110,7 @@ pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
 ) -> Result<Address> {
     if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
         let addr: Address = addr_str.parse()?;
-        let code = read_provider.get_code_at(addr).await?;
+        let code = get_code_with_retry(read_provider, addr).await?;
         let needs_redeploy = if code.is_empty() {
             ui::warn(&format!(
                 "cached SenderReceiver ({label}) has no code, redeploying..."
@@ -679,7 +698,7 @@ pub(crate) async fn ensure_sender_receiver(
     if let Some(addr_str) = cache.get("senderReceiverAddress").and_then(|v| v.as_str()) {
         let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
         let addr: Address = addr_str.parse()?;
-        let code = read_provider.get_code_at(addr).await?;
+        let code = get_code_with_retry(&read_provider, addr).await?;
         let needs_redeploy = if code.is_empty() {
             true
         } else {
