@@ -113,7 +113,13 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
         ChainTarget {
             chain_key: stellar_key.to_string(),
             kind: ChainKind::Stellar,
-            threshold_units: 0.5,
+            // 2.5 XLM headroom: Stellar reserves ~1 XLM for the account itself
+            // and our test routes spend up to ~0.5 XLM per run (top-ups +
+            // surge fees), so 2.5 XLM keeps a few routes of buffer above the
+            // unspendable reserve. Bumped from 0.5 XLM after a CI run hit
+            // PAYMENT_UNDERFUNDED on a wallet that was above the old floor
+            // but below `balance − reserve`.
+            threshold_units: 2.5,
         },
         ChainTarget {
             chain_key: "sui".to_string(),
@@ -440,14 +446,17 @@ mod tests {
 
     #[test]
     fn thresholds_match_removed_js_script() {
-        // Map: chain_key -> expected threshold (mirrors
-        // `axelar-contract-deployments/scripts/check-wallet-balances.js` THRESHOLDS).
-        // Solana (0.3) is axe-specific — not in the original JS.
+        // Map: chain_key -> expected threshold. Most values mirror the
+        // removed `axelar-contract-deployments/scripts/check-wallet-balances.js`
+        // THRESHOLDS. Two axe-specific divergences:
+        //   * Solana (0.3) — not in the original JS.
+        //   * Stellar (2.5) — bumped from the JS's 0.5 to leave headroom above
+        //     the ~1 XLM Stellar account reserve plus per-route op spend.
         let expected: &[(&str, f64)] = &[
             ("hyperliquid", 0.01),
             ("xrpl-evm", 2.0),
             ("xrpl", 3.0),
-            ("stellar", 0.5),
+            ("stellar", 2.5),
             ("sui", 0.05),
             ("solana", 0.3),
         ];
