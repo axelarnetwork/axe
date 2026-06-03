@@ -1,8 +1,9 @@
 use alloy::dyn_abi::{DynSolType, DynSolValue, JsonAbiExt, Specifier};
 use alloy::hex;
 use alloy::json_abi::JsonAbi;
-use alloy::primitives::B256;
+use alloy::primitives::{Address, B256, U256};
 use eyre::{Result, bail};
+use owo_colors::OwoColorize;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -43,8 +44,13 @@ pub(crate) fn decode_bytes(data: &[u8], indent: &str) -> Result<()> {
         && let Some(func) = FUNC_DB.get(&<[u8; 4]>::try_from(&data[..4])?)
     {
         let values = func.abi_decode_input(&data[4..])?;
-        println!("{indent}{}", func.signature());
+        println!("{indent}{}", func.signature().bold());
         print_decoded(&func.inputs, &values, &format!("{indent}  "), 0);
+        return Ok(());
+    }
+
+    // Try as a governance proposal payload (before ITS: command 0 collides with ITS msgType 0)
+    if try_print_governance(data, indent, 0) {
         return Ok(());
     }
 
@@ -147,15 +153,18 @@ fn format_value(v: &DynSolValue) -> String {
         DynSolValue::Bool(b) => b.to_string(),
         DynSolValue::Int(n, _) => n.to_string(),
         DynSolValue::Uint(n, _) => n.to_string(),
-        DynSolValue::FixedBytes(word, size) => format!("0x{}", hex::encode(&word[..*size])),
-        DynSolValue::Address(a) => format!("{a}"),
+        DynSolValue::FixedBytes(word, size) => format!("0x{}", hex::encode(&word[..*size]))
+            .dimmed()
+            .to_string(),
+        DynSolValue::Address(a) => format!("{a}").cyan().to_string(),
         DynSolValue::Bytes(b) => {
             let h = hex::encode(b);
-            if h.len() > 128 {
+            let s = if h.len() > 128 {
                 format!("0x{}… ({} bytes)", &h[..64], b.len())
             } else {
                 format!("0x{h}")
-            }
+            };
+            s.dimmed().to_string()
         }
         DynSolValue::String(s) => format!("\"{s}\""),
         DynSolValue::Array(arr) | DynSolValue::FixedArray(arr) => {
@@ -193,8 +202,8 @@ fn enum_label(field: &str, value: &DynSolValue) -> String {
         return String::new();
     };
     match field {
-        "messageType" => its_message_type_name(v).map(|s| format!(" ({s})")),
-        "tokenManagerType" => token_manager_type_name(v).map(|s| format!(" ({s})")),
+        "messageType" => its_message_type_name(v).map(|s| format!(" ({})", s.bold())),
+        "tokenManagerType" => token_manager_type_name(v).map(|s| format!(" ({})", s.bold())),
         _ => None,
     }
     .unwrap_or_default()
@@ -213,8 +222,8 @@ fn print_decoded(
             param.name.clone()
         };
         println!(
-            "{indent}{name} ({}): {}{}",
-            param.ty,
+            "{indent}{name} {}: {}{}",
+            format!("({})", param.ty).dimmed(),
             format_value(value),
             enum_label(&name, value)
         );
@@ -252,8 +261,13 @@ fn try_print_nested(data: &[u8], indent: &str, depth: usize) -> bool {
         && let Some(func) = FUNC_DB.get(&sel)
         && let Ok(values) = func.abi_decode_input(&data[4..])
     {
-        println!("{indent}{}", func.signature());
+        println!("{indent}{}", func.signature().bold());
         print_decoded(&func.inputs, &values, &format!("{indent}  "), depth);
+        return true;
+    }
+
+    // Try governance proposal payload (before ITS: command 0 collides with ITS msgType 0)
+    if try_print_governance(data, indent, depth) {
         return true;
     }
 
@@ -299,10 +313,11 @@ fn try_print_its(data: &[u8], indent: &str, depth: usize) -> bool {
         return false;
     };
 
-    println!("{indent}[ITS {name}]");
+    println!("{indent}{}", format!("[ITS {name}]").bold());
     for (value, (label, ty)) in values.iter().zip(labels.iter().zip(types.iter())) {
         println!(
-            "{indent}  {label} ({ty}): {}{}",
+            "{indent}  {label} {}: {}{}",
+            format!("({ty})").dimmed(),
             format_value(value),
             enum_label(label, value)
         );
@@ -339,9 +354,13 @@ fn try_print_fallback(data: &[u8], indent: &str) -> bool {
                 .map(|t| t.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("{indent}Decoded as ({type_str}):");
+            println!("{indent}{}", format!("Decoded as ({type_str}):").bold());
             for (i, (value, ty)) in values.iter().zip(pattern.iter()).enumerate() {
-                println!("{indent}  arg{i} ({ty}): {}", format_value(value));
+                println!(
+                    "{indent}  arg{i} {}: {}",
+                    format!("({ty})").dimmed(),
+                    format_value(value)
+                );
                 if let (DynSolType::Bytes, DynSolValue::Bytes(b)) = (ty, value)
                     && b.len() >= 4
                 {
@@ -460,9 +479,242 @@ fn token_manager_type_name(v: u64) -> Option<&'static str> {
     }
 }
 
+fn format_eta(eta: U256) -> String {
+    // eta is a unix timestamp (seconds). Keep the raw value for debugging and append a human-readable
+    // time in the host's local timezone (Europe/Athens-equivalent on shallot).
+    let dt = u64::try_from(eta)
+        .ok()
+        .and_then(|secs| i64::try_from(secs).ok())
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+    match dt {
+        Some(dt) => format!(
+            "{eta} ({})",
+            dt.with_timezone(&chrono::Local).format("%H:%M %d %B %y")
+        ),
+        None => eta.to_string(),
+    }
+}
+
+fn governance_command_name(command: u64) -> Option<&'static str> {
+    // InterchainGovernance defines 0/1; AxelarServiceGovernance adds 2/3.
+    match command {
+        0 => Some("ScheduleTimeLockProposal"),
+        1 => Some("CancelTimeLockProposal"),
+        2 => Some("ApproveOperatorProposal"),
+        3 => Some("CancelOperatorApproval"),
+        _ => None,
+    }
+}
+
+/// A decoded Interchain/Service-Governance GMP proposal payload, i.e.
+/// `abi.encode(uint256 command, address target, bytes callData, uint256 nativeValue, uint256 eta)`
+/// — what the gov module sends (via `AxelarnetGateway.call_contract`) to an edge chain's
+/// `InterchainGovernance` / `AxelarServiceGovernance`.
+struct GovernanceProposal {
+    command: u64,
+    command_name: &'static str,
+    target: Address,
+    call_data: Vec<u8>,
+    native_value: U256,
+    eta: U256,
+}
+
+fn parse_governance(data: &[u8]) -> Option<GovernanceProposal> {
+    // Static head is 5 words (command, target, callData offset, nativeValue, eta); the bytes
+    // field needs at least its length word, so 6 words minimum.
+    if data.len() < 6 * 32 {
+        return None;
+    }
+    // command: a small uint (0..=3) — the upper 31 bytes of the word must be zero.
+    if data[..31].iter().any(|&b| b != 0) {
+        return None;
+    }
+    let command = u64::from(data[31]);
+    let command_name = governance_command_name(command)?;
+    // target: an address — the upper 12 bytes of the word must be zero.
+    if data[32..44].iter().any(|&b| b != 0) {
+        return None;
+    }
+    // callData offset must be the canonical 0xa0 (160) for this static 5-field layout. This is the
+    // key discriminator from an ITS message (whose first dynamic field sits at 0xc0), since a
+    // ScheduleTimeLock command (0) otherwise collides with the ITS INTERCHAIN_TRANSFER type (0).
+    if data[64..95].iter().any(|&b| b != 0) || data[95] != 0xa0 {
+        return None;
+    }
+
+    let schema = DynSolType::Tuple(vec![
+        DynSolType::Uint(256),
+        DynSolType::Address,
+        DynSolType::Bytes,
+        DynSolType::Uint(256),
+        DynSolType::Uint(256),
+    ]);
+    let DynSolValue::Tuple(values) = schema.abi_decode_params(data).ok()? else {
+        return None;
+    };
+
+    let target = match &values[1] {
+        DynSolValue::Address(a) => *a,
+        _ => return None,
+    };
+    let call_data = match &values[2] {
+        DynSolValue::Bytes(b) => b.clone(),
+        _ => return None,
+    };
+    let native_value = match &values[3] {
+        DynSolValue::Uint(n, _) => *n,
+        _ => return None,
+    };
+    let eta = match &values[4] {
+        DynSolValue::Uint(n, _) => *n,
+        _ => return None,
+    };
+
+    Some(GovernanceProposal {
+        command,
+        command_name,
+        target,
+        call_data,
+        native_value,
+        eta,
+    })
+}
+
+fn try_print_governance(data: &[u8], indent: &str, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return false;
+    }
+    let Some(proposal) = parse_governance(data) else {
+        return false;
+    };
+
+    println!(
+        "{indent}{}",
+        format!("[Governance {}]", proposal.command_name).bold()
+    );
+    println!(
+        "{indent}  command {}: {} ({})",
+        "(uint256)".dimmed(),
+        proposal.command,
+        proposal.command_name.bold()
+    );
+    println!(
+        "{indent}  target {}: {}",
+        "(address)".dimmed(),
+        proposal.target.cyan()
+    );
+    println!(
+        "{indent}  callData {}: {}",
+        "(bytes)".dimmed(),
+        format!("0x{}", hex::encode(&proposal.call_data)).dimmed()
+    );
+    if depth < MAX_DEPTH && proposal.call_data.len() >= 4 {
+        try_print_nested(&proposal.call_data, &format!("{indent}    "), depth + 1);
+    }
+    println!(
+        "{indent}  nativeValue {}: {}",
+        "(uint256)".dimmed(),
+        proposal.native_value
+    );
+    println!(
+        "{indent}  eta {}: {}",
+        "(uint256)".dimmed(),
+        format_eta(proposal.eta)
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Real testnet Berachain governance proposals (ScheduleTimeLockProposal → gateway.setPauseStatus(false)),
+    // from the AxelarnetGateway.call_contract payloads of gov proposals 590 and 588. They differ only in eta.
+    const BERA_SCHEDULE_590: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1f13090000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const BERA_SCHEDULE_588: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1ef11c0000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn governance_parses_real_schedule_timelock_payloads() {
+        for payload in [BERA_SCHEDULE_590, BERA_SCHEDULE_588] {
+            let data = parse_hex(payload).unwrap();
+            let p = parse_governance(&data).expect("should parse as a governance proposal");
+            assert_eq!(p.command, 0);
+            assert_eq!(p.command_name, "ScheduleTimeLockProposal");
+            assert_eq!(
+                p.target,
+                "0xe432150cce91c13a887f7D836923d5597adD8E31"
+                    .parse::<Address>()
+                    .unwrap()
+            );
+            assert_eq!(p.native_value, U256::ZERO);
+            // inner call = setPauseStatus(false): selector 0xc38bb537 + 32-byte bool arg
+            assert_eq!(p.call_data.len(), 36);
+            assert_eq!(&p.call_data[..4], &[0xc3, 0x8b, 0xb5, 0x37]);
+        }
+    }
+
+    #[test]
+    fn governance_eta_distinguishes_proposals() {
+        let a = parse_governance(&parse_hex(BERA_SCHEDULE_590).unwrap()).unwrap();
+        let b = parse_governance(&parse_hex(BERA_SCHEDULE_588).unwrap()).unwrap();
+        assert_eq!(a.eta, U256::from(0x6a1f_1309_u64));
+        assert_eq!(b.eta, U256::from(0x6a1e_f11c_u64));
+        assert_ne!(a.eta, b.eta);
+    }
+
+    #[test]
+    fn format_eta_keeps_unix_and_appends_local_time() {
+        // 0x6a1f1309 = 1780421385 (2026-06-02 17:29:45 UTC)
+        let s = format_eta(U256::from(0x6a1f_1309_u64));
+        assert!(s.starts_with("1780421385 ("), "got {s}");
+        assert!(s.ends_with(')'), "got {s}");
+        // the date part is timezone-stable for this timestamp on any realistic host tz
+        assert!(s.contains("June 26"), "got {s}");
+    }
+
+    #[test]
+    fn governance_maps_all_command_variants() {
+        let base = parse_hex(BERA_SCHEDULE_590).unwrap();
+        for (command, name) in [
+            (1u8, "CancelTimeLockProposal"),
+            (2, "ApproveOperatorProposal"),
+            (3, "CancelOperatorApproval"),
+        ] {
+            let mut data = base.clone();
+            data[31] = command; // flip just the command word
+            let p = parse_governance(&data).expect("variant should parse");
+            assert_eq!(p.command, u64::from(command));
+            assert_eq!(p.command_name, name);
+        }
+    }
+
+    #[test]
+    fn governance_rejects_unknown_command() {
+        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        data[31] = 4; // out of the 0..=3 range
+        assert!(parse_governance(&data).is_none());
+    }
+
+    #[test]
+    fn governance_rejects_non_canonical_offset() {
+        // 0xc0 offset (an ITS-shaped layout) must NOT be read as a governance proposal
+        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        data[95] = 0xc0;
+        assert!(parse_governance(&data).is_none());
+    }
+
+    #[test]
+    fn governance_rejects_dirty_address_word() {
+        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        data[32] = 0xff; // address word's upper bytes must be zero
+        assert!(parse_governance(&data).is_none());
+    }
+
+    #[test]
+    fn decode_governance_schedule_timelock_end_to_end() {
+        // full path, including recursion into the inner setPauseStatus(bool) call
+        run(BERA_SCHEDULE_590).unwrap();
+    }
 
     #[test]
     fn decode_register_custom_token() {
