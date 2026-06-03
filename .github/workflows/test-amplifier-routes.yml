@@ -15,12 +15,13 @@ on:
   workflow_dispatch:
     inputs:
       network:
-        description: Axelar network (only testnet wired so far; mainnet/stagenet/devnet require chain availability audit)
+        description: Axelar network (testnet + mainnet wired; stagenet/devnet require chain availability audit)
         type: choice
         required: true
         default: testnet
         options:
           - testnet
+          - mainnet
       protocol:
         description: Protocol
         type: choice
@@ -29,6 +30,19 @@ on:
         options:
           - gmp
           - its
+  # Reusable-workflow trigger so cron schedules (see cron-amplifier-mainnet.yml)
+  # can fan into this same matrix without duplicating the setup/test/summary
+  # plumbing. `inputs.network` / `inputs.protocol` are typed `string` here
+  # (workflow_call doesn't support `choice`); the calling workflow is
+  # responsible for passing a valid pair.
+  workflow_call:
+    inputs:
+      network:
+        type: string
+        required: true
+      protocol:
+        type: string
+        required: true
 
 jobs:
   setup:
@@ -89,9 +103,28 @@ jobs:
             {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
             {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
           ]}'
+          # Mainnet fleets mirror testnet 1:1 — same routes, same shape, just
+          # different chains-config (mainnet.json) so the per-chain AXE
+          # tokenIds are read from the mainnet AXE entries (HL, Stellar, Sui).
+          # XRPL ↔ XRPL EVM still uses the canonical XRP token (no per-chain
+          # AXE needed for that pair).
+          MATRIX_MAINNET_ITS='{"include":[
+            {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
+            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"}
+          ]}'
+          MATRIX_MAINNET_GMP='{"include":[
+            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
+          ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;
             "testnet/gmp") MATRIX="$MATRIX_TESTNET_GMP" ;;
+            "mainnet/its") MATRIX="$MATRIX_MAINNET_ITS" ;;
+            "mainnet/gmp") MATRIX="$MATRIX_MAINNET_GMP" ;;
             *)
               echo "::error::Route fleet for $NETWORK / $PROTOCOL is not defined yet — extend the matrix in .github/workflows/test-amplifier-routes.yml" >&2
               exit 1
