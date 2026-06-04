@@ -25,9 +25,21 @@ use crate::solana;
 use crate::ui;
 
 // Token spec lives in `crate::types::LOAD_TEST_SOL_SPEC`.
-const AMOUNT_PER_TX: u64 = 1_000_000_000; // 1 token (with 9 decimals)
+/// Whole tokens transferred per tx. Scaled by the mint's on-chain decimals at
+/// runtime (see `mint_decimals`) so both fresh-deploy (9 decimals) and the
+/// reused canonical AXE (6 decimals) get correct amounts.
+const WHOLE_TOKENS_PER_TX: u64 = 1;
 /// Distribute 100x per key so cached tokens last across many runs.
-const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
+const WHOLE_TOKENS_PER_KEY: u64 = WHOLE_TOKENS_PER_TX * 100;
+
+/// Read the SPL mint's `decimals` from chain, defaulting to 9 (the fresh
+/// load-test token's decimals) on error to preserve the original behavior.
+fn mint_decimals(rpc_client: &RpcClient, mint: &solana_sdk::pubkey::Pubkey) -> u8 {
+    rpc_client
+        .get_token_supply(mint)
+        .map(|supply| supply.decimals)
+        .unwrap_or(9)
+}
 
 /// Default gas value (per command) for an ITS *transfer* on Solana (in lamports).
 /// devnet-amplifier doesn't require gas, stagenet/mainnet do.
@@ -107,6 +119,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("mint", &mint.to_string());
 
+    // Scale the whole-token counts by the mint's actual decimals so reused
+    // canonical tokens (6 decimals) and freshly deployed ones (9 decimals)
+    // both transfer the right amounts.
+    let decimals = mint_decimals(&rpc_client, &mint);
+    let amount_per_tx = WHOLE_TOKENS_PER_TX * 10u64.pow(u32::from(decimals));
+    let amount_per_key = WHOLE_TOKENS_PER_KEY * 10u64.pow(u32::from(decimals));
+
     // --- Derive and fund keypairs ---
     let keypairs = prepare_keypairs(&args.source_rpc, sizing.num_keys, &main_keypair)?;
 
@@ -117,7 +136,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &keypairs,
         &mint,
         &token_id,
-        compute_distribution_amount(&args, &sizing),
+        compute_distribution_amount(&args, &sizing, amount_per_tx, amount_per_key),
     )?;
 
     let transfer = ItsTransferSpec {
@@ -125,6 +144,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         mint,
         gas_value,
         dest_address_bytes,
+        amount_per_tx,
     };
 
     if !sizing.burst_mode {
@@ -159,6 +179,8 @@ struct ItsTransferSpec {
     mint: solana_sdk::pubkey::Pubkey,
     gas_value: u64,
     dest_address_bytes: Vec<u8>,
+    /// Per-transfer amount, already scaled to the mint's on-chain decimals.
+    amount_per_tx: u64,
 }
 
 /// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
@@ -300,18 +322,25 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     }
 }
 
-/// Per-key token amount to seed the ephemeral wallets with: `AMOUNT_PER_KEY`
+/// Per-key token amount to seed the ephemeral wallets with: `amount_per_key`
 /// for burst mode, otherwise enough headroom for the sustained per-key cycle.
-fn compute_distribution_amount(args: &LoadTestArgs, sizing: &RunSizing) -> u64 {
+/// Both `amount_per_tx` and `amount_per_key` are already scaled to the mint's
+/// on-chain decimals.
+fn compute_distribution_amount(
+    args: &LoadTestArgs,
+    sizing: &RunSizing,
+    amount_per_tx: u64,
+    amount_per_key: u64,
+) -> u64 {
     if sizing.burst_mode {
-        AMOUNT_PER_KEY
+        amount_per_key
     } else {
         let txs_per_key = sizing
             .sustained_params
             .expect("burst_mode is false")
             .1
             .div_ceil(args.key_cycle);
-        AMOUNT_PER_TX * txs_per_key * 2
+        amount_per_tx * txs_per_key * 2
     }
 }
 
@@ -365,6 +394,7 @@ async fn run_sustained_pipeline(
     let token_id = transfer.token_id;
     let mint = transfer.mint;
     let gas_value = transfer.gas_value;
+    let amount_per_tx = transfer.amount_per_tx;
     let token_program_s =
         solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let ata_program_s =
@@ -379,6 +409,7 @@ async fn run_sustained_pipeline(
             let tid = token_id;
             let m = mint;
             let gv = hub_gas_value(gas_value);
+            let amt = amount_per_tx;
             let gmp_dest = axelarnet_gw_s.clone();
             let vtx = verify_tx.clone();
 
@@ -400,7 +431,7 @@ async fn run_sustained_pipeline(
                     &m,
                     &dc,
                     &da,
-                    AMOUNT_PER_TX,
+                    amt,
                     gv,
                 ) {
                     Ok((_sig, mut metrics)) => {
@@ -500,6 +531,7 @@ async fn run_burst_pipeline(
     let token_id = transfer.token_id;
     let mint = transfer.mint;
     let gas_value = transfer.gas_value;
+    let amount_per_tx = transfer.amount_per_tx;
 
     // --- Parallel sends ---
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
@@ -520,6 +552,7 @@ async fn run_burst_pipeline(
         let tid = token_id;
         let m = mint;
         let gv = gas_value;
+        let amt = amount_per_tx;
         let kp = kp.clone();
         let gmp_dest_addr = evm.axelarnet_gw_addr.clone();
 
@@ -547,7 +580,7 @@ async fn run_burst_pipeline(
                 &m,
                 &dc,
                 &da,
-                AMOUNT_PER_TX,
+                amt,
                 gv,
             ) {
                 Ok((_sig, mut metrics)) => {
@@ -751,7 +784,10 @@ async fn setup_its_token(
         let (its_root, _) = solana::find_its_root_pda();
         let (mint, _) = solana::find_interchain_token_pda(&its_root, &tid.0);
         if rpc_client.get_account_data(&mint).is_ok() {
-            let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64);
+            let decimals = mint_decimals(rpc_client, &mint);
+            let needed = WHOLE_TOKENS_PER_KEY
+                .saturating_mul(10u64.pow(u32::from(decimals)))
+                .saturating_mul(num_txs as u64);
             let balance = deployer_spl_balance(rpc_client, &keypair.pubkey(), &mint);
             if balance >= needed {
                 ui::kv("token ID (chains-config)", &format!("{tid}"));
@@ -786,7 +822,10 @@ async fn setup_its_token(
 
             // Verify token still exists on-chain and deployer has enough supply
             if rpc_client.get_account_data(&mint).is_ok() {
-                let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64);
+                let decimals = mint_decimals(rpc_client, &mint);
+                let needed = WHOLE_TOKENS_PER_KEY
+                    .saturating_mul(10u64.pow(u32::from(decimals)))
+                    .saturating_mul(num_txs as u64);
                 let deployer_balance = deployer_spl_balance(rpc_client, &keypair.pubkey(), &mint);
 
                 if deployer_balance >= needed {

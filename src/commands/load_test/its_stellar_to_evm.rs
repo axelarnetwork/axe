@@ -28,17 +28,26 @@ use crate::ui;
 /// human-facing name is consistent across runs.
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
-/// 7 decimals matches Stellar's native XLM convention. Token amounts on the
+/// 7 decimals matches Stellar's native XLM convention. Used only for the
+/// FRESH-deploy path; the reuse path adopts the existing token's decimals
+/// (queried via `StellarClient::token_decimals`). Token amounts on the
 /// destination chain are scaled by ITS during routing.
 const TOKEN_DECIMALS: u32 = 7;
 
-/// Per-tx transfer amount (token units). With 7 decimals, this is 1 AXE.
-const AMOUNT_PER_TX: u64 = 10_000_000;
+/// Whole tokens transferred per tx / seeded per key. Scaled by the resolved
+/// token's actual on-chain decimals at runtime — the reused canonical AXE is
+/// 18 decimals (100 AXE = 1e20, which overflows u64), so amounts are u128.
+const WHOLE_TOKENS_PER_TX: u128 = 1;
 /// Distribute 100x per key so cached tokens last across many runs.
-const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
-/// Initial supply minted to the deployer at deploy time. Plenty for many
-/// runs without redeploying.
+const WHOLE_TOKENS_PER_KEY: u128 = WHOLE_TOKENS_PER_TX * 100;
+/// Initial supply minted to the deployer at deploy time (fresh-deploy path,
+/// TOKEN_DECIMALS = 7). Plenty for many runs without redeploying.
 const INITIAL_SUPPLY: u128 = 1_000_000 * 10_000_000;
+
+/// Scale a whole-token count to a token's on-chain decimals (`n * 10^decimals`).
+fn scale_to_decimals(whole_tokens: u128, decimals: u32) -> u128 {
+    whole_tokens * 10u128.pow(decimals)
+}
 
 /// Default cross-chain gas payment in stroops (10 XLM). Matches the GMP
 /// runner's default — overridable via `--gas-value`.
@@ -63,7 +72,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let gas_stroops = parse_gas_stroops(args.gas_value.as_deref())?;
     let sizing = compute_run_sizing(&args);
 
-    let (token_id, _salt, token_address) = setup_its_token(
+    let (token_id, _salt, token_address, decimals) = setup_its_token(
         &stellar.client,
         &stellar.main_wallet,
         &stellar.its_addr,
@@ -82,6 +91,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     .await?;
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("token contract (Stellar)", &token_address);
+    let amount_per_tx = scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals);
 
     // Burst: 1 tx/key. Sustained: each derived key serves `key_cycle` txs in
     // its rotation slot before rotating out, so fund it for that many gas
@@ -97,7 +107,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     )
     .await?;
 
-    let amount_per_key = compute_amount_per_key(&sizing, args.key_cycle);
+    let amount_per_key = compute_amount_per_key(&sizing, args.key_cycle, decimals);
     distribute_token_balances(
         &stellar.client,
         &stellar.main_wallet,
@@ -116,6 +126,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &sizing,
             token_id,
             gas_stroops,
+            amount_per_tx,
         )
         .await
     } else {
@@ -127,6 +138,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             &sizing,
             token_id,
             gas_stroops,
+            amount_per_tx,
         )
         .await
     }
@@ -333,26 +345,29 @@ async fn derive_and_fund_wallets(
     Ok(wallets)
 }
 
-/// Compute per-key AXE distribution amount: a fixed `AMOUNT_PER_KEY` in burst
-/// mode, or `2 * AMOUNT_PER_TX * txs_per_key` in sustained so each wallet has
+/// Compute per-key AXE distribution amount, scaled to the resolved token's
+/// `decimals`: a fixed per-key amount in burst mode, or
+/// `2 * amount_per_tx * txs_per_key` in sustained so each wallet has
 /// double-headroom for the planned cycle.
-fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64) -> u128 {
-    let amount_per_key = if sizing.burst_mode {
-        AMOUNT_PER_KEY
+fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64, decimals: u32) -> u128 {
+    if sizing.burst_mode {
+        scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals)
     } else {
         let txs_per_key = sizing
             .sustained_params
             .expect("burst_mode is false")
             .1
-            .div_ceil(key_cycle);
-        AMOUNT_PER_TX.saturating_mul(txs_per_key).saturating_mul(2)
-    };
-    amount_per_key as u128
+            .div_ceil(key_cycle) as u128;
+        scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals)
+            .saturating_mul(txs_per_key)
+            .saturating_mul(2)
+    }
 }
 
 /// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
 /// Stellar ITS sustained loop, stitch amplifier timings back into the report,
 /// and hand off to `finish_report`.
+#[allow(clippy::too_many_arguments)]
 async fn run_sustained_pipeline(
     args: &LoadTestArgs,
     stellar: &StellarSetup,
@@ -361,6 +376,7 @@ async fn run_sustained_pipeline(
     sizing: &RunSizing,
     token_id: [u8; 32],
     gas_stroops: u64,
+    amount_per_tx: u128,
 ) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
@@ -402,6 +418,7 @@ async fn run_sustained_pipeline(
         evm.dest_address_bytes.clone(),
         stellar.xlm_addr.clone(),
         gas_stroops,
+        amount_per_tx,
         tps_n,
         duration_secs,
         key_cycle,
@@ -436,6 +453,7 @@ async fn run_sustained_pipeline(
 
 /// Drive the burst-mode pipeline: fan out `num_keys` parallel ITS transfers,
 /// batch-verify on the EVM destination, and hand off to `finish_report`.
+#[allow(clippy::too_many_arguments)]
 async fn run_burst_pipeline(
     args: &LoadTestArgs,
     stellar: &StellarSetup,
@@ -444,6 +462,7 @@ async fn run_burst_pipeline(
     sizing: &RunSizing,
     token_id: [u8; 32],
     gas_stroops: u64,
+    amount_per_tx: u128,
 ) -> Result<()> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
@@ -487,7 +506,7 @@ async fn run_burst_pipeline(
                 &da,
                 &xlm,
                 gas_stroops,
-                AMOUNT_PER_TX as u128,
+                amount_per_tx,
                 &gmp_dest_addr,
             )
             .await;
@@ -591,7 +610,7 @@ async fn setup_its_token(
     evm_gateway_addr: alloy::primitives::Address,
     evm_rpc_url: &str,
     num_txs: usize,
-) -> Result<([u8; 32], [u8; 32], String)> {
+) -> Result<([u8; 32], [u8; 32], String, u32)> {
     if let Some(tid_hex) = token_id_override {
         let tid_bytes = hex::decode(tid_hex.strip_prefix("0x").unwrap_or(tid_hex))
             .map_err(|e| eyre!("invalid --token-id: {e}"))?;
@@ -604,8 +623,11 @@ async fn setup_its_token(
             .its_query_token_address(main_wallet, its_contract, token_id)
             .await?
             .ok_or_else(|| eyre!("token id {tid_hex} not registered on Stellar ITS"))?;
+        let decimals = client
+            .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+            .await?;
         ui::kv("token ID (provided)", tid_hex);
-        return Ok((token_id, [0u8; 32], token_addr));
+        return Ok((token_id, [0u8; 32], token_addr, decimals));
     }
 
     // chains-config pre-registered AXE: per-source override that lets CI skip
@@ -620,7 +642,11 @@ async fn setup_its_token(
             .its_query_token_address(main_wallet, its_contract, tid.0)
             .await?
     {
-        let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64) as u128;
+        let decimals = client
+            .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+            .await?;
+        let needed =
+            scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals).saturating_mul(num_txs as u128);
         let bal = client
             .token_balance(main_wallet, &token_addr, &main_wallet.public_key_bytes)
             .await
@@ -628,7 +654,7 @@ async fn setup_its_token(
         if bal >= needed {
             ui::kv("token ID (chains-config)", &format!("{tid}"));
             ui::address("token contract (Stellar)", &token_addr);
-            return Ok((tid.0, [0u8; 32], token_addr));
+            return Ok((tid.0, [0u8; 32], token_addr, decimals));
         }
         ui::warn(&format!(
             "chains-config AXE balance too low ({bal} < {needed}); configured wallet \
@@ -655,14 +681,18 @@ async fn setup_its_token(
                 .its_query_token_address(main_wallet, its_contract, token_id)
                 .await
             {
-                let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64) as u128;
+                let decimals = client
+                    .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+                    .await?;
+                let needed = scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals)
+                    .saturating_mul(num_txs as u128);
                 let bal = client
                     .token_balance(main_wallet, &token_addr, &main_wallet.public_key_bytes)
                     .await
                     .unwrap_or(0);
                 if bal >= needed {
                     ui::info(&format!("reusing cached ITS token: {token_addr}"));
-                    return Ok((token_id, salt, token_addr));
+                    return Ok((token_id, salt, token_addr, decimals));
                 }
                 ui::warn(&format!(
                     "cached AXE token has insufficient supply ({bal} < {needed}), deploying fresh..."
@@ -753,7 +783,7 @@ async fn setup_its_token(
 
     super::helpers::hint_persist_axe_token(src, &alloy::primitives::FixedBytes::from(token_id));
 
-    Ok((token_id, salt, token_address))
+    Ok((token_id, salt, token_address, TOKEN_DECIMALS))
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +959,7 @@ async fn run_sustained_loop(
     destination_address_bytes: Vec<u8>,
     gas_token: String,
     gas_stroops: u64,
+    amount_per_tx: u128,
     tps: usize,
     duration_secs: u64,
     key_cycle: usize,
@@ -969,7 +1000,7 @@ async fn run_sustained_loop(
                 &da,
                 &xlm,
                 gas_stroops,
-                AMOUNT_PER_TX as u128,
+                amount_per_tx,
                 &gmp_dst,
             )
             .await;

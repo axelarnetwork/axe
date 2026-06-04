@@ -147,6 +147,14 @@ pub fn scval_to_address_string(v: &ScVal) -> Option<String> {
     }
 }
 
+/// Decode `ScVal::U32` into `u32` (e.g. the `decimals()` of a SAC token).
+pub fn scval_to_u32(v: &ScVal) -> Option<u32> {
+    if let ScVal::U32(n) = v {
+        return Some(*n);
+    }
+    None
+}
+
 /// Decode `ScVal::I128` (assumed non-negative) into `u128`.
 pub fn scval_to_u128(v: &ScVal) -> Option<u128> {
     if let ScVal::I128(parts) = v

@@ -858,6 +858,40 @@ pub(crate) fn read_pre_registered_axe_token(
     }
 }
 
+/// Companion to `read_pre_registered_axe_token`: returns the AXE
+/// `tokenAddress` (the chain-side ERC20 / HTS address) recorded under
+/// `chains.<chain>.contracts.AXE.tokenAddress`, if present.
+///
+/// **Why this exists alongside the on-chain `interchainTokenAddress(tid)`
+/// view**: on Hedera mainnet/testnet the standard view reverts because
+/// Hedera's HTS-fork of ITS doesn't expose the EVM-style getter — the
+/// underlying token is an HTS-native asset whose EVM address is
+/// determined at HTS-create time and surfaced only in the deploy
+/// receipt, not retrievable later via a generic ITS function. For those
+/// chains we record the deploy-receipt address directly in chains-config
+/// and read it from there. Returns `None` when no override is set,
+/// letting the caller fall back to the on-chain view (the right call
+/// for non-Hedera EVMs).
+pub(crate) fn read_pre_registered_axe_token_address(
+    config: &std::path::Path,
+    chain_axelar_id: &str,
+) -> Result<Option<Address>> {
+    let content = std::fs::read_to_string(config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    let addr_str = root
+        .pointer(&format!(
+            "/chains/{chain_axelar_id}/contracts/AXE/tokenAddress"
+        ))
+        .and_then(|v| v.as_str());
+    match addr_str {
+        Some(s) => Ok(Some(s.parse().map_err(|e| {
+            eyre::eyre!("invalid AXE.tokenAddress for chain {chain_axelar_id}: {e}")
+        })?)),
+        None => Ok(None),
+    }
+}
+
 /// Reuse the chains-config pre-registered AXE token *only* when the configured
 /// wallet actually holds enough of it to run. Returns `Some((tokenId, addr))`
 /// when reuse is viable, or `None` (so the caller falls through to its local
@@ -879,12 +913,21 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
     let Some(tid) = read_pre_registered_axe_token(config, chain_axelar_id)? else {
         return Ok(None);
     };
-    let its = crate::evm::InterchainTokenService::new(its_proxy, provider);
-    let addr = its
-        .interchainTokenAddress(tid)
-        .call()
-        .await
-        .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?;
+    // Prefer the config-supplied tokenAddress when set (required for
+    // Hedera HTS — see `read_pre_registered_axe_token_address` docs).
+    // Fall back to the on-chain `interchainTokenAddress(tid)` view for
+    // standard EVMs that don't pre-record the address in chains-config.
+    let addr = if let Some(config_addr) =
+        read_pre_registered_axe_token_address(config, chain_axelar_id)?
+    {
+        config_addr
+    } else {
+        let its = crate::evm::InterchainTokenService::new(its_proxy, provider);
+        its.interchainTokenAddress(tid)
+            .call()
+            .await
+            .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?
+    };
     let balance = crate::evm::ERC20::new(addr, provider)
         .balanceOf(holder)
         .call()

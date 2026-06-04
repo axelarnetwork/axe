@@ -22,7 +22,7 @@ use stellar_xdr::curr::{
 use super::scval::{
     parse_contract_id, scval_address_account, scval_address_from_str, scval_bytes,
     scval_i128_from_u128, scval_string, scval_symbol, scval_to_address_string, scval_to_bytes32,
-    scval_to_u128, scval_token, scval_token_metadata, scval_void,
+    scval_to_u32, scval_to_u128, scval_token, scval_token_metadata, scval_void,
 };
 use super::tx::InvokedTx;
 use super::wallet::{StellarWallet, network_passphrase_for};
@@ -656,6 +656,20 @@ impl StellarClient {
             .as_ref()
             .and_then(scval_to_u128)
             .unwrap_or(0))
+    }
+
+    /// Simulate `decimals()` on a SAC token contract. Read-only — used to
+    /// scale load-test amounts to the actual on-chain token decimals.
+    pub async fn token_decimals(
+        &self,
+        signer_account_pk: &[u8; 32],
+        token_contract: &str,
+    ) -> Result<u32> {
+        let ret = self
+            .simulate_view(signer_account_pk, token_contract, "decimals", vec![])
+            .await?
+            .ok_or_else(|| eyre!("decimals() returned no result"))?;
+        scval_to_u32(&ret).ok_or_else(|| eyre!("decimals() returned non-u32 result"))
     }
 
     // -----------------------------------------------------------------
