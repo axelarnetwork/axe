@@ -359,15 +359,32 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     let mut deploy_code = bytecode;
     deploy_code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
 
-    let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
-    let pending = provider.send_transaction(tx).await?;
+    // Wrap `send_transaction` with retry on transient transport / 5xx /
+    // 429 errors — observed flakes on HL and Hedera mainnet RPCs where
+    // the same submission succeeds on retry. Real reverts (insufficient
+    // funds, custom errors) skip the retry per `is_transient_default`.
+    let pending = crate::retry::retry_async(
+        "deploy_sender_receiver.send_transaction",
+        crate::retry::DEFAULT_ATTEMPTS,
+        crate::retry::is_transient_default,
+        || {
+            let tx =
+                TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code.clone()));
+            async { provider.send_transaction(tx).await }
+        },
+    )
+    .await?;
     let tx_hash = *pending.tx_hash();
     ui::tx_hash("deploy tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    // 240 s tolerates HL's ~60 s big-blocks cadence + Hedera HTS-create
+    // latency. Fast EVMs (Solana, Stellar destinations) still return as
+    // soon as the receipt is available; this is an upper bound, not a
+    // floor.
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(240), pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("deploy tx timed out after 120s"))??;
+        .map_err(|_| eyre::eyre!("deploy tx timed out after 240s"))??;
 
     let addr = receipt
         .contract_address
