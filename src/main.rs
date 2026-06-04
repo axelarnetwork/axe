@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
         cli::Commands::ItsOwnership { network, json } => {
             commands::its_ownership::run(network, json).await
         }
+        cli::Commands::CheckBalances { network } => commands::check_balances::run(network).await,
         cli::Commands::VerifierVotes {
             network,
             chain,

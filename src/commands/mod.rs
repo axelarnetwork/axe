@@ -1,3 +1,4 @@
+pub mod check_balances;
 pub mod decode;
 pub mod decode_evm_activity;
 pub mod decode_sol_activity;

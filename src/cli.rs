@@ -52,6 +52,14 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Pre-flight check: verify each chain's wallet has the minimum native
+    /// balance needed by the cron amplifier-routes load tests. Fails the
+    /// process if any wallet is underfunded.
+    CheckBalances {
+        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        network: String,
+    },
+
     /// Show network info (e.g. block height + timestamp)
     Info {
         #[command(subcommand)]

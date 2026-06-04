@@ -1,6 +1,6 @@
-name: Cron — Mainnet Amplifier Routes (twice daily)
+name: Cron — Testnet Amplifier Routes (twice daily)
 
-# Twice-daily mainnet smoke test of the wired ITS route fleet.
+# Twice-daily testnet smoke test of the wired ITS route fleet.
 # Calls `test-amplifier-routes.yml` as a reusable workflow. The child run
 # produces a ✓ / ✗ step-summary table and fails red on any failed route;
 # the parent cron run shows the same red status in the Actions tab (no extra
@@ -20,10 +20,10 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  mainnet-its:
+  testnet-its:
     uses: ./.github/workflows/test-amplifier-routes.yml
     with:
-      network: mainnet
+      network: testnet
       protocol: its
     # `inherit` is required so the child workflow can read the per-chain RPC
     # overrides and the EVM/Solana/Sui/XRPL/Stellar private keys it needs.

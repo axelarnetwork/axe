@@ -20,9 +20,14 @@ use crate::stellar::{
 };
 use crate::ui;
 
-/// Stellar base fee in stroops (100 stroops = 0.00001 XLM). Plus the
-/// simulated resource fee added by the client.
-pub const BASE_FEE: u32 = 100;
+/// Stellar classic-op base fee in stroops, plus the simulated Soroban
+/// resource fee added by the client. Set above the network's surge-pricing
+/// floor so submissions don't get rejected as `txInsufficientFee` whenever
+/// ledgers are >50% full. Stellar bills `min(submitted_fee, market_fee)`
+/// so a generous bid only buys priority — it doesn't actually pay more
+/// than the network is clearing at (current Horizon `/fee_stats` p99 is
+/// ~18k stroops; 100k stroops = 0.01 XLM gives a comfortable cap).
+pub const BASE_FEE: u32 = 100_000;
 
 /// Default cross-chain gas payment, in stroops (1 XLM = 10^7 stroops).
 /// `AxelarExample.send` forwards this to `AxelarGasService.pay_gas`.

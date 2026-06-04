@@ -29,20 +29,26 @@ use super::wallet::{StellarWallet, network_passphrase_for};
 
 /// Default poll cadence after submit.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+// Stellar bills `min(submitted_fee, market_clearing_fee)` per op — a high
+// submitted fee buys priority but doesn't actually pay more when the
+// market clears lower. Horizon `/fee_stats` mainnet p99 is currently
+// ~18k stroops; setting floors well above p99 keeps submissions accepted
+// during surge pricing without raising the real cost.
+
 /// Higher base fee for ITS transfers — the simulate step still tops it up
 /// with the actual resource fee, but a generous floor avoids `txInsufficientFee`
 /// rejections when the network bumps fees mid-test.
-const BASE_FEE_ITS: u32 = 1_000;
+const BASE_FEE_ITS: u32 = 200_000;
 /// Base fee for view-only invokes (`balance`, `interchain_token_address`,
 /// gateway `is_message_*`). Simulation discards the fee anyway, so this is
 /// just the floor we pass into the envelope before the resource-fee top-up.
 const BASE_FEE_VIEW: u32 = 100;
 /// Base fee for SAC token ops (`transfer`, `balance`).
-const BASE_FEE_TOKEN_OP: u32 = 200;
+const BASE_FEE_TOKEN_OP: u32 = 100_000;
 /// Base fee for ITS deploy/register flows. Soroban deploy is heavier than a
 /// transfer so the floor is bumped up to avoid `txInsufficientFee` when fees
 /// spike.
-const BASE_FEE_DEPLOY: u32 = 500;
+const BASE_FEE_DEPLOY: u32 = 200_000;
 /// Upper bound for waiting on a single tx to validate. Stellar ledger close
 /// time is ~5s; a generous window protects against RPC lag without hiding
 /// real failures.
