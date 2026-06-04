@@ -85,6 +85,19 @@ sol! {
     }
 
     #[sol(rpc)]
+    contract AxelarServiceGovernance {
+        function operator() external view returns (address);
+        function governanceChain() external view returns (string);
+        function governanceAddress() external view returns (string);
+        function minimumTimeLockDelay() external view returns (uint256);
+        function getProposalEta(address target, bytes callData, uint256 nativeValue) external view returns (uint256);
+        function isOperatorProposalApproved(address target, bytes callData, uint256 nativeValue) external view returns (bool);
+        function executeOperatorProposal(address target, bytes callData, uint256 nativeValue) external payable;
+        function executeProposal(address target, bytes callData, uint256 nativeValue) external payable;
+        function execute(bytes32 commandId, string sourceChain, string sourceAddress, bytes payload) external;
+    }
+
+    #[sol(rpc)]
     contract AxelarGasService {
         function payNativeGasForContractCall(
             address sender,

@@ -1,3 +1,4 @@
+use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -81,6 +82,22 @@ pub fn action_required(lines: &[&str]) {
         println!("  {}", line.yellow());
     }
     println!();
+}
+
+/// Ask the user to confirm an action on stdin: "  {prompt} [y/N] ".
+/// Returns true only on an explicit yes. A non-interactive stdin (no TTY)
+/// returns false — callers should require an explicit bypass flag there.
+pub fn confirm(prompt: &str) -> bool {
+    if !io::stdin().is_terminal() {
+        return false;
+    }
+    print!("  {} {} ", prompt.bold(), "[y/N]".dimmed());
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Format elapsed duration as human-readable
