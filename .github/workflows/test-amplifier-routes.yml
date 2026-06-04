@@ -112,7 +112,9 @@ jobs:
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
             {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"}
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
+            {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana","notes":"evm->sol ITS (Hedera-rooted AXE family, tokenId 0xd902...)"},
+            {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera","notes":"sol->evm ITS (Hedera-rooted AXE family)"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
             {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},

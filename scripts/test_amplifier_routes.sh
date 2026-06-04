@@ -77,7 +77,7 @@ CHAIN_MAP=$(cat <<'EOF'
   "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
   "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
   "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
-  "Hedera":      {"testnet": "hedera"},
+  "Hedera":      {"mainnet": "hedera",   "testnet": "hedera"},
   "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
   "Monad":       {"mainnet": "monad",      "testnet": "monad-3",          "stagenet": "monad"},
   "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
@@ -193,12 +193,17 @@ EOF
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
         # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
         # canonical XRP; HL↔Stellar uses the per-chain mainnet AXE entries.
+        # Hedera↔Solana uses the Hedera-rooted AXE family registered via
+        # `deploy-remote-interchain-token` from Hedera to Solana on
+        # 2026-06-04 (tokenId 0xd902254936e709777eda727385e43d9082916e0932034ed876b99d9f80f9a826).
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
+  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
 ]
 EOF
 )
