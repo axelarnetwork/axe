@@ -373,6 +373,22 @@ fn env_signer() -> Option<PrivateKeySigner> {
     key.parse().ok()
 }
 
+/// Pre-submit guard (when `--relay`): resolve the EVM relayer key and confirm
+/// it's funded on the edge chain, so we refuse *before* spending a proposal we
+/// couldn't relay. Errors if no key is set or its balance is zero.
+pub async fn preflight_relayer(cfg: &ResolvedConfig) -> Result<()> {
+    let signer = load_evm_signer()?;
+    let relayer = signer.address();
+    let provider =
+        ProviderBuilder::new().connect_http(cfg.edge_rpc.parse().wrap_err("invalid edge rpc url")?);
+    ensure_funded(&provider, relayer).await?;
+    ui::kv(
+        "relay preflight",
+        &format!("{relayer} funded on {} ✓", cfg.edge_axelar_id),
+    );
+    Ok(())
+}
+
 fn load_evm_signer() -> Result<PrivateKeySigner> {
     env_signer().ok_or_else(|| {
         eyre::eyre!(

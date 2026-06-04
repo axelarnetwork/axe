@@ -55,6 +55,12 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
     let asg = verify(&cfg).await?;
     helpers::check_not_already_proposed(&cfg, args.proposal_type, target, calldata.clone()).await?;
 
+    // With --relay, refuse before submitting if the EVM relayer key is missing
+    // or unfunded on the edge chain — don't spend a proposal we can't relay.
+    if args.relay {
+        relay::preflight_relayer(&cfg).await?;
+    }
+
     let eta = compute_eta(args.proposal_type, &args, &asg);
     let calldata_hex = format!("0x{}", alloy::hex::encode(&calldata));
     let payload = helpers::encode_governance_payload(
