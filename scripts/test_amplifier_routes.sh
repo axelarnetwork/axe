@@ -152,21 +152,22 @@ EOF
 #     within each group so same-wallet nonce races don't happen.
 case "$NETWORK/$PROTOCOL" in
     testnet/its)
-        # Three bidirectional pairs. Sui is still omitted (axe Sui-source ITS
-        # needs a pre-registered AXE token, Sui-as-ITS-destination is unwired
-        # in the dispatcher — see mod.rs:323-326).
+        # Two bidirectional pairs. Sui is omitted (axe Sui-source ITS needs a
+        # pre-registered AXE token, Sui-as-ITS-destination is unwired in the
+        # dispatcher — see mod.rs:323-326).
         #
-        # Hedera ↔ Solana pair uses the Hedera-rooted AXE family registered
-        # via `deploy-remote-interchain-token` from Hedera to Solana testnet
-        # on 2026-06-04 (tokenId 0xd6311e67bdb5fb90d722d71fde9e7c33aa703a0b6c66518cebff80f63bc64a4a).
+        # Hedera ↔ Solana ITS is deliberately NOT in the fleet: AXE was
+        # registered with `--initialSupply 0` on the Hedera HTS fork (the
+        # only initialSupply the deploy accepts), so the source wallet has
+        # zero AXE to interchain-transfer. Re-add only after a mint path
+        # for HTS-fork InterchainTokens is wired into axe + a supply has
+        # been minted to the workflow wallet.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
-  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
-  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
 ]
 EOF
 )
@@ -192,17 +193,19 @@ EOF
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
         # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
         # canonical XRP; HL↔Stellar uses the per-chain mainnet AXE entries.
-        # Hedera↔Solana uses the Hedera-rooted AXE family registered via
-        # `deploy-remote-interchain-token` from Hedera to Solana on
-        # 2026-06-04 (tokenId 0xd902254936e709777eda727385e43d9082916e0932034ed876b99d9f80f9a826).
+        #
+        # Hedera ↔ Solana ITS is deliberately NOT in the fleet: AXE was
+        # registered with `--initialSupply 0` on the Hedera HTS fork (the
+        # only initialSupply the deploy accepts), so the source wallet has
+        # zero AXE to interchain-transfer. Re-add only after a mint path
+        # for HTS-fork InterchainTokens is wired into axe + a supply has
+        # been minted to the workflow wallet.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
-  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
-  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
 ]
 EOF
 )
