@@ -9,9 +9,10 @@ name: Cron — Testnet Amplifier Routes (twice daily)
 #
 # Cron expressions are UTC. 00:00 + 12:00 UTC = midnight + midday daily.
 #
-# GMP is deliberately NOT included here — the `test-amplifier-routes.yml`
-# workflow still supports `workflow_dispatch` with `protocol: gmp` for
-# manual / ad-hoc runs, but it isn't fired on schedule.
+# GMP is deliberately NOT included here — same shape as the mainnet cron, so
+# the two networks stay symmetric. The `test-amplifier-routes.yml` workflow
+# still supports `workflow_dispatch` with `protocol: gmp` for manual / ad-hoc
+# runs, but it isn't fired on schedule.
 
 on:
   schedule:
