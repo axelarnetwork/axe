@@ -152,22 +152,21 @@ EOF
 #     within each group so same-wallet nonce races don't happen.
 case "$NETWORK/$PROTOCOL" in
     testnet/its)
-        # Two bidirectional pairs. Sui is omitted (axe Sui-source ITS needs a
-        # pre-registered AXE token, Sui-as-ITS-destination is unwired in the
-        # dispatcher — see mod.rs:323-326).
+        # Three bidirectional pairs. Sui is still omitted (axe Sui-source ITS
+        # needs a pre-registered AXE token, Sui-as-ITS-destination is unwired
+        # in the dispatcher — see mod.rs:323-326).
         #
-        # TODO(hedera): re-add Hedera↔Solana ITS pair once the Hedera ITS
-        # factory's deployInterchainToken path is fixed upstream on testnet
-        # (currently every call reverts with TokenManagerDeploymentFailed
-        # before reaching the HTS create). axe already has the wiring —
-        # chains.hedera.contracts.AXE.tokenId lookup + no-derivation on
-        # Hedera source + registeredTokenAddress for the Hedera fork.
+        # Hedera ↔ Solana pair uses the Hedera-rooted AXE family registered
+        # via `deploy-remote-interchain-token` from Hedera to Solana testnet
+        # on 2026-06-04 (tokenId 0xd6311e67bdb5fb90d722d71fde9e7c33aa703a0b6c66518cebff80f63bc64a4a).
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
+  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
 ]
 EOF
 )
