@@ -841,6 +841,49 @@ pub(crate) fn read_pre_registered_axe_token(
     }
 }
 
+/// Reuse the chains-config pre-registered AXE token *only* when the configured
+/// wallet actually holds enough of it to run. Returns `Some((tokenId, addr))`
+/// when reuse is viable, or `None` (so the caller falls through to its local
+/// cache / fresh-deploy path) when there's no config entry or the holder's
+/// balance is below `needed`.
+///
+/// This keeps the two intended cases working: a workflow / CI run whose wallet
+/// already holds the AXE supply reuses the deployed token (no source + remote
+/// deploy), while a different wallet with no AXE balance deploys fresh exactly
+/// as the manual path does today.
+pub(crate) async fn reusable_config_axe<P: Provider>(
+    config: &std::path::Path,
+    chain_axelar_id: &str,
+    its_proxy: Address,
+    provider: &P,
+    holder: Address,
+    needed: alloy::primitives::U256,
+) -> Result<Option<(alloy::primitives::FixedBytes<32>, Address)>> {
+    let Some(tid) = read_pre_registered_axe_token(config, chain_axelar_id)? else {
+        return Ok(None);
+    };
+    let its = crate::evm::InterchainTokenService::new(its_proxy, provider);
+    let addr = its
+        .interchainTokenAddress(tid)
+        .call()
+        .await
+        .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?;
+    let balance = crate::evm::ERC20::new(addr, provider)
+        .balanceOf(holder)
+        .call()
+        .await
+        .unwrap_or_default();
+    if balance >= needed {
+        Ok(Some((tid, addr)))
+    } else {
+        ui::warn(&format!(
+            "chains-config AXE balance too low for {holder} ({balance} < {needed}); \
+             configured wallet isn't the workflow deployer — deploying fresh..."
+        ));
+        Ok(None)
+    }
+}
+
 /// Print a hint suggesting the caller add the freshly-deployed AXE tokenId to
 /// chains-config so subsequent CI runs skip the deploy. Called from the
 /// per-chain deploy helpers right after the source-side deploy succeeds.

@@ -375,9 +375,32 @@ async fn resolve_or_deploy_token(
         .connect_http(evm_src.rpc_url.parse()?);
     let its_service = InterchainTokenService::new(evm_targets.its_proxy_addr, &write_provider);
 
-    // Resolution order: --token-id → chains-config `contracts.AXE.tokenId` →
-    // local file cache → fresh deploy. Pre-registration via chains-config lets
-    // CI skip the source + remote deploy (see helpers::read_pre_registered_axe_token).
+    // Resolution order: --token-id → chains-config `contracts.AXE.tokenId`
+    // (only when the configured wallet holds enough AXE *and* the token is
+    // registered on Stellar) → local file cache → fresh deploy. Pre-registration
+    // via chains-config lets CI skip the source + remote deploy; a wallet with
+    // no AXE balance falls through to a fresh deploy (see reusable_config_axe).
+    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let config_axe = match super::helpers::reusable_config_axe(
+        &args.config,
+        src,
+        evm_targets.its_proxy_addr,
+        &write_provider,
+        evm_src.deployer_address,
+        needed,
+    )
+    .await?
+    {
+        Some((tid, addr)) => match registered_stellar_token_address(stellar, tid).await? {
+            Some(stellar_token_addr) => Some((tid, addr, stellar_token_addr)),
+            None => {
+                ui::warn("chains-config AXE not registered on Stellar, deploying fresh...");
+                None
+            }
+        },
+        None => None,
+    };
+
     let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
@@ -390,13 +413,7 @@ async fn resolve_or_deploy_token(
         ui::address("token address", &format!("{addr}"));
         ui::address("Stellar token", &stellar_token_addr);
         (token_id, addr, None::<String>)
-    } else if let Some(tid) = super::helpers::read_pre_registered_axe_token(&args.config, src)? {
-        let addr = its_service
-            .interchainTokenAddress(tid)
-            .call()
-            .await
-            .map_err(|e| eyre!("failed to look up token address for {tid}: {e}"))?;
-        let stellar_token_addr = require_registered_stellar_token(stellar, tid).await?;
+    } else if let Some((tid, addr, stellar_token_addr)) = config_axe {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));
         ui::address("Stellar token", &stellar_token_addr);

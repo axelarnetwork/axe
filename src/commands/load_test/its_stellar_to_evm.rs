@@ -610,18 +610,30 @@ async fn setup_its_token(
 
     // chains-config pre-registered AXE: per-source override that lets CI skip
     // the full deploy + hub-routed remote-deploy and collapse to a single
-    // interchainTransfer. Salt is unknown when we adopt a pre-registered
-    // token, so the second return value is the zero salt — call sites that
-    // need the salt for re-deploy paths fall through to the local cache
-    // branch instead.
+    // interchainTransfer — but only when the configured wallet actually holds
+    // enough AXE. A wallet with no balance falls through to the local cache /
+    // fresh-deploy path, exactly like the manual deploy case. Salt is unknown
+    // when we adopt a pre-registered token, so the second return value is the
+    // zero salt.
     if let Some(tid) = super::helpers::read_pre_registered_axe_token(config, src)?
         && let Some(token_addr) = client
             .its_query_token_address(main_wallet, its_contract, tid.0)
             .await?
     {
-        ui::kv("token ID (chains-config)", &format!("{tid}"));
-        ui::address("token contract (Stellar)", &token_addr);
-        return Ok((tid.0, [0u8; 32], token_addr));
+        let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64) as u128;
+        let bal = client
+            .token_balance(main_wallet, &token_addr, &main_wallet.public_key_bytes)
+            .await
+            .unwrap_or(0);
+        if bal >= needed {
+            ui::kv("token ID (chains-config)", &format!("{tid}"));
+            ui::address("token contract (Stellar)", &token_addr);
+            return Ok((tid.0, [0u8; 32], token_addr));
+        }
+        ui::warn(&format!(
+            "chains-config AXE balance too low ({bal} < {needed}); configured wallet \
+             isn't the workflow deployer — deploying fresh..."
+        ));
     }
 
     let cache = read_its_cache(src, dest);

@@ -403,12 +403,17 @@ async fn resolve_its_token<P: Provider>(
         return Ok((token_id, addr, None));
     }
 
-    if let Some(tid) = super::helpers::read_pre_registered_axe_token(&args.config, src)? {
-        let addr = its_service
-            .interchainTokenAddress(tid)
-            .call()
-            .await
-            .map_err(|e| eyre!("failed to look up token address for {tid}: {e}"))?;
+    let needed = amount_per_key * U256::from(sizing.num_keys);
+    if let Some((tid, addr)) = super::helpers::reusable_config_axe(
+        &args.config,
+        src,
+        its_addrs.its_proxy_addr,
+        write_provider,
+        deployer_address,
+        needed,
+    )
+    .await?
+    {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));
         return Ok((tid, addr, None));
