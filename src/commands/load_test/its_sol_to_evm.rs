@@ -689,6 +689,29 @@ async fn run_burst_pipeline(
 // Token setup
 // ---------------------------------------------------------------------------
 
+/// SPL (Token-2022) balance held by `owner`'s associated token account for
+/// `mint`. Returns 0 when the ATA is absent or unreadable. The amount lives at
+/// bytes 64..72 of the SPL token-account layout.
+fn deployer_spl_balance(
+    rpc_client: &solana_client::rpc_client::RpcClient,
+    owner: &solana_sdk::pubkey::Pubkey,
+    mint: &solana_sdk::pubkey::Pubkey,
+) -> u64 {
+    let token_program =
+        solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    let ata = solana_sdk::pubkey::Pubkey::find_program_address(
+        &[owner.as_ref(), token_program.as_ref(), mint.as_ref()],
+        &solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"),
+    )
+    .0;
+    rpc_client
+        .get_account_data(&ata)
+        .ok()
+        .filter(|data| data.len() >= 72)
+        .map(|data| u64::from_le_bytes(data[64..72].try_into().unwrap_or([0; 8])))
+        .unwrap_or(0)
+}
+
 /// Deploy or reuse ITS token. Returns (token_id, salt, mint).
 /// When deploying fresh, waits for the remote deploy to propagate through the
 /// ITS hub and execute on the EVM destination before returning.
@@ -720,6 +743,28 @@ async fn setup_its_token(
         return Ok((token_id, [0u8; 32], mint));
     }
 
+    // chains-config pre-registered AXE: reuse the canonical token when the
+    // configured wallet actually holds enough of it on Solana; otherwise fall
+    // through to the cache / fresh-deploy path (matches the EVM/Stellar
+    // resolvers). Salt is unknown for an adopted token, so return the zero salt.
+    if let Some(tid) = super::helpers::read_pre_registered_axe_token(config, src)? {
+        let (its_root, _) = solana::find_its_root_pda();
+        let (mint, _) = solana::find_interchain_token_pda(&its_root, &tid.0);
+        if rpc_client.get_account_data(&mint).is_ok() {
+            let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64);
+            let balance = deployer_spl_balance(rpc_client, &keypair.pubkey(), &mint);
+            if balance >= needed {
+                ui::kv("token ID (chains-config)", &format!("{tid}"));
+                ui::address("mint", &mint.to_string());
+                return Ok((tid.0, [0u8; 32], mint));
+            }
+            ui::warn(&format!(
+                "chains-config AXE balance too low ({balance} < {needed}); configured wallet \
+                 isn't the workflow deployer — deploying fresh..."
+            ));
+        }
+    }
+
     // Check cache
     let cache = read_its_cache(src, dest);
     if let Some(tid_hex) = cache.get("tokenId").and_then(|v| v.as_str()) {
@@ -742,26 +787,7 @@ async fn setup_its_token(
             // Verify token still exists on-chain and deployer has enough supply
             if rpc_client.get_account_data(&mint).is_ok() {
                 let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64);
-                let token_program = solana_sdk::pubkey::Pubkey::from_str_const(
-                    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
-                );
-                let deployer_ata = solana_sdk::pubkey::Pubkey::find_program_address(
-                    &[
-                        keypair.pubkey().as_ref(),
-                        token_program.as_ref(),
-                        mint.as_ref(),
-                    ],
-                    &solana_sdk::pubkey::Pubkey::from_str_const(
-                        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-                    ),
-                )
-                .0;
-                let deployer_balance = rpc_client
-                    .get_account_data(&deployer_ata)
-                    .ok()
-                    .filter(|data| data.len() >= 72)
-                    .map(|data| u64::from_le_bytes(data[64..72].try_into().unwrap_or([0; 8])))
-                    .unwrap_or(0);
+                let deployer_balance = deployer_spl_balance(rpc_client, &keypair.pubkey(), &mint);
 
                 if deployer_balance >= needed {
                     ui::info(&format!("reusing cached ITS token: {mint}"));
