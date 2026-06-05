@@ -114,11 +114,14 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             threshold_units: 5.0,
         },
         ChainTarget {
-            // Monad gas token is MON. ITS interchainTransfer is sub-cent gas;
-            // 0.05 MON is generous headroom for many runs.
+            // Monad gas token is MON. Source-side EVM gas is sub-cent, but
+            // Monad → Hedera cross-chain gas is *~5 MON per tx* (Hedera HTS
+            // precompile pricing → Axelar API estimate). axe pays 2× that for
+            // the source→hub→dest legs, so each Monad-source ITS run burns
+            // ~10 MON. 50 MON keeps a ~5-run buffer above the cron's pace.
             chain_key: "monad".to_string(),
             kind: ChainKind::Evm,
-            threshold_units: 0.05,
+            threshold_units: 50.0,
         },
         ChainTarget {
             chain_key: "xrpl".to_string(),
