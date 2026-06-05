@@ -191,12 +191,13 @@ EOF
         ;;
     mainnet/its)
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
-        # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
-        # canonical XRP; HL↔Stellar and Hedera↔Solana use the per-chain
-        # mainnet AXE v2 entries (tokenId 0xbe1d…). Hedera v2 AXE is the
-        # HTS-fork InterchainToken seeded by an xrpl-evm→Hedera ITS
-        # interchainTransfer (mint path bypassed — the destination ITS mints
-        # on receipt, no local `mint()` rights needed).
+        # .github/workflows/test-amplifier-routes.yml. Five pairs picked so
+        # each of the 8 chains is exercised as both source and destination
+        # at least once with no redundancy: XRPL↔XRPL EVM, HL↔Stellar,
+        # Hedera↔Solana, Sui↔Solana, Monad↔Hedera. Hedera-EVM-side AXE is
+        # HTS-fork, Sui-side AXE was auto-deployed by ITS during
+        # receive_deploy_interchain_token (TreasuryCap retained by ITS);
+        # supply on Hedera/Monad/Sui seeded by xrpl-evm interchainTransfers.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
@@ -204,7 +205,11 @@ EOF
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
   {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
   {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
-  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"},
+  {"name":"Sui -> Solana","src":"Sui","dst":"Solana"},
+  {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
+  {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera"},
+  {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"}
 ]
 EOF
 )

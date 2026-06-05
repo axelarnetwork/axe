@@ -114,6 +114,13 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             threshold_units: 5.0,
         },
         ChainTarget {
+            // Monad gas token is MON. ITS interchainTransfer is sub-cent gas;
+            // 0.05 MON is generous headroom for many runs.
+            chain_key: "monad".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: 0.05,
+        },
+        ChainTarget {
             chain_key: "xrpl".to_string(),
             kind: ChainKind::Xrpl,
             threshold_units: 3.0,
