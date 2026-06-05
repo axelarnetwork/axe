@@ -183,9 +183,9 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     };
     // Keep num_txs as alias for burst compat (equals num_keys in burst mode)
     let num_txs = num_keys;
-    // Amount must survive ITS hub decimal truncation between EVM (18 decimals) and Solana.
-    // Use 1 full token (10^18) to ensure the truncated amount is non-zero.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128); // 10^18 = 1 token
+    // 0.01 token per tx (10^16 at 18 decimals). Still well above ITS hub
+    // decimal truncation between EVM-18 and Solana-6 (truncated to 10_000).
+    let amount_per_tx = U256::from(10_000_000_000_000_000u128);
     // Distribute 100x per key so cached tokens last across many runs.
     let amount_per_key = amount_per_tx * U256::from(100);
     // Mint a large fixed supply so the token can be reused across runs without redeploying.

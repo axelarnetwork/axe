@@ -241,9 +241,10 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
     let num_txs = num_keys;
-    // 1 token (10^18 with 18 decimals) per tx. Cross-chain truncation between
-    // mismatched decimals is harmless here because both sides are EVM-18.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128);
+    // 0.01 token (10^16 with 18 decimals) per tx — keeps daily AXE burn low so
+    // the cron's source-side supply lasts. Both sides are EVM-18, so no
+    // truncation across the bridge.
+    let amount_per_tx = U256::from(10_000_000_000_000_000u128);
     let amount_per_key = amount_per_tx * U256::from(100);
     let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 

@@ -123,8 +123,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     // canonical tokens (6 decimals) and freshly deployed ones (9 decimals)
     // both transfer the right amounts.
     let decimals = mint_decimals(&rpc_client, &mint);
-    let amount_per_tx = WHOLE_TOKENS_PER_TX * 10u64.pow(u32::from(decimals));
-    let amount_per_key = WHOLE_TOKENS_PER_KEY * 10u64.pow(u32::from(decimals));
+    // /100 → 0.01 whole tokens per tx so the cron's source-side supply lasts.
+    let amount_per_tx = WHOLE_TOKENS_PER_TX * 10u64.pow(u32::from(decimals)) / 100;
+    let amount_per_key = WHOLE_TOKENS_PER_KEY * 10u64.pow(u32::from(decimals)) / 100;
 
     // --- Derive and fund keypairs ---
     let keypairs = prepare_keypairs(&args.source_rpc, sizing.num_keys, &main_keypair)?;

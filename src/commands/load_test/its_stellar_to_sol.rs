@@ -286,14 +286,14 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
 /// static per-key amount).
 fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64, decimals: u32) -> u128 {
     if sizing.burst_mode {
-        scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals)
+        scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals) / 100
     } else {
         let txs_per_key = sizing
             .sustained_params
             .expect("burst_mode is false")
             .1
             .div_ceil(key_cycle) as u128;
-        scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals)
+        (scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals) / 100)
             .saturating_mul(txs_per_key)
             .saturating_mul(2)
     }
@@ -380,7 +380,8 @@ async fn prepare_token_and_wallets(
     )
     .await?;
 
-    let amount_per_tx = scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals);
+    // /100 → 0.01 whole tokens per tx so the cron's source-side supply lasts.
+    let amount_per_tx = scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals) / 100;
     Ok((token_id, wallets, amount_per_tx))
 }
 

@@ -341,7 +341,9 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
     let num_txs = num_keys;
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128);
+    // 0.01 token per tx (10^16 at 18 decimals); ITS hub truncates to 100_000
+    // sub-units on Stellar's 7-decimal AXE, still safely non-zero.
+    let amount_per_tx = U256::from(10_000_000_000_000_000u128);
     let amount_per_key = amount_per_tx * U256::from(100);
     let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 
