@@ -106,6 +106,14 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             threshold_units: 2.0,
         },
         ChainTarget {
+            // Hedera native gas token is HBAR. A Hedera ITS interchainTransfer
+            // costs ~1–2 HBAR (no HTS-CREATE — WHBAR fee is reserved for the
+            // initial token deployment); 5 HBAR keeps a few-route buffer.
+            chain_key: "hedera".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: 5.0,
+        },
+        ChainTarget {
             chain_key: "xrpl".to_string(),
             kind: ChainKind::Xrpl,
             threshold_units: 3.0,

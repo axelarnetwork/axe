@@ -192,20 +192,19 @@ EOF
     mainnet/its)
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
         # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
-        # canonical XRP; HL↔Stellar uses the per-chain mainnet AXE entries.
-        #
-        # Hedera ↔ Solana ITS is deliberately NOT in the fleet: AXE was
-        # registered with `--initialSupply 0` on the Hedera HTS fork (the
-        # only initialSupply the deploy accepts), so the source wallet has
-        # zero AXE to interchain-transfer. Re-add only after a mint path
-        # for HTS-fork InterchainTokens is wired into axe + a supply has
-        # been minted to the workflow wallet.
+        # canonical XRP; HL↔Stellar and Hedera↔Solana use the per-chain
+        # mainnet AXE v2 entries (tokenId 0xbe1d…). Hedera v2 AXE is the
+        # HTS-fork InterchainToken seeded by an xrpl-evm→Hedera ITS
+        # interchainTransfer (mint path bypassed — the destination ITS mints
+        # on receipt, no local `mint()` rights needed).
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
+  {"name":"Hedera -> Solana","src":"Hedera","dst":"Solana"},
+  {"name":"Solana -> Hedera","src":"Solana","dst":"Hedera"}
 ]
 EOF
 )
