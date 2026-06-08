@@ -241,9 +241,10 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
         (tps * args.key_cycle as usize, tps as u64 * dur)
     };
     let num_txs = num_keys;
-    // 1 token (10^18 with 18 decimals) per tx. Cross-chain truncation between
-    // mismatched decimals is harmless here because both sides are EVM-18.
-    let amount_per_tx = U256::from(1_000_000_000_000_000_000u128);
+    // 0.01 token (10^16 with 18 decimals) per tx — keeps daily AXE burn low so
+    // the cron's source-side supply lasts. Both sides are EVM-18, so no
+    // truncation across the bridge.
+    let amount_per_tx = U256::from(10_000_000_000_000_000u128);
     let amount_per_key = amount_per_tx * U256::from(100);
     let total_supply = U256::from(1_000_000) * U256::from(1_000_000_000_000_000_000u128);
 
@@ -277,10 +278,23 @@ async fn resolve_or_deploy_token(
 
     let its_service = InterchainTokenService::new(its.its_proxy_addr, &write_provider);
 
-    // Resolution order: --token-id → chains-config `contracts.AXE.tokenId` →
-    // local file cache → fresh deploy. The chains-config layer lets CI runs
-    // skip the source + remote deploy and collapse to a single
-    // interchainTransfer (see helpers::read_pre_registered_axe_token).
+    // Resolution order: --token-id → chains-config `contracts.AXE.tokenId`
+    // (only if the configured wallet actually holds enough of it) → local file
+    // cache → fresh deploy. The chains-config layer lets CI runs (whose wallet
+    // already holds the AXE supply) skip the source + remote deploy and
+    // collapse to a single interchainTransfer; a different wallet with no AXE
+    // balance falls through to a fresh deploy (see reusable_config_axe).
+    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let config_axe = super::helpers::reusable_config_axe(
+        &args.config,
+        src,
+        its.its_proxy_addr,
+        &write_provider,
+        evm_source.deployer_address,
+        needed,
+    )
+    .await?;
+
     let (token_id, token_addr, deploy_message_id) = if let Some(ref tid) = args.token_id {
         let token_id: FixedBytes<32> = tid.parse().map_err(|e| eyre!("invalid --token-id: {e}"))?;
         let addr = its_service
@@ -291,12 +305,7 @@ async fn resolve_or_deploy_token(
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
         (token_id, addr, None)
-    } else if let Some(tid) = super::helpers::read_pre_registered_axe_token(&args.config, src)? {
-        let addr = its_service
-            .interchainTokenAddress(tid)
-            .call()
-            .await
-            .map_err(|e| eyre!("failed to look up token address for {tid}: {e}"))?;
+    } else if let Some((tid, addr)) = config_axe {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));
         (tid, addr, None)

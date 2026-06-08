@@ -106,6 +106,24 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             threshold_units: 2.0,
         },
         ChainTarget {
+            // Hedera native gas token is HBAR. A Hedera ITS interchainTransfer
+            // costs ~1–2 HBAR (no HTS-CREATE — WHBAR fee is reserved for the
+            // initial token deployment); 5 HBAR keeps a few-route buffer.
+            chain_key: "hedera".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: 5.0,
+        },
+        ChainTarget {
+            // Monad gas token is MON. Source-side EVM gas is sub-cent, but
+            // Monad → Hedera cross-chain gas is *~5 MON per tx* (Hedera HTS
+            // precompile pricing → Axelar API estimate). axe pays 2× that for
+            // the source→hub→dest legs, so each Monad-source ITS run burns
+            // ~10 MON. 50 MON keeps a ~5-run buffer above the cron's pace.
+            chain_key: "monad".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: 50.0,
+        },
+        ChainTarget {
             chain_key: "xrpl".to_string(),
             kind: ChainKind::Xrpl,
             threshold_units: 3.0,
@@ -241,7 +259,13 @@ async fn probe_evm(chain: &ChainConfig) -> Result<(String, f64)> {
         .wrap_err("EVM_PRIVATE_KEY is not a valid hex private key")?;
     let addr: Address = signer.address();
     let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let wei = provider.get_balance(addr).await?;
+    // Wrap with retry: any transient RPC error means the preflight fails
+    // and the whole cron run is skipped, even though wallets are funded.
+    // Geometric backoff over 3 attempts (~3.5s worst case).
+    let wei = crate::retry::retry_all("probe_evm.get_balance", || async {
+        provider.get_balance(addr).await
+    })
+    .await?;
     Ok((format!("{addr:#x}"), wei_to_eth(wei)))
 }
 
@@ -256,9 +280,11 @@ async fn probe_solana(chain: &ChainConfig) -> Result<(String, f64)> {
     let keypair = load_keypair(key_path.as_deref())?;
     let pubkey = keypair.pubkey();
     let client = rpc_client(rpc_url);
-    let lamports = client
-        .get_balance(&pubkey)
-        .map_err(|e| eyre!("get_balance({pubkey}): {e}"))?;
+    let lamports = crate::retry::retry_all("probe_solana.get_balance", || async {
+        client.get_balance(&pubkey)
+    })
+    .await
+    .map_err(|e| eyre!("get_balance({pubkey}): {e}"))?;
     Ok((pubkey.to_string(), lamports as f64 / 1_000_000_000.0))
 }
 
@@ -270,7 +296,13 @@ async fn probe_sui(chain: &ChainConfig) -> Result<(String, f64)> {
     let key = std::env::var("SUI_PRIVATE_KEY").wrap_err("SUI_PRIVATE_KEY env not set")?;
     let wallet = SuiWallet::from_secret_str(&key)?;
     let client = SuiClient::new(rpc_url);
-    let mist = client.get_balance(&wallet.address).await?;
+    // SuiClient already iterates endpoint fallbacks; the time-axis retry
+    // layered on top handles the "429 from every endpoint" case we hit
+    // when the cron runs preflight concurrently across mainnet+testnet.
+    let mist = crate::retry::retry_all("probe_sui.get_balance", || async {
+        client.get_balance(&wallet.address).await
+    })
+    .await?;
     Ok((wallet.address_hex(), mist as f64 / 1_000_000_000.0))
 }
 
@@ -284,10 +316,11 @@ async fn probe_stellar(chain: &ChainConfig, network: Network) -> Result<(String,
     let key = std::env::var("STELLAR_PRIVATE_KEY").wrap_err("STELLAR_PRIVATE_KEY env not set")?;
     let wallet = StellarWallet::from_secret_str(&key)?;
     let address = wallet.address();
-    let stroops = client
-        .native_balance_stroops(&address)
-        .await?
-        .ok_or_else(|| eyre!("account {address} not found on Stellar"))?;
+    let stroops = crate::retry::retry_all("probe_stellar.native_balance_stroops", || async {
+        client.native_balance_stroops(&address).await
+    })
+    .await?
+    .ok_or_else(|| eyre!("account {address} not found on Stellar"))?;
     // 1 XLM = 10^7 stroops
     Ok((address, stroops as f64 / 10_000_000.0))
 }
@@ -301,10 +334,11 @@ async fn probe_xrpl(chain: &ChainConfig) -> Result<(String, f64)> {
     let wallet = XrplWallet::from_secret_str(&key)?;
     let address = wallet.address();
     let client = XrplClient::new(rpc_url);
-    let info = client
-        .account_info(&address)
-        .await?
-        .ok_or_else(|| eyre!("account {address} not activated on XRPL"))?;
+    let info = crate::retry::retry_all("probe_xrpl.account_info", || async {
+        client.account_info(&address).await
+    })
+    .await?
+    .ok_or_else(|| eyre!("account {address} not activated on XRPL"))?;
     // 1 XRP = 10^6 drops
     Ok((address, info.balance_drops as f64 / 1_000_000.0))
 }

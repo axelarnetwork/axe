@@ -6,6 +6,7 @@ mod error;
 mod evm;
 mod hyperliquid;
 mod preflight;
+mod retry;
 mod solana;
 mod state;
 mod stellar;

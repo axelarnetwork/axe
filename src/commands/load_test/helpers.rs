@@ -359,15 +359,32 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     let mut deploy_code = bytecode;
     deploy_code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
 
-    let tx = TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code));
-    let pending = provider.send_transaction(tx).await?;
+    // Wrap `send_transaction` with retry on transient transport / 5xx /
+    // 429 errors — observed flakes on HL and Hedera mainnet RPCs where
+    // the same submission succeeds on retry. Real reverts (insufficient
+    // funds, custom errors) skip the retry per `is_transient_default`.
+    let pending = crate::retry::retry_async(
+        "deploy_sender_receiver.send_transaction",
+        crate::retry::DEFAULT_ATTEMPTS,
+        crate::retry::is_transient_default,
+        || {
+            let tx =
+                TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code.clone()));
+            async { provider.send_transaction(tx).await }
+        },
+    )
+    .await?;
     let tx_hash = *pending.tx_hash();
     ui::tx_hash("deploy tx", &format!("{tx_hash}"));
     ui::info("waiting for confirmation...");
 
-    let receipt = tokio::time::timeout(std::time::Duration::from_secs(120), pending.get_receipt())
+    // 240 s tolerates HL's ~60 s big-blocks cadence + Hedera HTS-create
+    // latency. Fast EVMs (Solana, Stellar destinations) still return as
+    // soon as the receipt is available; this is an upper bound, not a
+    // floor.
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(240), pending.get_receipt())
         .await
-        .map_err(|_| eyre::eyre!("deploy tx timed out after 120s"))??;
+        .map_err(|_| eyre::eyre!("deploy tx timed out after 240s"))??;
 
     let addr = receipt
         .contract_address
@@ -838,6 +855,92 @@ pub(crate) fn read_pre_registered_axe_token(
             Ok(Some(alloy::primitives::FixedBytes::from(out)))
         }
         None => Ok(None),
+    }
+}
+
+/// Companion to `read_pre_registered_axe_token`: returns the AXE
+/// `tokenAddress` (the chain-side ERC20 / HTS address) recorded under
+/// `chains.<chain>.contracts.AXE.tokenAddress`, if present.
+///
+/// **Why this exists alongside the on-chain `interchainTokenAddress(tid)`
+/// view**: on Hedera mainnet/testnet the standard view reverts because
+/// Hedera's HTS-fork of ITS doesn't expose the EVM-style getter — the
+/// underlying token is an HTS-native asset whose EVM address is
+/// determined at HTS-create time and surfaced only in the deploy
+/// receipt, not retrievable later via a generic ITS function. For those
+/// chains we record the deploy-receipt address directly in chains-config
+/// and read it from there. Returns `None` when no override is set,
+/// letting the caller fall back to the on-chain view (the right call
+/// for non-Hedera EVMs).
+pub(crate) fn read_pre_registered_axe_token_address(
+    config: &std::path::Path,
+    chain_axelar_id: &str,
+) -> Result<Option<Address>> {
+    let content = std::fs::read_to_string(config)
+        .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    let addr_str = root
+        .pointer(&format!(
+            "/chains/{chain_axelar_id}/contracts/AXE/tokenAddress"
+        ))
+        .and_then(|v| v.as_str());
+    match addr_str {
+        Some(s) => Ok(Some(s.parse().map_err(|e| {
+            eyre::eyre!("invalid AXE.tokenAddress for chain {chain_axelar_id}: {e}")
+        })?)),
+        None => Ok(None),
+    }
+}
+
+/// Reuse the chains-config pre-registered AXE token *only* when the configured
+/// wallet actually holds enough of it to run. Returns `Some((tokenId, addr))`
+/// when reuse is viable, or `None` (so the caller falls through to its local
+/// cache / fresh-deploy path) when there's no config entry or the holder's
+/// balance is below `needed`.
+///
+/// This keeps the two intended cases working: a workflow / CI run whose wallet
+/// already holds the AXE supply reuses the deployed token (no source + remote
+/// deploy), while a different wallet with no AXE balance deploys fresh exactly
+/// as the manual path does today.
+pub(crate) async fn reusable_config_axe<P: Provider>(
+    config: &std::path::Path,
+    chain_axelar_id: &str,
+    its_proxy: Address,
+    provider: &P,
+    holder: Address,
+    needed: alloy::primitives::U256,
+) -> Result<Option<(alloy::primitives::FixedBytes<32>, Address)>> {
+    let Some(tid) = read_pre_registered_axe_token(config, chain_axelar_id)? else {
+        return Ok(None);
+    };
+    // Prefer the config-supplied tokenAddress when set (required for
+    // Hedera HTS — see `read_pre_registered_axe_token_address` docs).
+    // Fall back to the on-chain `interchainTokenAddress(tid)` view for
+    // standard EVMs that don't pre-record the address in chains-config.
+    let addr = if let Some(config_addr) =
+        read_pre_registered_axe_token_address(config, chain_axelar_id)?
+    {
+        config_addr
+    } else {
+        let its = crate::evm::InterchainTokenService::new(its_proxy, provider);
+        its.interchainTokenAddress(tid)
+            .call()
+            .await
+            .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?
+    };
+    let balance = crate::evm::ERC20::new(addr, provider)
+        .balanceOf(holder)
+        .call()
+        .await
+        .unwrap_or_default();
+    if balance >= needed {
+        Ok(Some((tid, addr)))
+    } else {
+        ui::warn(&format!(
+            "chains-config AXE balance too low for {holder} ({balance} < {needed}); \
+             configured wallet isn't the workflow deployer — deploying fresh..."
+        ));
+        Ok(None)
     }
 }
 

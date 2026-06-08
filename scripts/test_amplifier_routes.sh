@@ -77,7 +77,7 @@ CHAIN_MAP=$(cat <<'EOF'
   "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
   "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
   "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
-  "Hedera":      {"testnet": "hedera"},
+  "Hedera":      {"mainnet": "hedera",   "testnet": "hedera"},
   "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
   "Monad":       {"mainnet": "monad",      "testnet": "monad-3",          "stagenet": "monad"},
   "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
@@ -156,12 +156,12 @@ case "$NETWORK/$PROTOCOL" in
         # pre-registered AXE token, Sui-as-ITS-destination is unwired in the
         # dispatcher — see mod.rs:323-326).
         #
-        # TODO(hedera): re-add Hedera↔Solana ITS pair once the Hedera ITS
-        # factory's deployInterchainToken path is fixed upstream on testnet
-        # (currently every call reverts with TokenManagerDeploymentFailed
-        # before reaching the HTS create). axe already has the wiring —
-        # chains.hedera.contracts.AXE.tokenId lookup + no-derivation on
-        # Hedera source + registeredTokenAddress for the Hedera fork.
+        # Hedera ↔ Solana ITS is deliberately NOT in the fleet: AXE was
+        # registered with `--initialSupply 0` on the Hedera HTS fork (the
+        # only initialSupply the deploy accepts), so the source wallet has
+        # zero AXE to interchain-transfer. Re-add only after a mint path
+        # for HTS-fork InterchainTokens is wired into axe + a supply has
+        # been minted to the workflow wallet.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
@@ -191,14 +191,23 @@ EOF
         ;;
     mainnet/its)
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
-        # .github/workflows/test-amplifier-routes.yml. XRPL↔XRPL EVM uses
-        # canonical XRP; HL↔Stellar uses the per-chain mainnet AXE entries.
+        # .github/workflows/test-amplifier-routes.yml. Four pairs picked so
+        # each of the 8 chains is exercised as both source and destination
+        # exactly once: XRPL↔XRPL EVM, HL↔Stellar, Sui↔Solana, Monad↔Hedera.
+        # Hedera-EVM-side AXE is HTS-fork; Sui-side AXE was auto-deployed
+        # by ITS during receive_deploy_interchain_token (TreasuryCap
+        # retained by ITS); supply on Hedera/Monad/Sui seeded by xrpl-evm
+        # interchainTransfers.
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"},
+  {"name":"Sui -> Solana","src":"Sui","dst":"Solana"},
+  {"name":"Solana -> Sui","src":"Solana","dst":"Sui"},
+  {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera"},
+  {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"}
 ]
 EOF
 )

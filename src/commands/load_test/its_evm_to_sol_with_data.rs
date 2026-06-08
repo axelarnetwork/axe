@@ -373,8 +373,9 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
     }
 }
 
-/// Resolve the ITS token: prefer `--token-id`, then a cached entry with
-/// sufficient supply, otherwise deploy a fresh interchain token.
+/// Resolve the ITS token: prefer `--token-id`, then a pre-registered AXE from
+/// chains-config (`contracts.AXE.tokenId` on the source chain), then a cached
+/// entry with sufficient supply, otherwise deploy a fresh interchain token.
 async fn resolve_its_token<P: Provider>(
     args: &LoadTestArgs,
     write_provider: &P,
@@ -400,6 +401,22 @@ async fn resolve_its_token<P: Provider>(
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
         return Ok((token_id, addr, None));
+    }
+
+    let needed = amount_per_key * U256::from(sizing.num_keys);
+    if let Some((tid, addr)) = super::helpers::reusable_config_axe(
+        &args.config,
+        src,
+        its_addrs.its_proxy_addr,
+        write_provider,
+        deployer_address,
+        needed,
+    )
+    .await?
+    {
+        ui::kv("token ID (chains-config)", &format!("{tid}"));
+        ui::address("token address", &format!("{addr}"));
+        return Ok((tid, addr, None));
     }
 
     let cache = read_its_cache(src, dest);

@@ -29,17 +29,26 @@ use crate::ui;
 /// human-facing name is consistent across runs.
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";
-/// 7 decimals matches Stellar's native XLM convention. Token amounts on the
+/// 7 decimals matches Stellar's native XLM convention. Used only for the
+/// FRESH-deploy path; the reuse path adopts the existing token's decimals
+/// (queried via `StellarClient::token_decimals`). Token amounts on the
 /// destination chain are scaled by ITS during routing.
 const TOKEN_DECIMALS: u32 = 7;
 
-/// Per-tx transfer amount (token units). With 7 decimals, this is 1 AXE.
-const AMOUNT_PER_TX: u64 = 10_000_000;
+/// Whole tokens transferred per tx / seeded per key. Scaled by the resolved
+/// token's actual on-chain decimals at runtime — the reused canonical AXE is
+/// 18 decimals (100 AXE = 1e20, which overflows u64), so amounts are u128.
+const WHOLE_TOKENS_PER_TX: u128 = 1;
 /// Distribute 100x per key so cached tokens last across many runs.
-const AMOUNT_PER_KEY: u64 = AMOUNT_PER_TX * 100;
-/// Initial supply minted to the deployer at deploy time. Plenty for many
-/// runs without redeploying.
+const WHOLE_TOKENS_PER_KEY: u128 = WHOLE_TOKENS_PER_TX * 100;
+/// Initial supply minted to the deployer at deploy time (fresh-deploy path,
+/// TOKEN_DECIMALS = 7). Plenty for many runs without redeploying.
 const INITIAL_SUPPLY: u128 = 1_000_000 * 10_000_000;
+
+/// Scale a whole-token count to a token's on-chain decimals (`n * 10^decimals`).
+fn scale_to_decimals(whole_tokens: u128, decimals: u32) -> u128 {
+    whole_tokens * 10u128.pow(decimals)
+}
 
 /// Default cross-chain gas payment in stroops (10 XLM). Matches the GMP
 /// runner's default — overridable via `--gas-value`.
@@ -70,7 +79,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let gas_stroops = parse_gas_stroops(args.gas_value.as_deref())?;
     let sizing = compute_run_sizing(&args);
 
-    let (token_id, wallets) = prepare_token_and_wallets(
+    let (token_id, wallets, amount_per_tx) = prepare_token_and_wallets(
         &args,
         &stellar,
         &main_wallet,
@@ -87,6 +96,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
             .axelar
             .global_contract_address("AxelarnetGateway")?
             .to_string(),
+        amount_per_tx,
     };
 
     if !sizing.burst_mode {
@@ -130,6 +140,8 @@ struct ItsTransferSpec {
     token_id: [u8; 32],
     gas_stroops: u64,
     axelarnet_gw_addr: String,
+    /// Per-transfer amount, already scaled to the resolved token's decimals.
+    amount_per_tx: u128,
 }
 
 /// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
@@ -269,20 +281,22 @@ fn compute_run_sizing(args: &LoadTestArgs) -> RunSizing {
 }
 
 /// Compute the AXE amount each ephemeral wallet should hold so it can run all
-/// of its planned transfers (sustained budgets 2x the txs-per-key cap to
-/// absorb retries; burst uses the static `AMOUNT_PER_KEY`).
-fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64) -> u128 {
-    let amount = if sizing.burst_mode {
-        AMOUNT_PER_KEY
+/// of its planned transfers, scaled to the resolved token's `decimals`
+/// (sustained budgets 2x the txs-per-key cap to absorb retries; burst uses the
+/// static per-key amount).
+fn compute_amount_per_key(sizing: &RunSizing, key_cycle: u64, decimals: u32) -> u128 {
+    if sizing.burst_mode {
+        scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals) / 100
     } else {
         let txs_per_key = sizing
             .sustained_params
             .expect("burst_mode is false")
             .1
-            .div_ceil(key_cycle);
-        AMOUNT_PER_TX.saturating_mul(txs_per_key).saturating_mul(2)
-    };
-    amount as u128
+            .div_ceil(key_cycle) as u128;
+        (scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals) / 100)
+            .saturating_mul(txs_per_key)
+            .saturating_mul(2)
+    }
 }
 
 /// Derive `num_keys` ephemeral Stellar wallets from the main wallet's seed
@@ -322,11 +336,11 @@ async fn prepare_token_and_wallets(
     solana_rpc_url: &str,
     gas_stroops: u64,
     sizing: &RunSizing,
-) -> Result<([u8; 32], Vec<StellarWallet>)> {
+) -> Result<([u8; 32], Vec<StellarWallet>, u128)> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
 
-    let (token_id, _salt, token_address) = setup_its_token(
+    let (token_id, _salt, token_address, decimals) = setup_its_token(
         &stellar.client,
         main_wallet,
         &stellar.its_addr,
@@ -356,7 +370,7 @@ async fn prepare_token_and_wallets(
     )
     .await?;
 
-    let amount_per_key = compute_amount_per_key(sizing, args.key_cycle);
+    let amount_per_key = compute_amount_per_key(sizing, args.key_cycle, decimals);
     distribute_token_balances(
         &stellar.client,
         main_wallet,
@@ -366,7 +380,9 @@ async fn prepare_token_and_wallets(
     )
     .await?;
 
-    Ok((token_id, wallets))
+    // /100 → 0.01 whole tokens per tx so the cron's source-side supply lasts.
+    let amount_per_tx = scale_to_decimals(WHOLE_TOKENS_PER_TX, decimals) / 100;
+    Ok((token_id, wallets, amount_per_tx))
 }
 
 /// Drive the sustained-mode pipeline: spawn the streaming verifier, run the
@@ -419,6 +435,7 @@ async fn run_sustained_pipeline(
         solana.address_bytes.clone(),
         stellar.xlm_addr.clone(),
         transfer.gas_stroops,
+        transfer.amount_per_tx,
         tps_n,
         duration_secs,
         key_cycle,
@@ -467,6 +484,7 @@ async fn run_burst_pipeline(
     let num_keys = sizing.num_keys;
     let token_id = transfer.token_id;
     let gas_stroops = transfer.gas_stroops;
+    let amount_per_tx = transfer.amount_per_tx;
 
     let test_start = Instant::now();
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
@@ -506,7 +524,7 @@ async fn run_burst_pipeline(
                 &da,
                 &xlm,
                 gas_stroops,
-                AMOUNT_PER_TX as u128,
+                amount_per_tx,
                 &gmp_dest_addr,
             )
             .await;
@@ -608,7 +626,7 @@ async fn setup_its_token(
     config: &std::path::Path,
     solana_rpc_url: &str,
     num_txs: usize,
-) -> Result<([u8; 32], [u8; 32], String)> {
+) -> Result<([u8; 32], [u8; 32], String, u32)> {
     if let Some(tid_hex) = token_id_override {
         let tid_bytes = hex::decode(tid_hex.strip_prefix("0x").unwrap_or(tid_hex))
             .map_err(|e| eyre!("invalid --token-id: {e}"))?;
@@ -621,8 +639,43 @@ async fn setup_its_token(
             .its_query_token_address(main_wallet, its_contract, token_id)
             .await?
             .ok_or_else(|| eyre!("token id {tid_hex} not registered on Stellar ITS"))?;
+        let decimals = client
+            .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+            .await?;
         ui::kv("token ID (provided)", tid_hex);
-        return Ok((token_id, [0u8; 32], token_addr));
+        return Ok((token_id, [0u8; 32], token_addr, decimals));
+    }
+
+    // chains-config pre-registered AXE: per-source override that lets CI skip
+    // the full deploy + hub-routed remote-deploy and collapse to a single
+    // interchainTransfer — but only when the configured wallet actually holds
+    // enough AXE. A wallet with no balance falls through to the local cache /
+    // fresh-deploy path. Assumes the AXE in config already has a Solana remote
+    // registered (the fresh-deploy path below registers one); salt is unknown
+    // for an adopted token, so the second return value is the zero salt.
+    if let Some(tid) = super::helpers::read_pre_registered_axe_token(config, src)?
+        && let Some(token_addr) = client
+            .its_query_token_address(main_wallet, its_contract, tid.0)
+            .await?
+    {
+        let decimals = client
+            .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+            .await?;
+        let needed =
+            scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals).saturating_mul(num_txs as u128);
+        let bal = client
+            .token_balance(main_wallet, &token_addr, &main_wallet.public_key_bytes)
+            .await
+            .unwrap_or(0);
+        if bal >= needed {
+            ui::kv("token ID (chains-config)", &format!("{tid}"));
+            ui::address("token contract (Stellar)", &token_addr);
+            return Ok((tid.0, [0u8; 32], token_addr, decimals));
+        }
+        ui::warn(&format!(
+            "chains-config AXE balance too low ({bal} < {needed}); configured wallet \
+             isn't the workflow deployer — deploying fresh..."
+        ));
     }
 
     let cache = read_its_cache(src, dest);
@@ -644,14 +697,18 @@ async fn setup_its_token(
                 .its_query_token_address(main_wallet, its_contract, token_id)
                 .await
             {
-                let needed = AMOUNT_PER_KEY.saturating_mul(num_txs as u64) as u128;
+                let decimals = client
+                    .token_decimals(&main_wallet.public_key_bytes, &token_addr)
+                    .await?;
+                let needed = scale_to_decimals(WHOLE_TOKENS_PER_KEY, decimals)
+                    .saturating_mul(num_txs as u128);
                 let bal = client
                     .token_balance(main_wallet, &token_addr, &main_wallet.public_key_bytes)
                     .await
                     .unwrap_or(0);
                 if bal >= needed {
                     ui::info(&format!("reusing cached ITS token: {token_addr}"));
-                    return Ok((token_id, salt, token_addr));
+                    return Ok((token_id, salt, token_addr, decimals));
                 }
                 ui::warn(&format!(
                     "cached AXE token has insufficient supply ({bal} < {needed}), deploying fresh..."
@@ -739,7 +796,7 @@ async fn setup_its_token(
     cache["tokenAddress"] = serde_json::json!(token_address);
     save_its_cache(src, dest, &cache)?;
 
-    Ok((token_id, salt, token_address))
+    Ok((token_id, salt, token_address, TOKEN_DECIMALS))
 }
 
 // ---------------------------------------------------------------------------
@@ -915,6 +972,7 @@ async fn run_sustained_loop(
     destination_address_bytes: Vec<u8>,
     gas_token: String,
     gas_stroops: u64,
+    amount_per_tx: u128,
     tps: usize,
     duration_secs: u64,
     key_cycle: usize,
@@ -955,7 +1013,7 @@ async fn run_sustained_loop(
                 &da,
                 &xlm,
                 gas_stroops,
-                AMOUNT_PER_TX as u128,
+                amount_per_tx,
                 &gmp_dst,
             )
             .await;
