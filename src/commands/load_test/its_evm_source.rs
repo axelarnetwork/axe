@@ -534,6 +534,35 @@ fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
     make_failure_with_hash(submit_start, error, None)
 }
 
+/// Rescale 18-decimal-assumed sizing amounts to the source token's actual
+/// `decimals()`. `compute_run_sizing` in every its_evm_to_<dest>.rs hardcodes
+/// amounts in 18-decimal sub-units (e.g. `1e16 = 0.01 AXE`). That holds for
+/// standard EVM-18 chains (Monad, HL, XRPL-EVM), but Hedera HTS-fork AXE is 6
+/// decimals — 1e16 sub-units there is 1e10 AXE, exceeds wallet balance, and
+/// the source burn reverts. Dividing by `10^(18 − decimals)` keeps the
+/// intended 0.01 AXE meaning regardless of chain.
+pub(super) async fn rescale_sizing_for_decimals<P: Provider>(
+    amount_per_tx: &mut U256,
+    amount_per_key: &mut U256,
+    total_supply: &mut U256,
+    provider: &P,
+    token_addr: Address,
+) -> eyre::Result<u8> {
+    let decimals = ERC20::new(token_addr, provider)
+        .decimals()
+        .call()
+        .await
+        .map_err(|e| eyre!("failed to read source token decimals at {token_addr}: {e}"))?;
+    if decimals < 18 {
+        let divisor = U256::from(10).pow(U256::from(18 - u32::from(decimals)));
+        *amount_per_tx /= divisor;
+        *amount_per_key /= divisor;
+        *total_supply /= divisor;
+    }
+    ui::kv("source token decimals", &decimals.to_string());
+    Ok(decimals)
+}
+
 fn make_failure_with_hash(
     submit_start: Instant,
     error: &str,

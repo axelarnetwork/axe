@@ -88,11 +88,25 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let stellar = resolve_stellar_targets(&args, evm_src.deployer_address)?;
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
-    let sizing = compute_run_sizing(&args);
+    let mut sizing = compute_run_sizing(&args);
 
     let token =
         resolve_or_deploy_token(&args, &evm_src, &evm_targets, &stellar, gas_value, &sizing)
             .await?;
+
+    // compute_run_sizing assumes EVM-18 source decimals; rescale to the
+    // actual on-chain decimals (Hedera HTS-fork AXE = 6 dec).
+    {
+        let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+        super::its_evm_source::rescale_sizing_for_decimals(
+            &mut sizing.amount_per_tx,
+            &mut sizing.amount_per_key,
+            &mut sizing.total_supply,
+            &read_provider,
+            token.token_addr,
+        )
+        .await?;
+    }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
         let source_axelar_id = super::axelar_id_for_chain(&args.config, src)?;

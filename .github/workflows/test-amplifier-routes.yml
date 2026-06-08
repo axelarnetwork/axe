@@ -113,10 +113,10 @@ jobs:
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
             {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
             {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
-            {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS (v2 AXE, Sui auto-deployed Move package)"},
-            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS (v2 AXE)"},
-            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS (v2 AXE; both chains seeded by xrpl-evm bridge)"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS (v2 AXE)"}
+            {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
+            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
             {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},

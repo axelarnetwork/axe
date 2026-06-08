@@ -83,7 +83,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
-    let sizing = compute_run_sizing(&args);
+    let mut sizing = compute_run_sizing(&args);
 
     let token = resolve_or_deploy_token(
         &args,
@@ -94,6 +94,22 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         gas_value,
     )
     .await?;
+
+    // compute_run_sizing assumes 18 decimals (the EVM-source convention). For
+    // Hedera HTS-fork AXE the registered token is 6 decimals — 1e16 sub-units
+    // there is 10^10 AXE, way over wallet balance and rejected by the source
+    // burn. Rescale after we know the real on-chain decimals.
+    {
+        let read_provider = ProviderBuilder::new().connect_http(source_rpc_url.parse()?);
+        super::its_evm_source::rescale_sizing_for_decimals(
+            &mut sizing.amount_per_tx,
+            &mut sizing.amount_per_key,
+            &mut sizing.total_supply,
+            &read_provider,
+            token.token_addr,
+        )
+        .await?;
+    }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
         super::verify::wait_for_its_remote_deploy(
