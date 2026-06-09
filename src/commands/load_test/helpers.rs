@@ -879,14 +879,18 @@ pub(crate) fn read_pre_registered_axe_token_address(
     let content = std::fs::read_to_string(config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
     let root: serde_json::Value = serde_json::from_str(&content)?;
+    // The chains-config schema uses `address` on PascalCase contract entries
+    // (validated in axelar-chains-config/tests/schema). Earlier drafts called
+    // this `tokenAddress` — reading under that name silently returned None and
+    // the caller fell back to ITS.interchainTokenAddress(tokenId), which
+    // reverts on the Hedera HTS-fork (its `registeredTokenAddress` view
+    // replaces it).
     let addr_str = root
-        .pointer(&format!(
-            "/chains/{chain_axelar_id}/contracts/AXE/tokenAddress"
-        ))
+        .pointer(&format!("/chains/{chain_axelar_id}/contracts/AXE/address"))
         .and_then(|v| v.as_str());
     match addr_str {
         Some(s) => Ok(Some(s.parse().map_err(|e| {
-            eyre::eyre!("invalid AXE.tokenAddress for chain {chain_axelar_id}: {e}")
+            eyre::eyre!("invalid AXE.address for chain {chain_axelar_id}: {e}")
         })?)),
         None => Ok(None),
     }

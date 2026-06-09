@@ -381,13 +381,23 @@ fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) ->
 /// Compute the source-side `message_id` from a confirmed `TxMetrics` based on
 /// the source chain family. EVM/Stellar/Sui pre-format the id in
 /// `tx.signature`; SVM appends the `call_contract` log index.
+///
+/// For SVM, ITS-source paths (its_sol_to_evm, its_sol_to_sui) pre-format the
+/// signature via `solana::extract_its_message_id` because the gateway CPI's
+/// inner-instruction index varies per tx (observed `-1.7` in production vs
+/// the static `-2.1` shape). Detect that by the `-` separator and pass
+/// through; otherwise fall back to the synthetic format for raw GMP paths.
 fn message_id_for_source(tx: &TxMetrics, source_type: SourceChainType) -> String {
     match source_type {
         SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+            if tx.signature.contains('-') {
+                tx.signature.clone()
+            } else {
+                format!("{}-{}.1", tx.signature, solana_call_contract_index())
+            }
         }
     }
 }

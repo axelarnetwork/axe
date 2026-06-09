@@ -487,6 +487,25 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
                 Ok(Ok(receipt)) => {
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
 
+                    // EVM receipts come back even for reverted txs — `status:
+                    // 0x0` means the tx mined but failed and its logs are
+                    // empty. Without this short-circuit, extract_contract_call
+                    // returns "ContractCall event not found in receipt logs"
+                    // and the user can't tell whether it was a missing event
+                    // or just a revert. Surface the revert (with tx hash) so
+                    // the explorer link in the report points at the right tx.
+                    if !receipt.status() {
+                        return make_failure_with_hash(
+                            submit_start,
+                            &format!(
+                                "source-side interchainTransfer reverted (status 0x0, \
+                                 gas_used {})",
+                                receipt.gas_used
+                            ),
+                            Some(tx_hash),
+                        );
+                    }
+
                     match extract_contract_call_event(&receipt) {
                         Ok((
                             event_index,
@@ -517,9 +536,11 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
                                 amplifier_timing: None,
                             }
                         }
-                        Err(e) => {
-                            make_failure(submit_start, &format!("no ContractCall event: {e}"))
-                        }
+                        Err(e) => make_failure_with_hash(
+                            submit_start,
+                            &format!("no ContractCall event: {e}"),
+                            Some(tx_hash),
+                        ),
                     }
                 }
                 Ok(Err(e)) => make_failure_with_hash(submit_start, &e.to_string(), Some(tx_hash)),
