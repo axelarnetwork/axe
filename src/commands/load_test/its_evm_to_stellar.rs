@@ -61,12 +61,8 @@ fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
 }
 
 #[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        1_000_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    10_000_000_000_000_000
 }
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
@@ -329,9 +325,9 @@ fn resolve_stellar_targets(
     })
 }
 
-/// Parse the user-supplied gas value (wei), defaulting per source chain. The
-/// Flow default is higher than other EVM routes because the remote Stellar
-/// deploy needs enough gas to register the token before transfers are sent.
+/// Parse the user-supplied gas value (wei), defaulting via the Axelarscan
+/// `estimateGasFee` quote and falling back to a route-agnostic constant when
+/// the API can't be reached.
 async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,

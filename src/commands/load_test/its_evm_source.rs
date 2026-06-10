@@ -42,7 +42,7 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
 
-/// How long to wait for an EVM tx receipt before giving up. Flow confirms in
+/// How long to wait for an EVM tx receipt before giving up. Fast chains confirm in
 /// ~8s; other chains typically <20s. 60s gives congested networks enough room
 /// while still catching silently-dropped txs.
 const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);

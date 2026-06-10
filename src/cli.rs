@@ -155,7 +155,7 @@ pub enum TestCommands {
         mnemonic: Option<String>,
     },
 
-    /// Test ITS: deploy interchain token on source, deploy remotely to flow via hub
+    /// Test ITS: deploy interchain token on source, deploy remotely to a destination chain via hub
     Its {
         /// Chain axelar ID (legacy EVM-only mode, uses state file)
         #[arg(long)]

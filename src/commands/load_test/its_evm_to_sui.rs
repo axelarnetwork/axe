@@ -78,12 +78,8 @@ fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
 }
 
 #[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        1_000_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    10_000_000_000_000_000
 }
 
 /// Sizing parameters derived from CLI flags: burst vs sustained, key counts,

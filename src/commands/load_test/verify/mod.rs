@@ -903,6 +903,14 @@ pub async fn verify_onchain_sui_gmp(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
+            // VotingVerifier first-leg destination = the source CallContract
+            // event's destination, captured per-tx as gmp_destination_*. For
+            // ITS-hub-routed Sui transfers (e.g. sol→sui) that's
+            // (axelar, AxelarnetGateway) — NOT the final Sui channel passed
+            // as `destination_address`. Using the channel here made the VV
+            // `messages_status` query never match (status "unknown") and the
+            // verify phase timed out at "voted". Plumb the per-tx hub
+            // destination through; for raw Sui-dest GMP it equals the channel.
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
@@ -910,7 +918,7 @@ pub async fn verify_onchain_sui_gmp(
                 Address::ZERO,
                 None,
                 tx.gmp_destination_chain.clone(),
-                destination_address.to_string(),
+                tx.gmp_destination_address.clone(),
                 initial_phase,
             )
         })

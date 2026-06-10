@@ -111,7 +111,7 @@ pub fn resolve(network: Network, config: &ChainsConfig, chain: &str) -> Result<R
 }
 
 /// Friendly label for a target address if it's a known contract in this chain's
-/// config (e.g. `"berachain ITS"`); `None` if the address isn't a known
+/// config (e.g. `"hedera ITS"`); `None` if the address isn't a known
 /// contract — the caller renders that as a red "Unknown Destination".
 pub fn target_name(config: &ChainsConfig, chain: &str, target: Address) -> Option<String> {
     let chain_cfg = config.chains.get(chain)?;

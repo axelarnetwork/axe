@@ -290,6 +290,29 @@ pub(super) async fn poll_pipeline<P: Provider>(
             .chain(executed_indices.iter())
             .copied()
             .collect();
+        // The VotingVerifier records the message's *first-leg* destination,
+        // which for ITS-hub-routed transfers is (axelar, AxelarnetGateway) —
+        // NOT the final chain. Each tx captured that as gmp_destination_* from
+        // its source-side ContractCall event; for raw GMP it equals the
+        // function-arg destination. Prefer the per-tx value so hub-routed
+        // Sui-destination ITS (e.g. sol→sui) queries (axelar, Hub) instead of
+        // the final Sui channel — the latter returns status "unknown" forever
+        // and the verify phase times out at "voted".
+        let (vv_dest_chain, vv_dest_addr) = voted_indices
+            .first()
+            .map(|&i| {
+                (
+                    txs[i].gmp_destination_chain.clone(),
+                    txs[i].gmp_destination_address.clone(),
+                )
+            })
+            .filter(|(c, a)| !c.is_empty() && !a.is_empty())
+            .unwrap_or_else(|| {
+                (
+                    destination_chain.to_string(),
+                    destination_address.to_string(),
+                )
+            });
         // Fire Cosmos phases concurrently (each internally chunks into COSMOS_BATCH_SIZE).
         let (voted_results, routed_results, hub_results) = tokio::join!(
             // Voted
@@ -302,8 +325,8 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         lcd,
                         vv,
                         source_chain,
-                        destination_chain,
-                        destination_address,
+                        &vv_dest_chain,
+                        &vv_dest_addr,
                         &voted_data,
                     )
                     .await

@@ -44,19 +44,11 @@ const MAX_RETRIES: u32 = 5;
 
 #[cfg(feature = "devnet-amplifier")]
 const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 0;
-#[cfg(feature = "devnet-amplifier")]
-const FALLBACK_GAS_VALUE_WEI_FLOW: u128 = 0;
 #[cfg(not(feature = "devnet-amplifier"))]
 const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 10_000_000_000_000_000; // 0.01 ETH
-#[cfg(not(feature = "devnet-amplifier"))]
-const FALLBACK_GAS_VALUE_WEI_FLOW: u128 = 300_000_000_000_000_000; // 0.3 FLOW
 
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        FALLBACK_GAS_VALUE_WEI_FLOW
-    } else {
-        FALLBACK_GAS_VALUE_WEI_DEFAULT
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    FALLBACK_GAS_VALUE_WEI_DEFAULT
 }
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {

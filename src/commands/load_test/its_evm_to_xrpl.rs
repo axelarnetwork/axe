@@ -75,12 +75,8 @@ fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
     0
 }
 #[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        300_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    10_000_000_000_000_000
 }
 
 const MAX_CONCURRENT_SENDS: usize = 100;

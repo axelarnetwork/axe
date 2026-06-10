@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for an EVM tx receipt before giving up.
-/// Flow confirms in ~8s; other chains typically <20s. 60s gives congested
+/// Fast chains confirm in ~8s; others typically <20s. 60s gives congested
 /// networks enough room while still catching silently-dropped txs.
 const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -67,12 +67,8 @@ fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
     0 // devnet-amplifier relayer doesn't require gas payment
 }
 #[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        400_000_000_000_000_000 // 0.4 FLOW
-    } else {
-        20_000_000_000_000_000 // 0.02 ETH
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    20_000_000_000_000_000 // 0.02 ETH
 }
 
 // Solana ExecutablePayload ABI types (matches axelar-amplifier-solana gateway)
