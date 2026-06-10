@@ -1037,14 +1037,21 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let message_id = message_id_for_source(tx, source_type);
             let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
+            // The voting verifier indexes the message by the *outer* GMP
+            // destination (which is the Axelar Hub for ITS-routed transfers,
+            // a Sui channel for raw GMP). Passing empty strings here made
+            // `messages_status` queries silently no-match and the verify
+            // phase timed out at "voted". The TxMetrics already captured
+            // these from the source-side CallContract event, so plumb them
+            // through.
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
                 message_id,
                 Address::ZERO,
                 Some(keccak256(&cmd_input).into()),
-                String::new(),
-                String::new(),
+                tx.gmp_destination_chain.clone(),
+                tx.gmp_destination_address.clone(),
                 initial_phase,
             )
         })

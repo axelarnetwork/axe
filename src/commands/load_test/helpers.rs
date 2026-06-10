@@ -932,16 +932,28 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
             .await
             .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?
     };
-    let balance = crate::evm::ERC20::new(addr, provider)
-        .balanceOf(holder)
-        .call()
-        .await
-        .unwrap_or_default();
-    if balance >= needed {
+    // `needed` from the caller is computed assuming 18-decimal EVM AXE
+    // (the convention in compute_run_sizing). For Hedera HTS-fork (6 dec) a
+    // wallet holding 10000 AXE = 1e10 sub-units would be treated as
+    // "insufficient" against needed=1e18, falling through to a fresh deploy
+    // that then reverts with InitialSupplyUnsupported. Scale `needed` by the
+    // source token's actual decimals so the comparison is apples-to-apples.
+    let token = crate::evm::ERC20::new(addr, provider);
+    let decimals: u8 = token.decimals().call().await.unwrap_or(18);
+    let scaled_needed = if decimals < 18 {
+        needed
+            / alloy::primitives::U256::from(10)
+                .pow(alloy::primitives::U256::from(18 - u32::from(decimals)))
+    } else {
+        needed
+    };
+    let balance = token.balanceOf(holder).call().await.unwrap_or_default();
+    if balance >= scaled_needed {
         Ok(Some((tid, addr)))
     } else {
         ui::warn(&format!(
-            "chains-config AXE balance too low for {holder} ({balance} < {needed}); \
+            "chains-config AXE balance too low for {holder} \
+             ({balance} < {scaled_needed} at {decimals} decimals); \
              configured wallet isn't the workflow deployer — deploying fresh..."
         ));
         Ok(None)

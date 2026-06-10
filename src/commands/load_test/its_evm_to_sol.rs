@@ -249,7 +249,7 @@ async fn resolve_or_deploy_token(
     // upstream — see TODOs in the workflow + script). For Hedera-source we
     // require an explicit pre-registered token; the error message points at
     // the deployments-repo Hedera setup.
-    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
     let config_axe = super::helpers::reusable_config_axe(
         &args.config,
         src,
@@ -307,7 +307,7 @@ async fn resolve_or_deploy_token(
         if let Some((tid, addr)) = cached {
             // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
-            let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+            let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
             let balance = token
                 .balanceOf(evm_source.deployer_address)
                 .call()

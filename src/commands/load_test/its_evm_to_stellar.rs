@@ -396,7 +396,7 @@ async fn resolve_or_deploy_token(
     // registered on Stellar) → local file cache → fresh deploy. Pre-registration
     // via chains-config lets CI skip the source + remote deploy; a wallet with
     // no AXE balance falls through to a fresh deploy (see reusable_config_axe).
-    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
     let config_axe = match super::helpers::reusable_config_axe(
         &args.config,
         src,
@@ -448,7 +448,7 @@ async fn resolve_or_deploy_token(
             );
         if let Some((tid, addr)) = cached {
             let token = ERC20::new(addr, &write_provider);
-            let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+            let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
             let balance = token
                 .balanceOf(evm_src.deployer_address)
                 .call()

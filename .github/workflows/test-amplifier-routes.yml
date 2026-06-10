@@ -111,21 +111,23 @@ jobs:
           # tokenIds are read from the mainnet AXE entries (HL, Stellar, Sui).
           # XRPL ↔ XRPL EVM still uses the canonical XRP token (no per-chain
           # AXE needed for that pair).
+          # HL ↔ Stellar / Stellar → Solana / HL → Stellar dropped: the
+          # mainnet Stellar amplifier executor stopped picking up approved
+          # inbound messages ~2026-06-04 — same outage we hit on testnet's
+          # stellar-2026-q1-2. Approved-side reached but gas_used stays 0,
+          # then axe times out at "executed". Re-add when the off-chain
+          # executor is back.
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
             {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
-            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
-            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"}
           ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;
