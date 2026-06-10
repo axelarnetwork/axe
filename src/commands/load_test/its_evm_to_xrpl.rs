@@ -39,10 +39,12 @@ use crate::xrpl::{XrplClient, faucet_url_for_network, parse_address};
 /// depend on whichever signing key happens to be loaded. The sender (and
 /// signer that pays for the EVM-side tx) is still derived live from
 /// EVM_PRIVATE_KEY.
-#[cfg(feature = "mainnet")]
-const DEFAULT_XRPL_RECIPIENT: &str = "rhnu1DRT9AmPmz9C78WoAiEyXFdaGvxgfk";
-#[cfg(not(feature = "mainnet"))]
-const DEFAULT_XRPL_RECIPIENT: &str = "r3Xqy7SVtkNQyCU9TZx46BAHFMhcJRopQh";
+fn default_xrpl_recipient(network: crate::types::Network) -> &'static str {
+    match network {
+        crate::types::Network::Mainnet => "rhnu1DRT9AmPmz9C78WoAiEyXFdaGvxgfk",
+        _ => "r3Xqy7SVtkNQyCU9TZx46BAHFMhcJRopQh",
+    }
+}
 
 /// Default gas value: tries the Axelarscan `estimateGasFee` quote for the
 /// route (× 1.5); falls back to a route-agnostic constant when the API
@@ -51,7 +53,7 @@ async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
     if let Some(quoted) = quote_route_gas(args).await {
         return quoted;
     }
-    fallback_gas_value_wei(&args.source_chain)
+    fallback_gas_value_wei(args.network, &args.source_chain)
 }
 
 async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
@@ -62,6 +64,7 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
         .token_symbol
         .as_deref()?;
     super::gas_estimate::estimate_route_gas(
+        args.network,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         symbol,
@@ -70,16 +73,11 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-#[cfg(feature = "devnet-amplifier")]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    0
-}
-#[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        300_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
+fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ if source_chain.starts_with("flow") => 300_000_000_000_000_000,
+        _ => 10_000_000_000_000_000,
     }
 }
 
@@ -113,7 +111,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let token_addr = verify_token_on_its(&evm_src, &evm_rpc_url, token_id).await?;
 
-    let xrpl = setup_xrpl_recipient(&args.config, dest).await?;
+    let xrpl = setup_xrpl_recipient(&args.config, dest, args.network).await?;
 
     let (gas_value_wei, gas_value) = parse_gas_value_wei(&args).await?;
 
@@ -347,13 +345,17 @@ async fn verify_token_on_its(
 
 /// Resolve XRPL RPC + recipient and faucet-activate the recipient if the
 /// account isn't already funded (testnet/devnet only).
-async fn setup_xrpl_recipient(config: &std::path::Path, dest: &str) -> eyre::Result<XrplDest> {
+async fn setup_xrpl_recipient(
+    config: &std::path::Path,
+    dest: &str,
+    network: crate::types::Network,
+) -> eyre::Result<XrplDest> {
     let (xrpl_rpc, _xrpl_multisig, xrpl_network_type) =
         super::its_xrpl_to_evm::read_xrpl_chain_config(config, dest)?;
     let xrpl_client = XrplClient::new(&xrpl_rpc);
 
-    // Recipient is fixed, not derived: see DEFAULT_XRPL_RECIPIENT above.
-    let recipient_addr = DEFAULT_XRPL_RECIPIENT.to_string();
+    // Recipient is fixed, not derived: see `default_xrpl_recipient` above.
+    let recipient_addr = default_xrpl_recipient(network).to_string();
     // Sanity-check the constant parses as an XRPL address; bail loudly if it
     // ever gets mistyped.
     parse_address(&recipient_addr)?;

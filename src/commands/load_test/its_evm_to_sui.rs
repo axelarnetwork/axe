@@ -53,7 +53,7 @@ async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
     if let Some(quoted) = quote_route_gas(args).await {
         return quoted;
     }
-    fallback_gas_value_wei(&args.source_chain)
+    fallback_gas_value_wei(args.network, &args.source_chain)
 }
 
 async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
@@ -64,6 +64,7 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
         .token_symbol
         .as_deref()?;
     super::gas_estimate::estimate_route_gas(
+        args.network,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         symbol,
@@ -72,17 +73,11 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-#[cfg(feature = "devnet-amplifier")]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    0
-}
-
-#[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        1_000_000_000_000_000_000
-    } else {
-        10_000_000_000_000_000
+fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ if source_chain.starts_with("flow") => 1_000_000_000_000_000_000,
+        _ => 10_000_000_000_000_000,
     }
 }
 

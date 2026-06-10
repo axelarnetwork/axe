@@ -21,14 +21,16 @@ pub(super) struct ItsTestCache {
     pub(super) dest_token_address: String,
 }
 
-pub(super) fn cache_path(src: &str, dst: &str, deployer: &str) -> PathBuf {
+pub(super) fn cache_path(
+    network: crate::types::Network,
+    src: &str,
+    dst: &str,
+    deployer: &str,
+) -> PathBuf {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("axe");
-    data_dir.join(format!(
-        "its-test-{}-{src}-{dst}-{deployer}.json",
-        crate::types::Network::from_features()
-    ))
+    data_dir.join(format!("its-test-{network}-{src}-{dst}-{deployer}.json"))
 }
 
 pub(super) fn read_cache(path: &Path) -> Option<ItsTestCache> {

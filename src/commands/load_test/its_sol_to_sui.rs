@@ -67,8 +67,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let token_id = read_sui_axe_token_id(&args.config, dest, args.token_id.as_deref())?;
     ui::kv("Sui token id", &format!("0x{}", hex::encode(token_id)));
 
-    let (its_root, _) = solana::find_its_root_pda();
-    let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
+    let (its_root, _) = solana::find_its_root_pda(args.network);
+    let (mint, _) = solana::find_interchain_token_pda(args.network, &its_root, &token_id);
     ui::address("Solana mint (linked)", &mint.to_string());
 
     let rpc = rpc_client(&sol_rpc);
@@ -135,6 +135,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         run_sustained(
             &sol_rpc,
             main_kp_secret,
+            args.network,
             main_pubkey.to_string(),
             token_id,
             source_ata,
@@ -150,6 +151,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         run_burst(
             &sol_rpc,
             &main_keypair,
+            args.network,
             main_pubkey.to_string(),
             token_id,
             source_ata,
@@ -202,6 +204,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 async fn run_burst(
     sol_rpc: &str,
     main_keypair: &Keypair,
+    network: crate::types::Network,
     main_pubkey_str: String,
     token_id: [u8; 32],
     source_ata: Pubkey,
@@ -217,6 +220,7 @@ async fn run_burst(
         let result = solana::send_its_interchain_transfer(
             sol_rpc,
             main_keypair,
+            network,
             &token_id,
             &source_ata,
             &mint,
@@ -254,6 +258,7 @@ async fn run_burst(
 async fn run_sustained(
     sol_rpc: &str,
     main_kp_secret: [u8; 32],
+    network: crate::types::Network,
     main_pubkey_str: String,
     token_id: [u8; 32],
     source_ata: Pubkey,
@@ -298,6 +303,7 @@ async fn run_sustained(
                     solana::send_its_interchain_transfer(
                         &rpc,
                         &kp,
+                        network,
                         &tid,
                         &ata,
                         &m,

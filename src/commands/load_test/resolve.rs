@@ -599,25 +599,13 @@ pub(crate) fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) ->
     Ok(())
 }
 
-/// Returns the network this binary was compiled for based on cargo features.
-pub(crate) fn compiled_network() -> &'static str {
-    if cfg!(feature = "mainnet") {
-        "mainnet"
-    } else if cfg!(feature = "testnet") {
-        "testnet"
-    } else if cfg!(feature = "stagenet") {
-        "stagenet"
-    } else {
-        "devnet-amplifier"
-    }
-}
-
 /// Try to detect the target network from the config file path.
 /// Looks for known network names in the filename (e.g. "stagenet.json", "devnet-amplifier.json").
-pub(crate) fn detect_network_from_config(config: &std::path::Path) -> Option<&'static str> {
+pub(crate) fn detect_network_from_config(
+    config: &std::path::Path,
+) -> Option<crate::types::Network> {
     let name = config.file_stem()?.to_str()?;
-    ["mainnet", "testnet", "stagenet", "devnet-amplifier"]
-        .iter()
-        .find(|&&network| name == network)
-        .copied()
+    crate::types::Network::ALL
+        .into_iter()
+        .find(|network| name == network.as_str())
 }

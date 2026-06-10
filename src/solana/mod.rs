@@ -23,6 +23,7 @@ mod balance;
 mod encoding;
 mod gateway;
 mod its;
+mod programs;
 mod rpc;
 
 pub use balance::{
@@ -32,7 +33,6 @@ pub use encoding::{
     find_interchain_token_pda, find_its_root_pda, get_associated_token_address,
     interchain_token_id, load_keypair,
 };
-#[cfg(not(feature = "devnet-amplifier"))]
 pub use gateway::pay_gas_lamports;
 pub use gateway::{
     approve_messages_on_gateway, decode_execute_data, execute_on_memo,

@@ -5,12 +5,34 @@ use eyre::Result;
 
 use crate::commands::load_test::{Protocol, TestType};
 use crate::commands::propose::ProposeArgs;
+use crate::types::Network;
 
 #[derive(Parser)]
 #[command(name = "axe")]
 pub struct Cli {
+    /// Axelar network to target (defaults to the config filename's network,
+    /// else testnet)
+    #[arg(long, global = true, env = "AXE_NETWORK", value_enum)]
+    pub network: Option<Network>,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Pick the network for this invocation: explicit `--network`/`AXE_NETWORK`
+/// wins, else the network named by the config filename, else testnet. A flag
+/// that contradicts the config filename is a hard error — that's the runtime
+/// replacement for the old compiled-network-vs-config guard.
+pub fn resolve_network(flag: Option<Network>, config: Option<&std::path::Path>) -> Result<Network> {
+    let from_config = config.and_then(crate::commands::load_test::detect_network_from_config);
+    match (flag, from_config) {
+        (Some(f), Some(c)) if f != c => eyre::bail!(
+            "--network {f} contradicts the config file ({c}); pass a matching --config or drop one"
+        ),
+        (Some(f), _) => Ok(f),
+        (None, Some(c)) => Ok(c),
+        (None, None) => Ok(Network::Testnet),
+    }
 }
 
 #[derive(Subcommand)]

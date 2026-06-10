@@ -23,6 +23,7 @@ use solana_transaction_status::{
 
 use super::rpc::{fetch_confirmed_tx, fetch_tx_details, rpc_client};
 use crate::commands::load_test::metrics::TxMetrics;
+use crate::types::Network;
 use crate::ui;
 
 /// Lamports attached as `PayGas` for a sol→`destination_chain` GMP call.
@@ -32,7 +33,6 @@ use crate::ui;
 /// keep the historical 0.01 SOL until we confirm a smaller amount is safe on
 /// mainnet, where destination-execution cost is converted via price oracles
 /// and can push the required SOL payment higher than testnet shows.
-#[cfg(not(feature = "devnet-amplifier"))]
 pub fn pay_gas_lamports(destination_chain: &str) -> u64 {
     // Match every env's Solana axelar id: "solana" (mainnet/testnet),
     // "solana-stagenet-3" (stagenet), "solana-18" (devnet).
@@ -48,16 +48,22 @@ pub fn pay_gas_lamports(destination_chain: &str) -> u64 {
 pub fn send_call_contract(
     rpc_url: &str,
     keypair: &dyn Signer,
+    network: Network,
     destination_chain: &str,
     destination_address: &str,
     payload: &[u8],
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
     let rpc_client = rpc_client(rpc_url);
+    let gateway_id = network.solana_gateway_id();
 
-    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let gateway_config_pda = Pubkey::find_program_address(
+        &[solana_axelar_gateway::GatewayConfig::SEED_PREFIX],
+        &gateway_id,
+    )
+    .0;
     let (event_authority_pda, _) =
-        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_gateway::id());
+        Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
 
     let ix_data = solana_axelar_gateway::instruction::CallContract {
         destination_chain: destination_chain.to_string(),
@@ -73,53 +79,29 @@ pub fn send_call_contract(
         AccountMeta::new(fee_payer, true),
         AccountMeta::new_readonly(gateway_config_pda, false),
         AccountMeta::new_readonly(event_authority_pda, false),
-        AccountMeta::new_readonly(solana_axelar_gateway::id(), false),
+        AccountMeta::new_readonly(gateway_id, false),
     ];
 
     let call_contract_ix = Instruction {
-        program_id: solana_axelar_gateway::id(),
+        program_id: gateway_id,
         accounts,
         data: ix_data,
     };
 
     // Pay gas on non-devnet environments so the relayer picks up the message.
-    #[cfg(not(feature = "devnet-amplifier"))]
-    let pay_gas_ix = {
-        let payload_hash: [u8; 32] = solana_sdk::keccak::hash(payload).to_bytes();
-        let treasury_pda = solana_axelar_gas_service::Treasury::find_pda().0;
-        let gas_event_authority =
-            Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_gas_service::id())
-                .0;
-
-        let pay_gas_data = solana_axelar_gas_service::instruction::PayGas {
-            destination_chain: destination_chain.to_string(),
-            destination_address: destination_address.to_string(),
-            payload_hash,
-            amount: pay_gas_lamports(destination_chain),
-            refund_address: fee_payer,
-        }
-        .data();
-
-        Instruction {
-            program_id: solana_axelar_gas_service::id(),
-            accounts: vec![
-                AccountMeta::new(fee_payer, true),
-                AccountMeta::new(treasury_pda, false),
-                AccountMeta::new_readonly(
-                    Pubkey::from_str_const("11111111111111111111111111111111"),
-                    false,
-                ),
-                AccountMeta::new_readonly(gas_event_authority, false),
-                AccountMeta::new_readonly(solana_axelar_gas_service::id(), false),
-            ],
-            data: pay_gas_data,
+    let instructions = match network {
+        Network::DevnetAmplifier => vec![call_contract_ix],
+        _ => {
+            let pay_gas_ix = build_pay_gas_instruction(
+                network,
+                fee_payer,
+                destination_chain,
+                destination_address,
+                payload,
+            );
+            vec![pay_gas_ix, call_contract_ix]
         }
     };
-
-    #[cfg(not(feature = "devnet-amplifier"))]
-    let instructions = vec![pay_gas_ix, call_contract_ix];
-    #[cfg(feature = "devnet-amplifier")]
-    let instructions = vec![call_contract_ix];
 
     let blockhash = rpc_client.get_latest_blockhash()?;
     let message = Message::new_with_blockhash(&instructions, Some(&fee_payer), &blockhash);
@@ -156,16 +138,57 @@ pub fn send_call_contract(
     Ok((signature.to_string(), metrics))
 }
 
+/// Build the gas-service `PayGas` instruction prepended to `call_contract`
+/// on networks whose relayer requires gas payment (everything but
+/// devnet-amplifier).
+fn build_pay_gas_instruction(
+    network: Network,
+    fee_payer: Pubkey,
+    destination_chain: &str,
+    destination_address: &str,
+    payload: &[u8],
+) -> Instruction {
+    let gas_service_id = network.solana_gas_service_id();
+    let payload_hash: [u8; 32] = solana_sdk::keccak::hash(payload).to_bytes();
+    let treasury_pda = Pubkey::find_program_address(
+        &[solana_axelar_gas_service::Treasury::SEED_PREFIX],
+        &gas_service_id,
+    )
+    .0;
+    let gas_event_authority =
+        Pubkey::find_program_address(&[b"__event_authority"], &gas_service_id).0;
+
+    let pay_gas_data = solana_axelar_gas_service::instruction::PayGas {
+        destination_chain: destination_chain.to_string(),
+        destination_address: destination_address.to_string(),
+        payload_hash,
+        amount: pay_gas_lamports(destination_chain),
+        refund_address: fee_payer,
+    }
+    .data();
+
+    Instruction {
+        program_id: gas_service_id,
+        accounts: vec![
+            AccountMeta::new(fee_payer, true),
+            AccountMeta::new(treasury_pda, false),
+            AccountMeta::new_readonly(
+                Pubkey::from_str_const("11111111111111111111111111111111"),
+                false,
+            ),
+            AccountMeta::new_readonly(gas_event_authority, false),
+            AccountMeta::new_readonly(gas_service_id, false),
+        ],
+        data: pay_gas_data,
+    }
+}
+
 /// 1-based instruction index of `call_contract` in the transaction.
 /// When a `pay_gas` instruction is prepended (non-devnet), call_contract is at index 2.
-pub fn solana_call_contract_index() -> u8 {
-    #[cfg(not(feature = "devnet-amplifier"))]
-    {
-        2
-    }
-    #[cfg(feature = "devnet-amplifier")]
-    {
-        1
+pub fn solana_call_contract_index(network: Network) -> u8 {
+    match network {
+        Network::DevnetAmplifier => 1,
+        _ => 2,
     }
 }
 
@@ -252,7 +275,11 @@ pub fn extract_gateway_call_contract_payload(
 /// sequentially. Each such invocation corresponds to one entry in the
 /// inner_instructions array. We find the last gateway invoke, which is the
 /// `call_contract` that emits the `CallContractEvent`.
-pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<String> {
+pub fn extract_its_message_id(
+    rpc_url: &str,
+    network: Network,
+    signature_str: &str,
+) -> Result<String> {
     let rpc_client = rpc_client(rpc_url);
     let sig: Signature = signature_str
         .parse()
@@ -271,7 +298,7 @@ pub fn extract_its_message_id(rpc_url: &str, signature_str: &str) -> Result<Stri
         _ => return Err(eyre::eyre!("transaction has no log messages")),
     };
 
-    let gateway_id = solana_axelar_gateway::id().to_string();
+    let gateway_id = network.solana_gateway_id().to_string();
 
     // Parse logs to find which top-level instruction invoked the gateway and
     // which inner CPI within that instruction is the event emit.
@@ -336,13 +363,18 @@ pub fn decode_execute_data(execute_data_hex: &str) -> Result<ExecuteData> {
 fn initialize_verification_session(
     rpc_url: &str,
     payer: &Keypair,
+    network: Network,
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
     let rpc = rpc_client(rpc_url);
-    let gateway_id = solana_axelar_gateway::id();
+    let gateway_id = network.solana_gateway_id();
 
-    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let gateway_config_pda = Pubkey::find_program_address(
+        &[solana_axelar_gateway::GatewayConfig::SEED_PREFIX],
+        &gateway_id,
+    )
+    .0;
 
     // Derive VerifierSetTracker PDA
     let (verifier_set_tracker_pda, _) = Pubkey::find_program_address(
@@ -399,14 +431,19 @@ fn initialize_verification_session(
 fn verify_signature(
     rpc_url: &str,
     payer: &Keypair,
+    network: Network,
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
     verifier_info: SigningVerifierSetInfo,
 ) -> Result<Signature> {
     let rpc = rpc_client(rpc_url);
-    let gateway_id = solana_axelar_gateway::id();
+    let gateway_id = network.solana_gateway_id();
 
-    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let gateway_config_pda = Pubkey::find_program_address(
+        &[solana_axelar_gateway::GatewayConfig::SEED_PREFIX],
+        &gateway_id,
+    )
+    .0;
 
     let payload_type_byte: u8 = verifier_info.payload_type.into();
     let (verification_session_pda, _) = Pubkey::find_program_address(
@@ -469,14 +506,19 @@ fn verify_signature(
 fn approve_message(
     rpc_url: &str,
     payer: &Keypair,
+    network: Network,
     merklized_message: MerklizedMessage,
     payload_merkle_root: [u8; 32],
     signing_verifier_set_merkle_root: [u8; 32],
 ) -> Result<Signature> {
     let rpc = rpc_client(rpc_url);
-    let gateway_id = solana_axelar_gateway::id();
+    let gateway_id = network.solana_gateway_id();
 
-    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let gateway_config_pda = Pubkey::find_program_address(
+        &[solana_axelar_gateway::GatewayConfig::SEED_PREFIX],
+        &gateway_id,
+    )
+    .0;
 
     let command_id = merklized_message.leaf.message.command_id();
     let (incoming_message_pda, _) = Pubkey::find_program_address(
@@ -538,6 +580,7 @@ fn approve_message(
 pub fn approve_messages_on_gateway(
     rpc_url: &str,
     payer: &Keypair,
+    network: Network,
     execute_data: &ExecuteData,
 ) -> Result<()> {
     // Step 7a: Initialize verification session
@@ -545,6 +588,7 @@ pub fn approve_messages_on_gateway(
     match initialize_verification_session(
         rpc_url,
         payer,
+        network,
         execute_data.payload_merkle_root,
         execute_data.signing_verifier_set_merkle_root,
     ) {
@@ -573,6 +617,7 @@ pub fn approve_messages_on_gateway(
         match verify_signature(
             rpc_url,
             payer,
+            network,
             execute_data.payload_merkle_root,
             execute_data.signing_verifier_set_merkle_root,
             info,
@@ -606,6 +651,7 @@ pub fn approve_messages_on_gateway(
         match approve_message(
             rpc_url,
             payer,
+            network,
             merklized_message.clone(),
             execute_data.payload_merkle_root,
             execute_data.signing_verifier_set_merkle_root,
@@ -634,12 +680,13 @@ pub fn approve_messages_on_gateway(
 pub fn execute_on_memo(
     rpc_url: &str,
     payer: &Keypair,
+    network: Network,
     message: solana_axelar_std::Message,
     payload: &[u8],
 ) -> Result<Signature> {
     let rpc = rpc_client(rpc_url);
-    let gateway_id = solana_axelar_gateway::id();
-    let memo_id = solana_axelar_memo::id();
+    let gateway_id = network.solana_gateway_id();
+    let memo_id = network.solana_memo_id();
 
     let command_id = message.command_id();
 
@@ -658,7 +705,11 @@ pub fn execute_on_memo(
         ],
         &memo_id,
     );
-    let gateway_config_pda = solana_axelar_gateway::GatewayConfig::find_pda().0;
+    let gateway_config_pda = Pubkey::find_program_address(
+        &[solana_axelar_gateway::GatewayConfig::SEED_PREFIX],
+        &gateway_id,
+    )
+    .0;
     let (gateway_event_authority, _) =
         Pubkey::find_program_address(&[b"__event_authority"], &gateway_id);
 

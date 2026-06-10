@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       network:
-        description: Axelar network (drives feature flag + which chains-config file to use)
+        description: Axelar network (drives --network + which chains-config file to use)
         type: choice
         required: true
         default: testnet

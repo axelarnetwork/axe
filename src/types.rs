@@ -116,7 +116,9 @@ impl TryFrom<&str> for ChainType {
 /// Round-trips through `FromStr`/`Display` as the lowercase string the cargo
 /// feature flags and config filenames already use (note: `devnet-amplifier`
 /// has the dash, not an underscore). Serde uses the same string form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Network {
     Mainnet,
@@ -126,27 +128,19 @@ pub enum Network {
 }
 
 impl Network {
+    pub const ALL: [Network; 4] = [
+        Self::Mainnet,
+        Self::Testnet,
+        Self::Stagenet,
+        Self::DevnetAmplifier,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mainnet => "mainnet",
             Self::Testnet => "testnet",
             Self::Stagenet => "stagenet",
             Self::DevnetAmplifier => "devnet-amplifier",
-        }
-    }
-
-    /// The network this binary was compiled against, as selected by the
-    /// active cargo feature flag. The fall-through is `DevnetAmplifier`,
-    /// matching the existing `network_name()` helpers.
-    pub fn from_features() -> Self {
-        if cfg!(feature = "mainnet") {
-            Self::Mainnet
-        } else if cfg!(feature = "testnet") {
-            Self::Testnet
-        } else if cfg!(feature = "stagenet") {
-            Self::Stagenet
-        } else {
-            Self::DevnetAmplifier
         }
     }
 

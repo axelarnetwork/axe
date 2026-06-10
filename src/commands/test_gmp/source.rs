@@ -100,6 +100,7 @@ pub async fn send_evm_call_contract<P: Provider>(
 /// indexable yet.
 pub fn send_svm_call_contract(
     src_rpc: &str,
+    network: crate::types::Network,
     destination_chain: &str,
     destination_address: Option<&str>,
     step_idx: usize,
@@ -109,7 +110,7 @@ pub fn send_svm_call_contract(
 
     let (destination_address, payload_bytes) = match destination_address {
         None => {
-            let memo_program = memo_program_id();
+            let memo_program = memo_program_id(network);
             let counter_pda = Pubkey::find_program_address(&[b"counter"], &memo_program).0;
             let payload = make_executable_payload(&None, &counter_pda);
             (memo_program.to_string(), payload)
@@ -130,14 +131,15 @@ pub fn send_svm_call_contract(
     let (_sig, metrics) = send_call_contract(
         src_rpc,
         &keypair,
+        network,
         destination_chain,
         &destination_address,
         &payload_bytes,
     )?;
 
     let raw_sig = metrics.signature.clone();
-    let message_id =
-        extract_its_message_id(src_rpc, &raw_sig).unwrap_or_else(|_| format!("{raw_sig}-1.1"));
+    let message_id = extract_its_message_id(src_rpc, network, &raw_sig)
+        .unwrap_or_else(|_| format!("{raw_sig}-1.1"));
 
     ui::tx_hash("tx", &raw_sig);
     ui::kv("message_id", &message_id);

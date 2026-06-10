@@ -308,6 +308,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         &args.destination_axelar_id,
         &destination_address,
         &sol_rpc_url,
+        args.network,
         &mut report.transactions,
     )
     .await?;

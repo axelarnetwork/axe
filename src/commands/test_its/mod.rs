@@ -83,8 +83,8 @@ const DEFAULT_ITS_TRANSFER_AMOUNT_BASE_UNITS: u64 = 1_000_000;
 //
 // ITS message-type discriminators are the `ItsMessageType` enum in `types.rs`.
 //
-// Cache files are namespaced by `Network::from_features()` so a `mainnet`
-// build doesn't read a `testnet` deploy from disk.
+// Cache files are namespaced by the resolved `Network` so a `mainnet` run
+// doesn't read a `testnet` deploy from disk.
 
 pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
@@ -430,6 +430,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_config(
     config: PathBuf,
+    network: crate::types::Network,
     source_chain: Option<String>,
     destination_chain: Option<String>,
     mnemonic_override: Option<String>,
@@ -615,7 +616,7 @@ pub async fn run_config(
     // token still responds to `name()`, skip the deploy entirely and reuse
     // the cached tokenId. Pass `--fresh-token` to force a redeploy.
     // ─────────────────────────────────────────────────────────────────────
-    let cache_file = cache_path(&src, &dst, &sol_pubkey.to_string());
+    let cache_file = cache_path(network, &src, &dst, &sol_pubkey.to_string());
     let cached =
         try_load_cached_phase_a(&cache_file, fresh_token, &sol_pubkey, &dst_provider).await;
 
@@ -630,6 +631,7 @@ pub async fn run_config(
         run_phase_a_deploy(
             &src,
             &dst,
+            network,
             &src_axelar_id,
             &dst_axelar_id,
             &src_rpc,
@@ -669,8 +671,8 @@ pub async fn run_config(
         solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let ata_program =
         solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-    let (its_root_pda, _) = crate::solana::find_its_root_pda();
-    let (mint, _) = crate::solana::find_interchain_token_pda(&its_root_pda, &token_id);
+    let (its_root_pda, _) = crate::solana::find_its_root_pda(network);
+    let (mint, _) = crate::solana::find_interchain_token_pda(network, &its_root_pda, &token_id);
     let source_ata = solana_sdk::pubkey::Pubkey::find_program_address(
         &[
             sol_pubkey.as_ref(),
@@ -702,6 +704,7 @@ pub async fn run_config(
     let (xfer_sig, _metrics) = crate::solana::send_its_interchain_transfer(
         &src_rpc,
         &sol_keypair,
+        network,
         &token_id,
         &source_ata,
         &mint,
@@ -712,7 +715,7 @@ pub async fn run_config(
     )?;
     ui::tx_hash("solana tx", &xfer_sig);
 
-    let xfer_first_leg_id = crate::solana::extract_its_message_id(&src_rpc, &xfer_sig)?;
+    let xfer_first_leg_id = crate::solana::extract_its_message_id(&src_rpc, network, &xfer_sig)?;
     ui::kv("first-leg message_id", &xfer_first_leg_id);
 
     let xfer_gw = crate::solana::extract_gateway_call_contract_payload(&src_rpc, &xfer_sig)?;

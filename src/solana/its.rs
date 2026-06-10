@@ -23,6 +23,7 @@ use super::encoding::{
 };
 use super::rpc::{fetch_tx_details, rpc_client};
 use crate::commands::load_test::metrics::TxMetrics;
+use crate::types::Network;
 
 /// Deploy an interchain token on Solana.
 /// Returns the transaction signature.
@@ -30,6 +31,7 @@ use crate::commands::load_test::metrics::TxMetrics;
 pub fn send_its_deploy_interchain_token(
     rpc_url: &str,
     keypair: &dyn Signer,
+    network: Network,
     salt: &[u8; 32],
     name: &str,
     symbol: &str,
@@ -40,11 +42,12 @@ pub fn send_its_deploy_interchain_token(
     let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
+    let its_id = network.solana_its_id();
 
-    let token_id = interchain_token_id(&deployer, salt);
-    let (its_root_pda, _) = find_its_root_pda();
-    let (mint, _) = find_interchain_token_pda(&its_root_pda, &token_id);
-    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, &token_id);
+    let token_id = interchain_token_id(network, &deployer, salt);
+    let (its_root_pda, _) = find_its_root_pda(network);
+    let (mint, _) = find_interchain_token_pda(network, &its_root_pda, &token_id);
+    let (token_manager_pda, _) = find_token_manager_pda(network, &its_root_pda, &token_id);
 
     let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let associated_token_program = spl_associated_token_account_program_id();
@@ -58,17 +61,16 @@ pub fn send_its_deploy_interchain_token(
         &mpl_metadata_program,
     );
 
-    let (event_authority, _) =
-        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &its_id);
 
     let (minter_account, minter_roles_pda) = if let Some(m) = minter {
         let (roles, _) = Pubkey::find_program_address(
             &[b"user-roles", token_manager_pda.as_ref(), m.as_ref()],
-            &solana_axelar_its::id(),
+            &its_id,
         );
         (*m, roles)
     } else {
-        (solana_axelar_its::id(), solana_axelar_its::id())
+        (its_id, its_id)
     };
 
     let accounts = vec![
@@ -91,7 +93,7 @@ pub fn send_its_deploy_interchain_token(
         AccountMeta::new_readonly(minter_account, false),
         AccountMeta::new(minter_roles_pda, false),
         AccountMeta::new_readonly(event_authority, false),
-        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+        AccountMeta::new_readonly(its_id, false),
     ];
 
     let ix_data = solana_axelar_its::instruction::DeployInterchainToken {
@@ -104,7 +106,7 @@ pub fn send_its_deploy_interchain_token(
     .data();
 
     let ix = Instruction {
-        program_id: solana_axelar_its::id(),
+        program_id: its_id,
         accounts,
         data: ix_data,
     };
@@ -123,6 +125,7 @@ pub fn send_its_deploy_interchain_token(
 pub fn send_its_deploy_remote_interchain_token(
     rpc_url: &str,
     keypair: &dyn Signer,
+    network: Network,
     salt: &[u8; 32],
     destination_chain: &str,
     gas_value: u64,
@@ -130,11 +133,12 @@ pub fn send_its_deploy_remote_interchain_token(
     let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
     let deployer = fee_payer;
+    let its_id = network.solana_its_id();
 
-    let token_id = interchain_token_id(&deployer, salt);
-    let (its_root_pda, _) = find_its_root_pda();
-    let (mint, _) = find_interchain_token_pda(&its_root_pda, &token_id);
-    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, &token_id);
+    let token_id = interchain_token_id(network, &deployer, salt);
+    let (its_root_pda, _) = find_its_root_pda(network);
+    let (mint, _) = find_interchain_token_pda(network, &its_root_pda, &token_id);
+    let (token_manager_pda, _) = find_token_manager_pda(network, &its_root_pda, &token_id);
 
     let mpl_metadata_program = mpl_token_metadata_program_id();
     let (metadata_account, _) = Pubkey::find_program_address(
@@ -142,20 +146,19 @@ pub fn send_its_deploy_remote_interchain_token(
         &mpl_metadata_program,
     );
 
-    let gateway_program = solana_axelar_gateway::id();
+    let gateway_program = network.solana_gateway_id();
     let (gateway_root_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_program);
     let (call_contract_signing_pda, _) =
-        Pubkey::find_program_address(&[b"gtw-call-contract"], &solana_axelar_its::id());
+        Pubkey::find_program_address(&[b"gtw-call-contract"], &its_id);
     let (gateway_event_authority, _) =
         Pubkey::find_program_address(&[b"__event_authority"], &gateway_program);
 
-    let gas_service_program = solana_axelar_gas_service::id();
+    let gas_service_program = network.solana_gas_service_id();
     let (gas_treasury, _) = Pubkey::find_program_address(&[b"gas-service"], &gas_service_program);
     let (gas_event_authority, _) =
         Pubkey::find_program_address(&[b"__event_authority"], &gas_service_program);
 
-    let (event_authority, _) =
-        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &its_id);
 
     let accounts = vec![
         AccountMeta::new(fee_payer, true),
@@ -176,7 +179,7 @@ pub fn send_its_deploy_remote_interchain_token(
         AccountMeta::new_readonly(gas_service_program, false),
         AccountMeta::new_readonly(gas_event_authority, false),
         AccountMeta::new_readonly(event_authority, false),
-        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+        AccountMeta::new_readonly(its_id, false),
     ];
 
     let ix_data = solana_axelar_its::instruction::DeployRemoteInterchainToken {
@@ -187,7 +190,7 @@ pub fn send_its_deploy_remote_interchain_token(
     .data();
 
     let ix = Instruction {
-        program_id: solana_axelar_its::id(),
+        program_id: its_id,
         accounts,
         data: ix_data,
     };
@@ -207,6 +210,7 @@ pub fn send_its_deploy_remote_interchain_token(
 pub fn send_its_interchain_transfer(
     rpc_url: &str,
     keypair: &dyn Signer,
+    network: Network,
     token_id: &[u8; 32],
     source_account: &Pubkey,
     mint: &Pubkey,
@@ -218,27 +222,27 @@ pub fn send_its_interchain_transfer(
     let submit_start = Instant::now();
     let rpc_client = rpc_client(rpc_url);
     let fee_payer = keypair.pubkey();
+    let its_id = network.solana_its_id();
 
-    let (its_root_pda, _) = find_its_root_pda();
-    let (token_manager_pda, _) = find_token_manager_pda(&its_root_pda, token_id);
+    let (its_root_pda, _) = find_its_root_pda(network);
+    let (token_manager_pda, _) = find_token_manager_pda(network, &its_root_pda, token_id);
 
     let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let token_manager_ata = get_associated_token_address(&token_manager_pda, mint, &token_program);
 
-    let gateway_program = solana_axelar_gateway::id();
+    let gateway_program = network.solana_gateway_id();
     let (gateway_root_pda, _) = Pubkey::find_program_address(&[b"gateway"], &gateway_program);
     let (call_contract_signing_pda, _) =
-        Pubkey::find_program_address(&[b"gtw-call-contract"], &solana_axelar_its::id());
+        Pubkey::find_program_address(&[b"gtw-call-contract"], &its_id);
     let (gateway_event_authority, _) =
         Pubkey::find_program_address(&[b"__event_authority"], &gateway_program);
 
-    let gas_service_program = solana_axelar_gas_service::id();
+    let gas_service_program = network.solana_gas_service_id();
     let (gas_treasury, _) = Pubkey::find_program_address(&[b"gas-service"], &gas_service_program);
     let (gas_event_authority, _) =
         Pubkey::find_program_address(&[b"__event_authority"], &gas_service_program);
 
-    let (event_authority, _) =
-        Pubkey::find_program_address(&[b"__event_authority"], &solana_axelar_its::id());
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &its_id);
 
     let accounts = vec![
         AccountMeta::new(fee_payer, true),
@@ -261,7 +265,7 @@ pub fn send_its_interchain_transfer(
             false,
         ),
         AccountMeta::new_readonly(event_authority, false),
-        AccountMeta::new_readonly(solana_axelar_its::id(), false),
+        AccountMeta::new_readonly(its_id, false),
     ];
 
     let ix_data = solana_axelar_its::instruction::InterchainTransfer {
@@ -277,7 +281,7 @@ pub fn send_its_interchain_transfer(
     .data();
 
     let ix = Instruction {
-        program_id: solana_axelar_its::id(),
+        program_id: its_id,
         accounts,
         data: ix_data,
     };

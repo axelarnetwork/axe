@@ -1,6 +1,8 @@
 use eyre::Result;
 use solana_sdk::pubkey::Pubkey;
 
+use crate::types::Network;
+
 /// Solana's getMultipleAccounts supports up to 100 accounts per call.
 const SOLANA_BATCH_SIZE: usize = 100;
 
@@ -12,18 +14,16 @@ const INCOMING_MESSAGE_STATUS_OFFSET: usize = 13;
 /// Returns `(tx_index, Option<status_byte>)` for each tx.
 pub(in super::super) fn batch_check_solana_incoming_messages(
     rpc_client: &solana_client::rpc_client::RpcClient,
+    network: Network,
     txs: &[(usize, [u8; 32])], // (tx_index, command_id)
 ) -> Result<Vec<(usize, Option<u8>)>> {
+    let gateway_id = network.solana_gateway_id();
     let mut results = Vec::with_capacity(txs.len());
     for chunk in txs.chunks(SOLANA_BATCH_SIZE) {
         let pubkeys: Vec<Pubkey> = chunk
             .iter()
             .map(|(_, cmd_id)| {
-                Pubkey::find_program_address(
-                    &[b"incoming message", cmd_id],
-                    &solana_axelar_gateway::id(),
-                )
-                .0
+                Pubkey::find_program_address(&[b"incoming message", cmd_id], &gateway_id).0
             })
             .collect();
         let accounts = rpc_client.get_multiple_accounts(&pubkeys)?;
@@ -58,11 +58,12 @@ pub(in super::super) fn batch_check_solana_incoming_messages(
 /// Status: 0 = approved, non-zero = executed.
 pub(in super::super) fn check_solana_incoming_message(
     rpc_client: &solana_client::rpc_client::RpcClient,
+    network: Network,
     command_id: &[u8; 32],
 ) -> Result<Option<u8>> {
     let (pda, _bump) = Pubkey::find_program_address(
         &[b"incoming message", command_id],
-        &solana_axelar_gateway::id(),
+        &network.solana_gateway_id(),
     );
 
     match rpc_client.get_account_data(&pda) {

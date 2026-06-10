@@ -14,7 +14,7 @@
 //! Callers fall back to their existing constants when the API can't be
 //! reached or returns 0 (testnet/stagenet do this for unsupported routes).
 
-use super::resolve::compiled_network;
+use crate::types::Network;
 
 /// Multiplier applied to the relayer's quote: returned = raw × 3/2.
 /// Covers intraday destination-gas-price swings between estimate-at-startup
@@ -32,16 +32,17 @@ pub(super) const DEFAULT_DEST_GAS_LIMIT: u64 = 400_000;
 /// a 1.5× safety margin.
 ///
 /// Returns `None` when the lookup yields no usable number — either the
-/// compiled network has no Axelarscan endpoint (devnet-amplifier), the
+/// target network has no Axelarscan endpoint (devnet-amplifier), the
 /// HTTP request failed, or the API returned 0 (common on testnet/stagenet
 /// for routes that aren't fully wired through their indexer).
 pub(super) async fn estimate_route_gas(
+    network: Network,
     source_axelar_id: &str,
     destination_axelar_id: &str,
     source_token_symbol: &str,
     gas_limit: u64,
 ) -> Option<u128> {
-    let base = api_base_url()?;
+    let base = api_base_url(network)?;
     let url = format!(
         "{base}/gmp/estimateGasFee?sourceChain={source_axelar_id}\
          &destinationChain={destination_axelar_id}\
@@ -61,11 +62,11 @@ pub(super) async fn estimate_route_gas(
     Some(raw.saturating_mul(SAFETY_NUM) / SAFETY_DEN)
 }
 
-fn api_base_url() -> Option<&'static str> {
-    match compiled_network() {
-        "mainnet" => Some("https://api.axelarscan.io"),
-        "testnet" => Some("https://testnet.api.axelarscan.io"),
-        "stagenet" => Some("https://stagenet.api.axelarscan.io"),
-        _ => None,
+fn api_base_url(network: Network) -> Option<&'static str> {
+    match network {
+        Network::Mainnet => Some("https://api.axelarscan.io"),
+        Network::Testnet => Some("https://testnet.api.axelarscan.io"),
+        Network::Stagenet => Some("https://stagenet.api.axelarscan.io"),
+        Network::DevnetAmplifier => None,
     }
 }

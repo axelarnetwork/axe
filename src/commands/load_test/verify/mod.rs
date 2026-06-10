@@ -13,6 +13,7 @@ use crate::config::ChainsConfig;
 use crate::cosmos::read_axelar_rpc;
 use crate::evm::AxelarAmplifierGateway;
 use crate::solana::solana_call_contract_index;
+use crate::types::Network;
 use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
@@ -381,13 +382,13 @@ fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) ->
 /// Compute the source-side `message_id` from a confirmed `TxMetrics` based on
 /// the source chain family. EVM/Stellar/Sui pre-format the id in
 /// `tx.signature`; SVM appends the `call_contract` log index.
-fn message_id_for_source(tx: &TxMetrics, source_type: SourceChainType) -> String {
+fn message_id_for_source(tx: &TxMetrics, source_type: SourceChainType, network: Network) -> String {
     match source_type {
         SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+            format!("{}-{}.1", tx.signature, solana_call_contract_index(network))
         }
     }
 }
@@ -463,6 +464,7 @@ pub async fn verify_onchain<P: Provider>(
     provider: &P,
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
+    network: Network,
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
@@ -493,7 +495,7 @@ pub async fn verify_onchain<P: Provider>(
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
-                message_id_for_source(tx, source_type),
+                message_id_for_source(tx, source_type, network),
                 contract_addr,
                 None, // EVM destination, not needed
                 String::new(),
@@ -592,6 +594,7 @@ pub async fn verify_onchain_stellar_gmp(
     signer_pk: [u8; 32],
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
+    network: Network,
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
@@ -617,7 +620,7 @@ pub async fn verify_onchain_stellar_gmp(
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
-                message_id_for_source(tx, source_type),
+                message_id_for_source(tx, source_type, network),
                 Address::ZERO,
                 None,
                 tx.gmp_destination_chain.clone(),
@@ -716,16 +719,10 @@ pub(super) fn tx_to_pending_solana(
     source_chain: &str,
     has_voting_verifier: bool,
     source_type: SourceChainType,
+    network: Network,
 ) -> Result<PendingTx> {
     let payload_hash = parse_first_leg_payload_hash(tx, true)?;
-    let message_id = match source_type {
-        SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
-            tx.signature.clone()
-        }
-        SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
-        }
-    };
+    let message_id = message_id_for_source(tx, source_type, network);
     let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
     Ok(PendingTx {
         idx,
@@ -859,6 +856,7 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Re
 /// Burst-mode Sui destination verifier — block on confirmed metrics array.
 /// Uses Sui events polling (`MessageApproved` / `MessageExecuted` on the
 /// AxelarGateway events module) for the destination-side phases.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_sui_gmp(
     config: &Path,
     source_chain: &str,
@@ -867,6 +865,7 @@ pub async fn verify_onchain_sui_gmp(
     sui_rpc: &str,
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
+    network: Network,
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
@@ -896,7 +895,7 @@ pub async fn verify_onchain_sui_gmp(
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
-                message_id_for_source(tx, source_type),
+                message_id_for_source(tx, source_type, network),
                 Address::ZERO,
                 None,
                 tx.gmp_destination_chain.clone(),
@@ -941,6 +940,7 @@ pub async fn verify_onchain_solana_streaming(
     destination_chain: &str,
     destination_address: &str,
     solana_rpc: &str,
+    network: Network,
     mut rx: mpsc::UnboundedReceiver<PendingTx>,
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
@@ -959,6 +959,7 @@ pub async fn verify_onchain_solana_streaming(
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
         DestinationChecker::Solana {
             rpc_client,
+            network,
             _phantom: std::marker::PhantomData,
         };
 
@@ -993,6 +994,7 @@ pub async fn verify_onchain_solana_streaming(
 /// 2. **Routed** — Cosmos Gateway outgoing_messages (dest Solana chain)
 /// 3. **Approved** — Solana IncomingMessage PDA exists
 /// 4. **Executed** — Solana IncomingMessage PDA status = executed
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana(
     config: &Path,
     source_chain: &str,
@@ -1001,6 +1003,7 @@ pub async fn verify_onchain_solana(
     solana_rpc: &str,
     metrics: &mut [TxMetrics],
     source_type: SourceChainType,
+    network: Network,
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
     let total = confirmed.len();
@@ -1025,7 +1028,7 @@ pub async fn verify_onchain_solana(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
-            let message_id = message_id_for_source(tx, source_type);
+            let message_id = message_id_for_source(tx, source_type, network);
             let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
             pending_tx_for_gmp_batch(
                 tx,
@@ -1048,6 +1051,7 @@ pub async fn verify_onchain_solana(
     let checker: DestinationChecker<'_, alloy::providers::RootProvider> =
         DestinationChecker::Solana {
             rpc_client,
+            network,
             _phantom: std::marker::PhantomData,
         };
 
@@ -1083,12 +1087,14 @@ pub async fn verify_onchain_solana(
 /// 4. **Routed** — Cosmos Gateway outgoing_messages (second-leg)
 /// 5. **Approved** — Solana IncomingMessage PDA exists
 /// 6. **Executed** — Solana IncomingMessage PDA status = executed
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_its(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
     _destination_address: &str,
     solana_rpc: &str,
+    network: Network,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
@@ -1130,6 +1136,7 @@ pub async fn verify_onchain_solana_its(
             cosm_gateway_dest,
             dest: ItsHubDest::Solana {
                 rpc_url: solana_rpc.to_string(),
+                network,
             },
         },
     )
@@ -1140,11 +1147,13 @@ pub async fn verify_onchain_solana_its(
 
 /// Streaming version of `verify_onchain_solana_its` — runs concurrently with
 /// the send phase, receiving confirmed txs via the channel.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_solana_its_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
     solana_rpc: &str,
+    network: Network,
     rx: mpsc::UnboundedReceiver<PendingTx>,
     send_done: Arc<AtomicBool>,
     spinner: indicatif::ProgressBar,
@@ -1177,6 +1186,7 @@ pub async fn verify_onchain_solana_its_streaming(
             cosm_gateway_dest,
             dest: ItsHubDest::Solana {
                 rpc_url: solana_rpc.to_string(),
+                network,
             },
         },
     )

@@ -107,8 +107,10 @@ async fn main() -> Result<()> {
                 mnemonic,
             } => {
                 if let Some(config) = config {
+                    let network = cli::resolve_network(cli.network, Some(&config))?;
                     commands::test_gmp::run_config(
                         config,
+                        network,
                         source_chain,
                         destination_chain,
                         destination_address,
@@ -131,8 +133,10 @@ async fn main() -> Result<()> {
                 fresh_token,
             } => {
                 if let Some(config) = config {
+                    let network = cli::resolve_network(cli.network, Some(&config))?;
                     commands::test_its::run_config(
                         config,
+                        network,
                         source_chain,
                         destination_chain,
                         mnemonic,
@@ -166,6 +170,7 @@ async fn main() -> Result<()> {
                 key_cycle,
                 extra_accounts,
             } => {
+                let network = cli::resolve_network(cli.network, Some(&config))?;
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
                     test_type,
@@ -178,6 +183,7 @@ async fn main() -> Result<()> {
 
                 commands::load_test::run(commands::load_test::LoadTestArgs {
                     config,
+                    network,
                     test_type: resolved.test_type,
                     protocol,
                     destination_chain: resolved.destination_chain,

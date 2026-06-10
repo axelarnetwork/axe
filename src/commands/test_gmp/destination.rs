@@ -113,6 +113,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
 #[allow(clippy::too_many_arguments)]
 pub fn approve_and_execute_svm(
     dst_rpc: &str,
+    network: crate::types::Network,
     source_chain: &str,
     destination_chain: &str,
     source_address: &str,
@@ -128,7 +129,7 @@ pub fn approve_and_execute_svm(
     ui::step_header(step_idx_approve, total_steps, "Approve on Solana gateway");
     let keypair = load_keypair(None)?;
     let execute_data = decode_execute_data(execute_data_hex)?;
-    approve_messages_on_gateway(dst_rpc, &keypair, &execute_data)?;
+    approve_messages_on_gateway(dst_rpc, &keypair, network, &execute_data)?;
 
     ui::step_header(step_idx_execute, total_steps, "Execute on destination");
     let gmp_message = Message {
@@ -142,7 +143,7 @@ pub fn approve_and_execute_svm(
         payload_hash: payload_hash.0,
     };
 
-    let memo_sig = execute_on_memo(dst_rpc, &keypair, gmp_message, payload_bytes)?;
+    let memo_sig = execute_on_memo(dst_rpc, &keypair, network, gmp_message, payload_bytes)?;
     ui::tx_hash("execute", &memo_sig.to_string());
 
     Ok(())

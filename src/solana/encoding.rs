@@ -1,14 +1,16 @@
 //! Pure derivations: ITS PDA seeds, the on-chain interchain-token-id
 //! formula, ATA addresses, and the keypair file loader.
 //!
-//! Nothing in this module touches the network — it's all byte-level
-//! constructions plus `dirs::home_dir`. Keeping it isolated means the
-//! load-test and command paths can call PDA helpers without pulling
-//! `RpcClient` into the dependency graph.
+//! Nothing in this module performs I/O beyond `dirs::home_dir` — it's all
+//! byte-level constructions, parameterized by the target [`Network`]'s ITS
+//! program ID. Keeping it isolated means the load-test and command paths can
+//! call PDA helpers without pulling `RpcClient` into the dependency graph.
 
 use eyre::Result;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, read_keypair_file};
+
+use crate::types::Network;
 
 const ITS_SEED: &[u8] = b"interchain-token-service";
 const TOKEN_MANAGER_SEED: &[u8] = b"token-manager";
@@ -16,21 +18,29 @@ const INTERCHAIN_TOKEN_SEED: &[u8] = b"interchain-token";
 const PREFIX_INTERCHAIN_TOKEN_SALT: &[u8] = b"interchain-token-salt";
 const PREFIX_INTERCHAIN_TOKEN_ID: &[u8] = b"interchain-token-id";
 
-pub fn find_its_root_pda() -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[ITS_SEED], &solana_axelar_its::id())
+pub fn find_its_root_pda(network: Network) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[ITS_SEED], &network.solana_its_id())
 }
 
-pub fn find_token_manager_pda(its_root: &Pubkey, token_id: &[u8; 32]) -> (Pubkey, u8) {
+pub fn find_token_manager_pda(
+    network: Network,
+    its_root: &Pubkey,
+    token_id: &[u8; 32],
+) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[TOKEN_MANAGER_SEED, its_root.as_ref(), token_id],
-        &solana_axelar_its::id(),
+        &network.solana_its_id(),
     )
 }
 
-pub fn find_interchain_token_pda(its_root: &Pubkey, token_id: &[u8]) -> (Pubkey, u8) {
+pub fn find_interchain_token_pda(
+    network: Network,
+    its_root: &Pubkey,
+    token_id: &[u8],
+) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[INTERCHAIN_TOKEN_SEED, its_root.as_ref(), token_id],
-        &solana_axelar_its::id(),
+        &network.solana_its_id(),
     )
 }
 
@@ -55,8 +65,8 @@ pub fn get_associated_token_address(
 }
 
 /// Derive the interchain token ID from deployer and salt.
-pub fn interchain_token_id(deployer: &Pubkey, salt: &[u8; 32]) -> [u8; 32] {
-    let chain_name_hash = solana_axelar_its::CHAIN_NAME_HASH;
+pub fn interchain_token_id(network: Network, deployer: &Pubkey, salt: &[u8; 32]) -> [u8; 32] {
+    let chain_name_hash = network.solana_its_chain_name_hash();
     let deploy_salt = solana_sdk::keccak::hashv(&[
         PREFIX_INTERCHAIN_TOKEN_SALT,
         &chain_name_hash,

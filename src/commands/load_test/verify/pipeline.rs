@@ -94,6 +94,7 @@ pub(super) enum DestinationChecker<'a, P: Provider> {
     },
     Solana {
         rpc_client: Arc<solana_client::rpc_client::RpcClient>,
+        network: crate::types::Network,
         _phantom: std::marker::PhantomData<&'a P>,
     },
     Stellar {
@@ -369,8 +370,13 @@ pub(super) async fn poll_pipeline<P: Provider>(
         // Destination checks (Solana batch / EVM individual)
         if !dest_indices.is_empty() {
             match checker {
-                DestinationChecker::Solana { rpc_client, .. } => {
+                DestinationChecker::Solana {
+                    rpc_client,
+                    network,
+                    ..
+                } => {
                     let client = rpc_client.clone();
+                    let network = *network;
                     let data: Vec<(usize, [u8; 32])> = dest_indices
                         .iter()
                         .map(|&i| {
@@ -384,7 +390,7 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         })
                         .collect::<Result<Vec<_>>>()?;
                     let results = tokio::task::spawn_blocking(move || {
-                        batch_check_solana_incoming_messages(&client, &data)
+                        batch_check_solana_incoming_messages(&client, network, &data)
                     })
                     .await
                     .wrap_err("Solana destination check task failed")??;
@@ -669,7 +675,10 @@ pub(super) async fn poll_pipeline<P: Provider>(
 #[derive(Clone)]
 pub(super) enum ItsHubDest {
     /// Solana destination — uses `incoming_message` PDA + `command_id`.
-    Solana { rpc_url: String },
+    Solana {
+        rpc_url: String,
+        network: crate::types::Network,
+    },
     /// Stellar destination — uses Soroban `is_message_approved` /
     /// `is_message_executed` view calls on the gateway contract.
     Stellar {
@@ -746,7 +755,7 @@ pub(super) async fn poll_pipeline_its_hub(
     let mut received_first_tx = false;
 
     let sol_rpc_client = match &dest {
-        ItsHubDest::Solana { rpc_url } => Some(Arc::new(
+        ItsHubDest::Solana { rpc_url, .. } => Some(Arc::new(
             solana_client::rpc_client::RpcClient::new_with_commitment(
                 rpc_url.clone(),
                 solana_commitment_config::CommitmentConfig::finalized(),
@@ -1008,14 +1017,15 @@ pub(super) async fn poll_pipeline_its_hub(
         if !sol_dest_data.is_empty() || !approved_indices.is_empty() || !executed_indices.is_empty()
         {
             match &dest {
-                ItsHubDest::Solana { .. } => {
+                ItsHubDest::Solana { network, .. } => {
                     if let Some(client) = sol_rpc_client.as_ref()
                         && !sol_dest_data.is_empty()
                     {
                         let client = client.clone();
+                        let network = *network;
                         let data = sol_dest_data;
                         let results = tokio::task::spawn_blocking(move || {
-                            batch_check_solana_incoming_messages(&client, &data)
+                            batch_check_solana_incoming_messages(&client, network, &data)
                         })
                         .await
                         .wrap_err("Solana ITS destination check task failed")??;

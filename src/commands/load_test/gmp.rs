@@ -221,7 +221,7 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
                     || format!(
                         "{}-{}.1",
                         t.signature,
-                        crate::solana::solana_call_contract_index()
+                        crate::solana::solana_call_contract_index(args.network)
                     ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
@@ -241,6 +241,7 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
             &provider,
             &mut report.transactions,
             verify::SourceChainType::Svm,
+            args.network,
         )
         .await?;
         report.verification = Some(verification);
@@ -325,8 +326,8 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     .await?;
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
 
-    // Destination on Solana: memo program (resolved per feature flag)
-    let destination_address = evm_sender::memo_program_id().to_string();
+    // Destination on Solana: memo program (resolved from the target network)
+    let destination_address = evm_sender::memo_program_id(args.network).to_string();
     let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
@@ -350,6 +351,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         let vdest_addr = destination_address.to_string();
         let vdest_rpc = args.destination_rpc.clone();
         let vdone = std::sync::Arc::clone(&send_done);
+        let vnetwork = args.network;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_solana_streaming(
@@ -358,6 +360,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
                 &vdest,
                 &vdest_addr,
                 &vdest_rpc,
+                vnetwork,
                 verify_rx,
                 vdone,
                 spinner,
@@ -388,7 +391,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
                     || format!(
                         "{}-{}.1",
                         t.signature,
-                        crate::solana::solana_call_contract_index()
+                        crate::solana::solana_call_contract_index(args.network)
                     ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
@@ -415,6 +418,7 @@ pub(super) async fn run_evm_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
             &args.destination_rpc,
             &mut report.transactions,
             verify::SourceChainType::Evm,
+            args.network,
         )
         .await?;
         report.verification = Some(verification);
@@ -636,6 +640,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
             &dest_read_provider,
             &mut report.transactions,
             verify::SourceChainType::Evm,
+            args.network,
         )
         .await?;
         report.verification = Some(verification);
@@ -668,7 +673,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     ui::kv("destination", dest);
 
     // Destination is the Solana memo program
-    let destination_address = evm_sender::memo_program_id().to_string();
+    let destination_address = evm_sender::memo_program_id(args.network).to_string();
     let destination_address = destination_address.as_str();
     ui::kv("destination program", destination_address);
 
@@ -688,6 +693,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         let vdest_addr = destination_address.to_string();
         let vdest_rpc = args.destination_rpc.clone();
         let vdone = std::sync::Arc::clone(&send_done);
+        let vnetwork = args.network;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_solana_streaming(
@@ -696,6 +702,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
                 &vdest,
                 &vdest_addr,
                 &vdest_rpc,
+                vnetwork,
                 verify_rx,
                 vdone,
                 spinner,
@@ -721,7 +728,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
                     || format!(
                         "{}-{}.1",
                         t.signature,
-                        crate::solana::solana_call_contract_index()
+                        crate::solana::solana_call_contract_index(args.network)
                     ) == msg_id
             }) {
                 tx.amplifier_timing = Some(timing);
@@ -741,6 +748,7 @@ pub(super) async fn run_sol_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
             &args.destination_rpc,
             &mut report.transactions,
             verify::SourceChainType::Svm,
+            args.network,
         )
         .await?;
         report.verification = Some(verification);
@@ -987,6 +995,7 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
             &provider,
             &mut report.transactions,
             verify::SourceChainType::Stellar,
+            args.network,
         )
         .await?;
         report.verification = Some(verification);
@@ -1088,6 +1097,7 @@ pub(super) async fn run_evm_to_stellar(args: LoadTestArgs, _run_start: Instant) 
         signer_pk,
         &mut report.transactions,
         verify::SourceChainType::Evm,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);
@@ -1135,7 +1145,7 @@ pub(super) async fn run_stellar_to_sol(args: LoadTestArgs, _run_start: Instant) 
     // we reuse it and pass it through as the payload override (otherwise
     // stellar_sender's default EVM-ABI payload causes a Borsh deserialize
     // error on the destination side).
-    let memo_program = evm_sender::memo_program_id();
+    let memo_program = evm_sender::memo_program_id(args.network);
     let destination_address = memo_program.to_string();
     ui::address("Solana memo program", &destination_address);
 
@@ -1194,6 +1204,7 @@ pub(super) async fn run_stellar_to_sol(args: LoadTestArgs, _run_start: Instant) 
         &solana_rpc,
         &mut report.transactions,
         verify::SourceChainType::Stellar,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);
@@ -1249,6 +1260,7 @@ pub(super) async fn run_sol_to_stellar(args: LoadTestArgs, _run_start: Instant) 
         signer_pk,
         &mut report.transactions,
         verify::SourceChainType::Svm,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);
@@ -1528,6 +1540,7 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         &provider,
         &mut report.transactions,
         verify::SourceChainType::Sui,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);
@@ -1590,17 +1603,17 @@ pub(super) async fn run_sui_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         );
     }
 
-    // Destination on Solana: the memo program (resolved per feature flag).
+    // Destination on Solana: the memo program (resolved from the target network).
     // Same target `run_evm_to_sol` uses, so the receive-side flow on Solana
     // is identical (memo program acks via gateway).
-    let destination_address = evm_sender::memo_program_id().to_string();
+    let destination_address = evm_sender::memo_program_id(args.network).to_string();
     ui::kv("destination program", &destination_address);
 
     // The Solana axelar gateway needs the executable-payload framing
     // (1-byte scheme prefix + ABI-encoded SolanaGatewayPayload with the
     // counter PDA as a writable account). Building the bytes here matches
     // what `run_evm_to_sol` sends so the Solana relayer can execute it.
-    let memo_program_id = evm_sender::memo_program_id();
+    let memo_program_id = evm_sender::memo_program_id(args.network);
     let (counter_pda, _) =
         solana_sdk::pubkey::Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
@@ -1776,6 +1789,7 @@ pub(super) async fn run_sui_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
         &solana_rpc,
         &mut report.transactions,
         verify::SourceChainType::Sui,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);
