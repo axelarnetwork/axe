@@ -450,6 +450,16 @@ pub(super) async fn distribute_tokens<P: Provider>(
 /// `explicit_nonce`: when `Some`, bypasses alloy's RPC-based nonce fetch to
 /// avoid collisions when the same key fires again before the previous tx
 /// confirms.
+///
+/// `gas_arg_scaling_factor`: per-source-chain divisor exponent applied to the
+/// `gasValue` *argument* of `interchainTransfer` so it matches the
+/// source-side gas service's expected unit. `msg.value` always stays in
+/// 18-decimal EVM-wei (alloy's `.value()` takes wei). For Hedera the factor
+/// is 10 — passing the 18-decimal value as the function arg yields a 10^10
+/// mismatch and the call reverts with empty data (eth_estimateGas →
+/// "CONTRACT_REVERT_EXECUTED, data: 0x" at submit time). Other EVM chains
+/// in the matrix omit `gasScalingFactor` so callers pass 0 and behavior is
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_interchain_transfer<P: Provider>(
     provider: &P,
@@ -459,11 +469,17 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
     receiver_bytes: &Bytes,
     amount: U256,
     gas_value: U256,
+    gas_arg_scaling_factor: u32,
     explicit_nonce: Option<u64>,
 ) -> TxMetrics {
     let submit_start = Instant::now();
 
     let hub_gas = gas_value * U256::from(2);
+    let gas_value_arg = if gas_arg_scaling_factor == 0 {
+        hub_gas
+    } else {
+        hub_gas / U256::from(10).pow(U256::from(gas_arg_scaling_factor))
+    };
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
         .interchainTransfer(
@@ -472,7 +488,7 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
             receiver_bytes.clone(),
             amount,
             Bytes::new(),
-            hub_gas,
+            gas_value_arg,
         )
         .value(hub_gas);
     let call = match explicit_nonce {
@@ -553,6 +569,29 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
 
 fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
     make_failure_with_hash(submit_start, error, None)
+}
+
+/// Look up `gasScalingFactor` for a source EVM chain in chains-config. The
+/// caller reads this once at run() entry and threads it through to
+/// `execute_interchain_transfer`. Hedera = 10 (HTS native 8-dec ↔ EVM-wei
+/// 18-dec ⇒ scale by 10^10); most chains omit the field ⇒ 0 (no scaling).
+/// On any IO / parse failure returns 0 — over-paying the gasValue arg via
+/// no-scaling is safe (gas service refunds the excess), whereas under-paying
+/// causes the empty-data revert we're fixing.
+pub(super) fn read_gas_arg_scaling_factor(
+    config_path: &std::path::Path,
+    source_chain_id: &str,
+) -> u32 {
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return 0;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return 0;
+    };
+    root.pointer(&format!("/chains/{source_chain_id}/gasScalingFactor"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0)
 }
 
 /// Rescale 18-decimal-assumed sizing amounts to the source token's actual

@@ -115,10 +115,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
     let receiver_bytes = Bytes::from(sol_keypair.pubkey().to_bytes().to_vec());
 
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
+
     let targets = TransferTargets {
         its_proxy_addr: its.its_proxy_addr,
         token_id: token.token_id,
         gas_value,
+        gas_arg_scaling_factor,
         receiver_bytes,
     };
 
@@ -158,6 +162,9 @@ struct TransferTargets {
     its_proxy_addr: Address,
     token_id: FixedBytes<32>,
     gas_value: U256,
+    /// See `its_evm_source::read_gas_arg_scaling_factor` — Hedera = 10,
+    /// other EVM chains = 0.
+    gas_arg_scaling_factor: u32,
     receiver_bytes: Bytes,
 }
 
@@ -443,12 +450,14 @@ async fn run_sustained_pipeline(
     let its_proxy_addr = targets.its_proxy_addr;
     let token_id = targets.token_id;
     let gas_value = targets.gas_value;
+    let gas_arg_scaling_factor = targets.gas_arg_scaling_factor;
     let receiver_bytes = targets.receiver_bytes.clone();
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let dc = dest_chain_s.clone();
             let gv = gas_value;
+            let gsf = gas_arg_scaling_factor;
             let rb = receiver_bytes.clone();
             let amt = amount_per_tx;
             let its_proxy = its_proxy_addr;
@@ -463,7 +472,7 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 let mut result = execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, nonce,
                 )
                 .await;
                 if result.success {
@@ -550,6 +559,7 @@ async fn run_burst_pipeline(
         let total = num_txs;
         let dc = dest_chain.clone();
         let gv = targets.gas_value;
+        let gsf = targets.gas_arg_scaling_factor;
         let rb = targets.receiver_bytes.clone();
         let amt = sizing.amount_per_tx;
         let its_proxy = targets.its_proxy_addr;
@@ -564,9 +574,10 @@ async fn run_burst_pipeline(
 
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result =
-                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, None)
-                        .await;
+                let result = execute_interchain_transfer(
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, None,
+                )
+                .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);

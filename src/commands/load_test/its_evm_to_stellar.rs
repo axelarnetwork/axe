@@ -133,6 +133,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let (stellar_recipient_addr, receiver_bytes) =
         load_stellar_recipient(args.private_key.as_deref())?;
 
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
+
     let transfer = TransferContext {
         rpc_url: evm_rpc_url,
         derived,
@@ -141,6 +144,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         receiver_bytes,
         amount_per_tx: sizing.amount_per_tx,
         gas_value,
+        gas_arg_scaling_factor,
     };
 
     if !sizing.burst_mode {
@@ -206,6 +210,9 @@ struct TransferContext {
     receiver_bytes: Bytes,
     amount_per_tx: U256,
     gas_value: U256,
+    /// See `its_evm_source::read_gas_arg_scaling_factor` — Hedera = 10,
+    /// other EVM chains = 0.
+    gas_arg_scaling_factor: u32,
 }
 
 /// ITS token identity on the EVM source plus the remote-deploy message if this
@@ -670,6 +677,7 @@ async fn run_sustained_pipeline(
         receiver_bytes,
         amount_per_tx,
         gas_value,
+        gas_arg_scaling_factor,
         ..
     } = transfer;
 
@@ -677,6 +685,7 @@ async fn run_sustained_pipeline(
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let dc = dest_chain_s.clone();
             let gv = gas_value;
+            let gsf = gas_arg_scaling_factor;
             let rb = receiver_bytes.clone();
             let amt = amount_per_tx;
             let its_proxy = its_proxy_addr;
@@ -691,7 +700,7 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 let mut result = super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, nonce,
                 )
                 .await;
                 if result.success {
@@ -774,6 +783,7 @@ async fn run_burst_pipeline(
         let total = num_txs;
         let dc = dest_chain.clone();
         let gv = transfer.gas_value;
+        let gsf = transfer.gas_arg_scaling_factor;
         let rb = transfer.receiver_bytes.clone();
         let amt = transfer.amount_per_tx;
         let its_proxy = transfer.its_proxy_addr;
@@ -788,7 +798,7 @@ async fn run_burst_pipeline(
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
                 let result = super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, None,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, None,
                 )
                 .await;
                 if result.success || attempt == MAX_RETRIES {

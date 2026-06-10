@@ -349,6 +349,8 @@ async fn run_burst_pipeline(
 
     let dest_chain_id = args.destination_axelar_id.clone();
     let gas_value = U256::from(evm.gas_value_wei);
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
     let mut tasks = Vec::with_capacity(num_txs);
     for derived_signer in derived {
         let metrics_clone = Arc::clone(&metrics_list);
@@ -376,6 +378,7 @@ async fn run_burst_pipeline(
                     &rb,
                     amount_per_tx,
                     gas_value,
+                    gas_arg_scaling_factor,
                     None,
                 )
                 .await;
@@ -472,6 +475,8 @@ async fn run_sustained_pipeline(
     let token_id = evm.token_id;
     let recipient_bytes = sui.recipient_bytes.clone();
     let gas_value = U256::from(evm.gas_value_wei);
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -484,7 +489,15 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, token_id, &dc, &rb, amt, gas_value, nonce,
+                    &provider,
+                    its_proxy,
+                    token_id,
+                    &dc,
+                    &rb,
+                    amt,
+                    gas_value,
+                    gas_arg_scaling_factor,
+                    nonce,
                 )
                 .await
             })
