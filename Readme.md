@@ -66,6 +66,41 @@ means the forward and reverse legs differ.
 ## Quick Start
 
 ```bash
+# Install (single binary, all networks)
+cargo install --locked --git https://github.com/axelarnetwork/axe axe
+
+# Run from anywhere — chains-config is fetched and cached automatically
+axe verifiers testnet xrpl
+axe info block --network mainnet
+```
+
+One binary serves all four networks. Pick the network with the global
+`--network` flag (or `AXE_NETWORK` env var): `mainnet | testnet | stagenet |
+devnet-amplifier`. When neither is given, the network is taken from the
+`--config` filename, falling back to `testnet`. A `--network` flag that
+contradicts the `--config` filename is a hard error.
+
+### Config resolution
+
+Commands need the chains-config JSON from
+[axelar-contract-deployments](https://github.com/axelarnetwork/axelar-contract-deployments).
+axe resolves it in this order:
+
+1. Explicit `--config <path>` flag or `CHAINS_CONFIG` env var
+2. A sibling checkout at `../axelar-contract-deployments/axelar-chains-config/info/<network>.json`
+3. A cached copy (refreshed when older than 24h):
+   `~/Library/Application Support/axe/chains-config/` on macOS,
+   `~/.local/share/axe/chains-config/` on Linux
+4. Fetched from GitHub and cached
+
+Delete the cache file (or pass `--config`) to force a refresh.
+
+### Deploying a new chain (requires a local checkout)
+
+`axe deploy` writes back into the chains-config and reads contract artifacts,
+so it needs a real checkout — set it up as a sibling directory:
+
+```bash
 # 1. Clone the contract deployments repo as a sibling
 git clone https://github.com/axelarnetwork/axelar-contract-deployments.git
 cd axelar-contract-deployments && npm install && cd ..
@@ -74,11 +109,7 @@ cd axelar-contract-deployments && npm install && cd ..
 cp axe/.env.example axe/.env
 # Edit .env with your chain details, keys, and mnemonics
 
-# 3. Build and install
-cd axe
-cargo build && cp target/debug/axe ~/.cargo/bin/axe
-
-# 4. Initialize and deploy
+# 3. Initialize and deploy
 axe deploy init
 axe deploy run
 ```
@@ -187,7 +218,7 @@ axe its-ownership mainnet
 axe its-ownership stagenet --json
 ```
 
-Reads the sibling `axelar-contract-deployments/axelar-chains-config/info/<network>.json`
+Reads the network's chains-config (see [Config resolution](#config-resolution))
 and prints a compact table of ITS owner/operator addresses. EVM rows query
 `owner()` and verify configured candidates with `isOperator(address)`; Sui,
 Solana, and Stellar are included where their config/RPC data exposes the same
@@ -219,12 +250,12 @@ Sends a loopback GMP message on a deployed EVM chain and relays it through the f
 ### Solana manual relaying
 
 ```bash
-cargo run --no-default-features --features testnet -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana
+cargo run -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana
 ```
 
 Sends a GMP message from Solana and manually relays it through the full Amplifier pipeline end-to-end: callContract → verify_messages → vote → end_poll → route_messages → construct_proof → approve on Solana gateway (init verification session → verify all 12 signatures → approve message). Requires `MNEMONIC` env var with a funded Cosmos wallet.
 
-Build with the matching feature flag for the target network (`devnet-amplifier`, `stagenet`, `testnet`).
+The network follows the `--config` filename (`devnet-amplifier`, `stagenet`, `testnet`, `mainnet`).
 
 ## Test ITS
 
@@ -255,7 +286,7 @@ See [docs/load-test-coverage.md](docs/load-test-coverage.md) for the full source
 | Stellar ↔ Sui | ✅ Stellar → Sui | (deferred) |
 | Stellar ↔ XRPL / Sui ↔ XRPL | (deferred) | (deferred) |
 
-**Build features pick the network**: pass exactly one of `--features mainnet | testnet | stagenet | devnet-amplifier` (with `--no-default-features`). The binary fails fast at startup if the config filename doesn't match the compiled feature.
+**The network is a runtime choice**: pass `--network mainnet | testnet | stagenet | devnet-amplifier` (or set `AXE_NETWORK`). When omitted, the network is inferred from the `--config` filename. The binary fails fast at startup if `--network` contradicts the config filename.
 
 ## Modes
 
@@ -381,10 +412,10 @@ axe test load-test \
 
 ## Stagenet / testnet / mainnet
 
-On stagenet/testnet/mainnet the relayer requires gas payment. Build with the appropriate feature flag — the binary's compiled feature must match the config:
+On stagenet/testnet/mainnet the relayer requires gas payment. The same binary serves every network — the network is picked at runtime from the `--config` filename (or `--network`):
 
 ```bash
-cargo build --release --no-default-features --features stagenet  # or testnet / mainnet / devnet-amplifier
+cargo build --release
 cp target/release/axe ~/.cargo/bin/axe
 ```
 
@@ -411,7 +442,7 @@ EVM_PRIVATE_KEY=0x... axe test load-test \
 
 ### Mainnet examples
 
-Mainnet works for every pair where both chains are deployed there: EVM, Solana, Stellar, Sui, XRPL, and XRPL-EVM. The `--features mainnet` build resolves all program IDs (Solana gateway/ITS/gas-service/memo) to mainnet automatically.
+Mainnet works for every pair where both chains are deployed there: EVM, Solana, Stellar, Sui, XRPL, and XRPL-EVM. Pointing `--config` at `mainnet.json` resolves all program IDs (Solana gateway/ITS/gas-service/memo) to mainnet automatically.
 
 ```bash
 # Solana → EVM ITS (or any direction)
@@ -438,8 +469,6 @@ axe test load-test \
 **Mainnet vs testnet relay**:
 - `axe test load-test` is observe-only — sends source txs and watches the Axelar relayer process them. Works on every environment that has a live relayer (testnet, stagenet, mainnet).
 - `axe test gmp` (the legacy single-message mode) manually drives the entire pipeline (vote → end_poll → route → constructProof → approve → execute). Use it for debugging or running without a live relayer. Requires `MNEMONIC` set to a Cosmos wallet funded for Axelar fees.
-
-> **Note:** `cargo install --path .` does a clean compile which triggers a known borsh derive bug in `solana-axelar-std`. Use `cargo build` (incremental) + manual copy instead.
 
 Run `axe test load-test --help` for all options.
 

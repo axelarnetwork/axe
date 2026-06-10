@@ -2,6 +2,9 @@
 name = "axe"
 version = "0.1.0"
 edition = "2024"
+description = "Swiss army knife CLI for Axelar cross-chain development: deploy, test, decode, monitor"
+repository = "https://github.com/axelarnetwork/axe"
+license = "MIT"
 
 [dependencies]
 alloy = { version = "1.6.3", features = ["provider-http", "signer-local", "network", "rpc-types", "contract", "dyn-abi", "json-abi"] }
