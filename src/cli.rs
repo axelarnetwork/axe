@@ -58,7 +58,7 @@ pub enum Commands {
     /// Show active verifiers for a chain
     Verifiers {
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        network: Network,
         /// Chain axelar ID (e.g. solana, ethereum, avalanche-fuji)
         chain: String,
         /// Output as JSON
@@ -69,7 +69,7 @@ pub enum Commands {
     /// Show ITS owner/operator addresses across a network
     ItsOwnership {
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        network: Network,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -80,7 +80,7 @@ pub enum Commands {
     /// process if any wallet is underfunded.
     CheckBalances {
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        network: Network,
     },
 
     /// Show network info (e.g. block height + timestamp)
@@ -92,7 +92,7 @@ pub enum Commands {
     /// Show recent votes cast by a single verifier on a given chain
     VerifierVotes {
         /// Axelar network (testnet, mainnet)
-        network: String,
+        network: Network,
         /// Chain axelar ID (e.g. solana, xrpl, hedera)
         chain: String,
         /// Verifier axelar1... address
@@ -313,7 +313,7 @@ pub enum InfoCommands {
 
         /// Axelar network (mainnet, testnet, stagenet, devnet-amplifier)
         #[arg(long, default_value = "mainnet")]
-        network: String,
+        network: Network,
 
         /// Predict the block at this time (RFC3339, e.g.
         /// `2026-05-18T14:00:00Z`, or unix seconds). Mutually exclusive
@@ -354,7 +354,7 @@ pub enum DecodeCommands {
 
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
         #[arg(long)]
-        network: Option<String>,
+        network: Option<Network>,
 
         /// Number of recent transactions to show per program (default: 20)
         #[arg(long, default_value = "20")]
@@ -373,7 +373,7 @@ pub enum DecodeCommands {
 
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
         #[arg(long)]
-        network: String,
+        network: Network,
 
         /// EVM chain name (e.g. avalanche-fuji, eth-sepolia)
         #[arg(long)]

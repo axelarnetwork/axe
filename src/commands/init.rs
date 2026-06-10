@@ -6,6 +6,7 @@ use alloy::signers::local::PrivateKeySigner;
 use eyre::Result;
 use serde_json::{Value, json};
 
+use crate::config_source;
 use crate::cosmos::{derive_axelar_wallet, read_axelar_config};
 use crate::state::{State, data_dir, default_steps, save_state, state_path};
 use crate::types::{ChainKey, Network};
@@ -26,10 +27,23 @@ pub async fn run() -> Result<()> {
     let decimals: u8 = require("DECIMALS")?
         .parse()
         .map_err(|_| eyre::eyre!("DECIMALS must be a number"))?;
-    let target_json = PathBuf::from(require("TARGET_JSON")?);
     let mnemonic = require("MNEMONIC")?;
     let env = require("ENV")?;
     let salt = require("SALT")?;
+
+    let env_parsed: Network = env
+        .parse()
+        .map_err(|e| eyre::eyre!("invalid ENV value '{env}': {e}"))?;
+
+    // TARGET_JSON stays the primary input; without it we fall back to the
+    // sibling checkout (deploy writes back to the config, so a read-only
+    // cached fetch is rejected).
+    let target_json = match std::env::var_os("TARGET_JSON") {
+        Some(path) => PathBuf::from(path),
+        None => config_source::resolve(env_parsed, None)
+            .await?
+            .require_checkout()?,
+    };
 
     // Optional env vars
     let explorer_name = std::env::var("EXPLORER_NAME").ok();
@@ -85,10 +99,6 @@ pub async fn run() -> Result<()> {
     // --- State file ---
     let dir = data_dir()?;
     fs::create_dir_all(&dir)?;
-
-    let env_parsed: Network = env
-        .parse()
-        .map_err(|e| eyre::eyre!("invalid ENV value '{env}': {e}"))?;
 
     let mut state = State {
         axelar_id: ChainKey::new(axelar_id.clone()),

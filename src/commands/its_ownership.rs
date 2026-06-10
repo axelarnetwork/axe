@@ -1,5 +1,4 @@
 use std::io::IsTerminal;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -12,6 +11,7 @@ use serde_json::{Value, json};
 use stellar_strkey::ed25519::PublicKey as StellarPublicKey;
 
 use crate::config::{ChainConfig, ChainsConfig, ContractEntry};
+use crate::config_source;
 use crate::evm::InterchainTokenService;
 use crate::stellar::{StellarClient, scval_to_address_string};
 use crate::sui::SuiClient;
@@ -298,9 +298,8 @@ struct OwnershipFields {
     note: String,
 }
 
-pub async fn run(network: String, json_output: bool) -> Result<()> {
-    let network: Network = network.parse()?;
-    let config_path = resolve_config(network)?;
+pub async fn run(network: Network, json_output: bool) -> Result<()> {
+    let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path)?;
     let entries = collect_its_entries(&config, network);
 
@@ -345,20 +344,6 @@ async fn query_entries(entries: Vec<ItsEntry>) -> Vec<OwnershipRow> {
         .buffer_unordered(QUERY_CONCURRENCY)
         .collect()
         .await
-}
-
-fn resolve_config(network: Network) -> Result<PathBuf> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let path = config_dir.join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre::eyre!(
-            "config not found for network '{}' at {}. \
-             Make sure axelar-contract-deployments is a sibling directory.",
-            network,
-            path.display()
-        ));
-    }
-    Ok(path)
 }
 
 fn collect_its_entries(config: &ChainsConfig, network: Network) -> Vec<ItsEntry> {
@@ -1413,7 +1398,6 @@ fn short_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn compact_address_truncates_more_aggressively() {
@@ -1556,19 +1540,5 @@ mod tests {
         };
         assert_eq!(stellar_network_type(&chain, Network::Mainnet), "mainnet");
         assert_eq!(stellar_network_type(&chain, Network::Testnet), "testnet");
-    }
-
-    #[test]
-    fn resolve_config_uses_network_file_name() {
-        assert_eq!(
-            resolve_config_path_only(Network::DevnetAmplifier),
-            Path::new("../axelar-contract-deployments/axelar-chains-config/info")
-                .join("devnet-amplifier.json")
-        );
-    }
-
-    fn resolve_config_path_only(network: Network) -> PathBuf {
-        PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info")
-            .join(format!("{network}.json"))
     }
 }

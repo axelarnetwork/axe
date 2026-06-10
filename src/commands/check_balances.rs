@@ -10,8 +10,6 @@
 //! mid-run with a confusing on-chain error; checking up front saves CI time
 //! and produces a clear "fund this address" message in the first job.
 
-use std::path::PathBuf;
-
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
@@ -20,6 +18,7 @@ use eyre::{Result, WrapErr, eyre};
 use solana_sdk::signature::Signer;
 
 use crate::config::{ChainConfig, ChainsConfig};
+use crate::config_source;
 use crate::solana::{load_keypair, rpc_client};
 use crate::stellar::{StellarClient, StellarWallet};
 use crate::sui::{SuiClient, SuiWallet};
@@ -152,9 +151,8 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
     ]
 }
 
-pub async fn run(network: String) -> Result<()> {
-    let network: Network = network.parse()?;
-    let config_path = resolve_config(network)?;
+pub async fn run(network: Network) -> Result<()> {
+    let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path)?;
 
     ui::section(&format!("wallet balance check: {network}"));
@@ -185,20 +183,6 @@ pub async fn run(network: String) -> Result<()> {
 
     ui::success("all wallets above minimum thresholds");
     Ok(())
-}
-
-fn resolve_config(network: Network) -> Result<PathBuf> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let path = config_dir.join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre!(
-            "config not found for network '{}' at {}. \
-             Make sure axelar-contract-deployments is a sibling directory.",
-            network,
-            path.display()
-        ));
-    }
-    Ok(path)
 }
 
 async fn probe_row(config: &ChainsConfig, target: &ChainTarget, network: Network) -> BalanceRow {

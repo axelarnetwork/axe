@@ -11,49 +11,27 @@ use futures::future::join_all;
 use owo_colors::OwoColorize;
 
 use super::decode;
+use crate::config_source;
+use crate::types::Network;
 
 type RpcTx = alloy::rpc::types::Transaction;
 
-const CONFIG_NAMES: &[&str] = &[
-    "mainnet.json",
-    "testnet.json",
-    "stagenet.json",
-    "devnet-amplifier.json",
-];
-
-fn discover_configs() -> Vec<PathBuf> {
-    // Look for sibling axelar-contract-deployments repo
-    let exe = std::env::current_exe().ok();
-    let candidates: Vec<PathBuf> = [
-        // relative to cwd
-        Some(PathBuf::from("../axelar-contract-deployments")),
-        // relative to the binary
-        exe.as_ref()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .map(|p| p.join("axelar-contract-deployments")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    let mut configs = Vec::new();
-    for base in candidates {
-        let info_dir = base.join("axelar-chains-config/info");
-        if info_dir.is_dir() {
-            for name in CONFIG_NAMES {
-                let path = info_dir.join(name);
-                if path.exists() {
-                    configs.push(path);
-                }
-            }
-            if !configs.is_empty() {
-                return configs;
-            }
+/// Resolve a chains config for every network, skipping the ones that can't
+/// be found or fetched; error only when none resolve.
+async fn resolve_all_configs() -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for network in Network::ALL {
+        if let Ok(source) = config_source::resolve(network, None).await {
+            found.push(source.into_path());
         }
     }
-    configs
+    if found.is_empty() {
+        bail!(
+            "no chains config found for any network. Pass --config <path> \
+             or connect to the network."
+        );
+    }
+    Ok(found)
 }
 
 pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) -> Result<()> {
@@ -69,14 +47,7 @@ pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) 
     let configs: Vec<PathBuf> = if let Some(c) = config {
         vec![c.to_path_buf()]
     } else {
-        let found = discover_configs();
-        if found.is_empty() {
-            bail!(
-                "no chains config found. Place axelar-contract-deployments as a sibling repo, \
-                 or pass --config <path>"
-            );
-        }
-        found
+        resolve_all_configs().await?
     };
 
     // Collect RPCs from all configs, dedup by RPC URL
@@ -142,56 +113,61 @@ pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) 
 
     // Decode logs
     if let Some(ref receipt) = receipt {
-        let logs = receipt.inner.logs();
-        if !logs.is_empty() {
-            println!("\n{}", format!("━━ Logs ({}) ━━", logs.len()).bold());
-            for (i, log) in logs.iter().enumerate() {
-                let addr = log.address();
-                let topics: Vec<B256> = log.topics().to_vec();
-                let data = log.data().data.as_ref();
+        print_decoded_logs(receipt);
+    }
 
-                println!("\n[{i}] {}", addr.dimmed());
+    Ok(())
+}
 
-                if topics.is_empty() {
-                    println!("    (anonymous event, {} bytes data)", data.len());
-                    continue;
+fn print_decoded_logs(receipt: &TransactionReceipt) {
+    let logs = receipt.inner.logs();
+    if logs.is_empty() {
+        return;
+    }
+    println!("\n{}", format!("━━ Logs ({}) ━━", logs.len()).bold());
+    for (i, log) in logs.iter().enumerate() {
+        let addr = log.address();
+        let topics: Vec<B256> = log.topics().to_vec();
+        let data = log.data().data.as_ref();
+
+        println!("\n[{i}] {}", addr.dimmed());
+
+        if topics.is_empty() {
+            println!("    (anonymous event, {} bytes data)", data.len());
+            continue;
+        }
+
+        match decode::decode_log(&topics, data) {
+            Some((sig, params)) => {
+                println!("    {}", sig.bold());
+                for (name, value) in &params {
+                    println!("      {name}: {}", decode::format_value_pub(value));
                 }
-
-                match decode::decode_log(&topics, data) {
-                    Some((sig, params)) => {
-                        println!("    {}", sig.bold());
-                        for (name, value) in &params {
-                            println!("      {name}: {}", decode::format_value_pub(value));
-                        }
-                        // Try nested decode on bytes params
-                        for (_, value) in &params {
-                            if let alloy::dyn_abi::DynSolValue::Bytes(b) = value
-                                && b.len() >= 4
-                            {
-                                let _ = decode::decode_bytes(b, "        ");
-                            }
-                        }
+                // Try nested decode on bytes params
+                for (_, value) in &params {
+                    if let alloy::dyn_abi::DynSolValue::Bytes(b) = value
+                        && b.len() >= 4
+                    {
+                        let _ = decode::decode_bytes(b, "        ");
                     }
-                    None => {
-                        println!(
-                            "    Unknown event (topic0: 0x{}…)",
-                            hex::encode(&topics[0][..8])
-                        );
-                        if !data.is_empty() {
-                            let h = hex::encode(data);
-                            if h.len() > 128 {
-                                println!("    data: 0x{}… ({} bytes)", &h[..64], data.len());
-                            } else {
-                                println!("    data: 0x{h}");
-                            }
-                        }
+                }
+            }
+            None => {
+                println!(
+                    "    Unknown event (topic0: 0x{}…)",
+                    hex::encode(&topics[0][..8])
+                );
+                if !data.is_empty() {
+                    let h = hex::encode(data);
+                    if h.len() > 128 {
+                        println!("    data: 0x{}… ({} bytes)", &h[..64], data.len());
+                    } else {
+                        println!("    data: 0x{h}");
                     }
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 struct EvmChain {

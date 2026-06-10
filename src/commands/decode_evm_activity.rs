@@ -5,11 +5,13 @@ use alloy::rpc::types::Filter;
 use eyre::Result;
 use owo_colors::OwoColorize;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 
 use super::decode;
 use crate::cli::EvmContract;
+use crate::config_source;
+use crate::types::Network;
 
 // ---------------------------------------------------------------------------
 // Contract discovery from config files
@@ -24,13 +26,11 @@ struct EvmContractEntry {
 }
 
 fn discover_contracts(
-    network: &str,
+    network: Network,
+    config_path: &Path,
     chain: &str,
     contract_filter: Option<EvmContract>,
 ) -> Vec<EvmContractEntry> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let networks = vec![network.to_string()];
-
     let type_filter = contract_filter.map(|c| match c {
         EvmContract::Gateway => "gateway",
         EvmContract::Its => "its",
@@ -39,71 +39,66 @@ fn discover_contracts(
 
     let mut entries = Vec::new();
 
-    for network in &networks {
-        let config_path = config_dir.join(format!("{network}.json"));
-        let Ok(config_content) = std::fs::read_to_string(&config_path) else {
+    let Ok(config_content) = std::fs::read_to_string(config_path) else {
+        return entries;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_content) else {
+        return entries;
+    };
+    let Some(chains) = config.get("chains").and_then(|v| v.as_object()) else {
+        return entries;
+    };
+
+    for (chain_name, chain_config) in chains {
+        let chain_type = chain_config
+            .get("chainType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if chain_type != "evm" {
             continue;
-        };
-        let config: serde_json::Value = match serde_json::from_str(&config_content) {
-            Ok(c) => c,
-            Err(_) => continue,
+        }
+
+        if chain_name != chain {
+            continue;
+        }
+
+        let rpc_url = match chain_config.get("rpc").and_then(|v| v.as_str()) {
+            Some(r) => r.to_string(),
+            None => continue,
         };
 
-        let Some(chains) = config.get("chains").and_then(|v| v.as_object()) else {
+        let Some(contracts) = chain_config.get("contracts").and_then(|v| v.as_object()) else {
             continue;
         };
 
-        for (chain_name, chain_config) in chains {
-            let chain_type = chain_config
-                .get("chainType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if chain_type != "evm" {
+        let contract_map = [
+            ("AxelarGateway", "gateway", "Gateway"),
+            ("InterchainTokenService", "its", "ITS"),
+            ("AxelarGasService", "gas-service", "GasService"),
+        ];
+
+        for (contract_name, prog_type, label) in &contract_map {
+            if let Some(filter) = type_filter
+                && *prog_type != filter
+            {
                 continue;
             }
 
-            if chain_name != chain {
-                continue;
-            }
+            let addr_str = contracts
+                .get(*contract_name)
+                .and_then(|v| v.get("address").or(Some(v)))
+                .and_then(|v| v.as_str());
 
-            let rpc_url = match chain_config.get("rpc").and_then(|v| v.as_str()) {
-                Some(r) => r.to_string(),
-                None => continue,
-            };
-
-            let Some(contracts) = chain_config.get("contracts").and_then(|v| v.as_object()) else {
-                continue;
-            };
-
-            let contract_map = [
-                ("AxelarGateway", "gateway", "Gateway"),
-                ("InterchainTokenService", "its", "ITS"),
-                ("AxelarGasService", "gas-service", "GasService"),
-            ];
-
-            for (contract_name, prog_type, label) in &contract_map {
-                if let Some(filter) = type_filter
-                    && *prog_type != filter
-                {
-                    continue;
-                }
-
-                let addr_str = contracts
-                    .get(*contract_name)
-                    .and_then(|v| v.get("address").or(Some(v)))
-                    .and_then(|v| v.as_str());
-
-                if let Some(addr_str) = addr_str
-                    && let Ok(address) = Address::from_str(addr_str)
-                {
-                    entries.push(EvmContractEntry {
-                        network: network.clone(),
-                        chain_name: chain_name.clone(),
-                        rpc_url: rpc_url.clone(),
-                        label: label.to_string(),
-                        address,
-                    });
-                }
+            if let Some(addr_str) = addr_str
+                && let Ok(address) = Address::from_str(addr_str)
+            {
+                entries.push(EvmContractEntry {
+                    network: network.to_string(),
+                    chain_name: chain_name.clone(),
+                    rpc_url: rpc_url.clone(),
+                    label: label.to_string(),
+                    address,
+                });
             }
         }
     }
@@ -136,16 +131,17 @@ struct EvmActivityEntry {
 
 pub async fn run(
     contract_filter: Option<EvmContract>,
-    network: String,
+    network: Network,
     chain: String,
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    let contracts = discover_contracts(&network, &chain, contract_filter);
+    let config_path = config_source::resolve(network, None).await?.into_path();
+    let contracts = discover_contracts(network, &config_path, &chain, contract_filter);
 
     if contracts.is_empty() {
         return Err(eyre::eyre!(
-            "no EVM contracts found. Make sure axelar-contract-deployments is a sibling directory."
+            "no EVM contracts found for chain '{chain}' in the {network} chains config"
         ));
     }
 

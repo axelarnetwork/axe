@@ -9,7 +9,6 @@ mod helpers;
 mod relay;
 pub mod types;
 
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use alloy::primitives::{Address, Bytes};
@@ -20,6 +19,7 @@ use owo_colors::OwoColorize;
 use serde_json::json;
 
 use crate::config::ChainsConfig;
+use crate::config_source;
 use crate::cosmos::{
     build_execute_msg_any, build_submit_proposal_any, check_axelar_balance, derive_axelar_wallet,
     extract_proposal_id, sign_and_broadcast_cosmos_tx,
@@ -42,7 +42,8 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
     let network: Network = args.network.parse()?;
     gate_mainnet(network, args.confirm_mainnet)?;
 
-    let config = ChainsConfig::load(&resolve_config(network)?)?;
+    let config_source = config_source::resolve(network, None).await?;
+    let config = ChainsConfig::load(config_source.path())?;
     let cfg = helpers::resolve(network, &config, &args.chain)?;
     let (target, calldata, action_label) = resolve_action(&args, &cfg)?;
 
@@ -351,18 +352,6 @@ fn gate_mainnet(network: Network, confirmed: bool) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn resolve_config(network: Network) -> Result<PathBuf> {
-    let path = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info")
-        .join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre::eyre!(
-            "config not found for '{network}' at {} — is axelar-contract-deployments a sibling dir?",
-            path.display()
-        ));
-    }
-    Ok(path)
 }
 
 /// Map a network to the short env name used by the `vote_<env>_proposal.sh`

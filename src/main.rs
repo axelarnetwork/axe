@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod config_source;
 mod cosmos;
 mod error;
 mod evm;
