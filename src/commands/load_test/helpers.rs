@@ -879,14 +879,18 @@ pub(crate) fn read_pre_registered_axe_token_address(
     let content = std::fs::read_to_string(config)
         .map_err(|e| eyre::eyre!("failed to read config {}: {e}", config.display()))?;
     let root: serde_json::Value = serde_json::from_str(&content)?;
+    // The chains-config schema uses `address` on PascalCase contract entries
+    // (validated in axelar-chains-config/tests/schema). Earlier drafts called
+    // this `tokenAddress` — reading under that name silently returned None and
+    // the caller fell back to ITS.interchainTokenAddress(tokenId), which
+    // reverts on the Hedera HTS-fork (its `registeredTokenAddress` view
+    // replaces it).
     let addr_str = root
-        .pointer(&format!(
-            "/chains/{chain_axelar_id}/contracts/AXE/tokenAddress"
-        ))
+        .pointer(&format!("/chains/{chain_axelar_id}/contracts/AXE/address"))
         .and_then(|v| v.as_str());
     match addr_str {
         Some(s) => Ok(Some(s.parse().map_err(|e| {
-            eyre::eyre!("invalid AXE.tokenAddress for chain {chain_axelar_id}: {e}")
+            eyre::eyre!("invalid AXE.address for chain {chain_axelar_id}: {e}")
         })?)),
         None => Ok(None),
     }
@@ -928,16 +932,28 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
             .await
             .map_err(|e| eyre::eyre!("failed to look up token address for {tid}: {e}"))?
     };
-    let balance = crate::evm::ERC20::new(addr, provider)
-        .balanceOf(holder)
-        .call()
-        .await
-        .unwrap_or_default();
-    if balance >= needed {
+    // `needed` from the caller is computed assuming 18-decimal EVM AXE
+    // (the convention in compute_run_sizing). For Hedera HTS-fork (6 dec) a
+    // wallet holding 10000 AXE = 1e10 sub-units would be treated as
+    // "insufficient" against needed=1e18, falling through to a fresh deploy
+    // that then reverts with InitialSupplyUnsupported. Scale `needed` by the
+    // source token's actual decimals so the comparison is apples-to-apples.
+    let token = crate::evm::ERC20::new(addr, provider);
+    let decimals: u8 = token.decimals().call().await.unwrap_or(18);
+    let scaled_needed = if decimals < 18 {
+        needed
+            / alloy::primitives::U256::from(10)
+                .pow(alloy::primitives::U256::from(18 - u32::from(decimals)))
+    } else {
+        needed
+    };
+    let balance = token.balanceOf(holder).call().await.unwrap_or_default();
+    if balance >= scaled_needed {
         Ok(Some((tid, addr)))
     } else {
         ui::warn(&format!(
-            "chains-config AXE balance too low for {holder} ({balance} < {needed}); \
+            "chains-config AXE balance too low for {holder} \
+             ({balance} < {scaled_needed} at {decimals} decimals); \
              configured wallet isn't the workflow deployer — deploying fresh..."
         ));
         Ok(None)
@@ -1121,6 +1137,28 @@ pub(crate) async fn finalize_sui_dest_run(
         &mut report.transactions,
         source_type,
         args.network,
+    )
+    .await?;
+    report.verification = Some(verification);
+    finish_report(args, report, test_start)
+}
+
+/// ITS-to-Sui finalizer: like [`finalize_sui_dest_run`] but routes through the
+/// two-leg hub verifier ([`verify::verify_onchain_sui_its`]) so the hub→Sui
+/// second leg (routed → approved → executed) is actually tracked. Raw
+/// GMP-to-Sui stays on `finalize_sui_dest_run` (single leg).
+pub(crate) async fn finalize_sui_dest_run_its(
+    args: &LoadTestArgs,
+    report: &mut crate::commands::load_test::metrics::LoadTestReport,
+    sui_rpc: &str,
+    test_start: Instant,
+) -> Result<()> {
+    let verification = verify::verify_onchain_sui_its(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        sui_rpc,
+        &mut report.transactions,
     )
     .await?;
     report.verification = Some(verification);

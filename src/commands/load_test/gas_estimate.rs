@@ -4,7 +4,7 @@
 //! destination-chain execute cost (`availableGasBalance.amount must be
 //! positive: …`). Hardcoded source-native defaults (0.02 ETH-equivalent)
 //! were tuned for ETH-priced chains and silently underpay routes where
-//! source-native is cheap (XRP, FLOW pre-override) or destination-native
+//! source-native is cheap (XRP) or destination-native
 //! is volatile (Hyperliquid, where gas-price has been observed to swing
 //! ~3.5× intraday).
 //!

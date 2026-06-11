@@ -56,10 +56,9 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
     match network {
         crate::types::Network::DevnetAmplifier => 0,
-        _ if source_chain.starts_with("flow") => 1_000_000_000_000_000_000,
         _ => 10_000_000_000_000_000,
     }
 }
@@ -83,11 +82,25 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let stellar = resolve_stellar_targets(&args, evm_src.deployer_address)?;
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
-    let sizing = compute_run_sizing(&args);
+    let mut sizing = compute_run_sizing(&args);
 
     let token =
         resolve_or_deploy_token(&args, &evm_src, &evm_targets, &stellar, gas_value, &sizing)
             .await?;
+
+    // compute_run_sizing assumes EVM-18 source decimals; rescale to the
+    // actual on-chain decimals (Hedera HTS-fork AXE = 6 dec).
+    {
+        let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+        super::its_evm_source::rescale_sizing_for_decimals(
+            &mut sizing.amount_per_tx,
+            &mut sizing.amount_per_key,
+            &mut sizing.total_supply,
+            &read_provider,
+            token.token_addr,
+        )
+        .await?;
+    }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
         let source_axelar_id = super::axelar_id_for_chain(&args.config, src)?;
@@ -114,6 +127,9 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let (stellar_recipient_addr, receiver_bytes) =
         load_stellar_recipient(args.private_key.as_deref())?;
 
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
+
     let transfer = TransferContext {
         rpc_url: evm_rpc_url,
         derived,
@@ -122,6 +138,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         receiver_bytes,
         amount_per_tx: sizing.amount_per_tx,
         gas_value,
+        gas_arg_scaling_factor,
     };
 
     if !sizing.burst_mode {
@@ -187,6 +204,9 @@ struct TransferContext {
     receiver_bytes: Bytes,
     amount_per_tx: U256,
     gas_value: U256,
+    /// See `its_evm_source::read_gas_arg_scaling_factor` — Hedera = 10,
+    /// other EVM chains = 0.
+    gas_arg_scaling_factor: u32,
 }
 
 /// ITS token identity on the EVM source plus the remote-deploy message if this
@@ -303,9 +323,9 @@ fn resolve_stellar_targets(
     })
 }
 
-/// Parse the user-supplied gas value (wei), defaulting per source chain. The
-/// Flow default is higher than other EVM routes because the remote Stellar
-/// deploy needs enough gas to register the token before transfers are sent.
+/// Parse the user-supplied gas value (wei), defaulting via the Axelarscan
+/// `estimateGasFee` quote and falling back to a route-agnostic constant when
+/// the API can't be reached.
 async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
@@ -377,7 +397,7 @@ async fn resolve_or_deploy_token(
     // registered on Stellar) → local file cache → fresh deploy. Pre-registration
     // via chains-config lets CI skip the source + remote deploy; a wallet with
     // no AXE balance falls through to a fresh deploy (see reusable_config_axe).
-    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
     let config_axe = match super::helpers::reusable_config_axe(
         &args.config,
         src,
@@ -429,7 +449,7 @@ async fn resolve_or_deploy_token(
             );
         if let Some((tid, addr)) = cached {
             let token = ERC20::new(addr, &write_provider);
-            let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+            let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
             let balance = token
                 .balanceOf(evm_src.deployer_address)
                 .call()
@@ -651,6 +671,7 @@ async fn run_sustained_pipeline(
         receiver_bytes,
         amount_per_tx,
         gas_value,
+        gas_arg_scaling_factor,
         ..
     } = transfer;
 
@@ -658,6 +679,7 @@ async fn run_sustained_pipeline(
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let dc = dest_chain_s.clone();
             let gv = gas_value;
+            let gsf = gas_arg_scaling_factor;
             let rb = receiver_bytes.clone();
             let amt = amount_per_tx;
             let its_proxy = its_proxy_addr;
@@ -672,7 +694,7 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 let mut result = super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, nonce,
                 )
                 .await;
                 if result.success {
@@ -755,6 +777,7 @@ async fn run_burst_pipeline(
         let total = num_txs;
         let dc = dest_chain.clone();
         let gv = transfer.gas_value;
+        let gsf = transfer.gas_arg_scaling_factor;
         let rb = transfer.receiver_bytes.clone();
         let amt = transfer.amount_per_tx;
         let its_proxy = transfer.its_proxy_addr;
@@ -769,7 +792,7 @@ async fn run_burst_pipeline(
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
                 let result = super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, None,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, None,
                 )
                 .await;
                 if result.success || attempt == MAX_RETRIES {

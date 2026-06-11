@@ -63,7 +63,7 @@ use crate::ui;
 const TOTAL_STEPS: usize = 10;
 
 // Destination chain (Amplifier chain with an active relayer)
-const DEST_CHAIN: &str = "flow";
+const DEST_CHAIN: &str = "hedera";
 
 const PHASE_B_STEPS: usize = 9;
 

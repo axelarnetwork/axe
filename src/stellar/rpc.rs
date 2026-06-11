@@ -195,41 +195,60 @@ impl StellarClient {
         destination_pubkey: &[u8; 32],
         amount_stroops: i64,
     ) -> Result<String> {
-        let seq = self
-            .account_sequence(&funder.address())
-            .await?
-            .ok_or_else(|| {
-                eyre!(
-                    "funder Stellar account {} is not activated",
-                    funder.address()
-                )
-            })?;
+        // Multiple parallel cron jobs share `STELLAR_PRIVATE_KEY`, so two
+        // concurrent `pay_native_classic`s on the same wallet fetch the same
+        // server-side sequence and both submit `seq + 1`. One wins, the other
+        // gets TxBadSeq. Re-fetch on TxBadSeq up to 4 times — by then the
+        // colliding tx has either settled or been dropped.
+        const MAX_SEQ_RETRIES: u8 = 4;
+        let mut attempt: u8 = 0;
+        let hash = loop {
+            let seq = self
+                .account_sequence(&funder.address())
+                .await?
+                .ok_or_else(|| {
+                    eyre!(
+                        "funder Stellar account {} is not activated",
+                        funder.address()
+                    )
+                })?;
 
-        let destination = MuxedAccount::Ed25519(Uint256(*destination_pubkey));
-        let op = Operation {
-            source_account: None,
-            body: OperationBody::Payment(PaymentOp {
-                destination,
-                asset: Asset::Native,
-                amount: amount_stroops,
-            }),
+            let destination = MuxedAccount::Ed25519(Uint256(*destination_pubkey));
+            let op = Operation {
+                source_account: None,
+                body: OperationBody::Payment(PaymentOp {
+                    destination,
+                    asset: Asset::Native,
+                    amount: amount_stroops,
+                }),
+            };
+            let ops: VecM<Operation, 100> = vec![op].try_into().map_err(|e| eyre!("ops: {e}"))?;
+            let tx = Transaction {
+                source_account: funder.muxed_account(),
+                fee: 1_000,
+                seq_num: SequenceNumber(seq + 1),
+                cond: Preconditions::None,
+                memo: Memo::None,
+                operations: ops,
+                ext: TransactionExt::V0,
+            };
+            let signed = self.sign(funder, tx)?;
+            match self.rpc.send_transaction(&signed).await {
+                Ok(hash) => break hash,
+                Err(e) if attempt + 1 < MAX_SEQ_RETRIES && format!("{e}").contains("TxBadSeq") => {
+                    crate::ui::warn(&format!(
+                        "stellar pay_native_classic: TxBadSeq on attempt {} \
+                         (concurrent funder use? re-fetching sequence)",
+                        attempt + 1,
+                    ));
+                    // Brief backoff so the colliding tx settles.
+                    tokio::time::sleep(Duration::from_millis(500u64 << attempt)).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(eyre!("send_transaction: {e}")),
+            }
         };
-        let ops: VecM<Operation, 100> = vec![op].try_into().map_err(|e| eyre!("ops: {e}"))?;
-        let tx = Transaction {
-            source_account: funder.muxed_account(),
-            fee: 1_000,
-            seq_num: SequenceNumber(seq + 1),
-            cond: Preconditions::None,
-            memo: Memo::None,
-            operations: ops,
-            ext: TransactionExt::V0,
-        };
-        let signed = self.sign(funder, tx)?;
-        let hash = self
-            .rpc
-            .send_transaction(&signed)
-            .await
-            .map_err(|e| eyre!("send_transaction: {e}"))?;
         let tx_hash_hex = hex::encode(hash.0);
 
         let start = Instant::now();

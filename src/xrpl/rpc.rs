@@ -60,28 +60,38 @@ impl XrplClient {
 
     /// Fetch the current balance (drops) and next sequence for an account.
     /// Returns `None` if the account does not exist (unactivated).
+    ///
+    /// Wrapped in `retry_all`: the public XRPL clusters (e.g.
+    /// `s1.ripple.com`) intermittently drop connections, and an
+    /// unretried failure here aborts the whole route (observed killing
+    /// XRPL EVM → XRPL on a transient `error sending request`). A genuine
+    /// `actNotFound` maps to `Ok(None)` *before* the retry layer sees it,
+    /// so non-existent accounts don't burn the retry budget.
     pub async fn account_info(&self, address: &str) -> Result<Option<AccountInfo>> {
-        let req = AccountInfoRequest::new(address);
-        match self.inner.call(req).await {
-            Ok(resp) => Ok(Some(AccountInfo {
-                balance_drops: resp
-                    .account_data
-                    .balance
-                    .as_deref()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0),
-                sequence: resp.account_data.sequence,
-            })),
-            Err(e) => {
-                // `actNotFound` → account doesn't exist yet
-                let msg = e.to_string();
-                if msg.contains("actNotFound") || msg.contains("Account not found") {
-                    Ok(None)
-                } else {
-                    Err(eyre!("account_info({address}) failed: {msg}"))
+        crate::retry::retry_all("xrpl.account_info", || async {
+            let req = AccountInfoRequest::new(address);
+            match self.inner.call(req).await {
+                Ok(resp) => Ok(Some(AccountInfo {
+                    balance_drops: resp
+                        .account_data
+                        .balance
+                        .as_deref()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    sequence: resp.account_data.sequence,
+                })),
+                Err(e) => {
+                    // `actNotFound` → account doesn't exist yet (not an error)
+                    let msg = e.to_string();
+                    if msg.contains("actNotFound") || msg.contains("Account not found") {
+                        Ok(None)
+                    } else {
+                        Err(eyre!("account_info({address}) failed: {msg}"))
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 
     /// Fund an XRPL account via the public testnet/devnet faucet.

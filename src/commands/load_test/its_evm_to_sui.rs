@@ -34,9 +34,8 @@ use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::verify;
 use super::{
-    LoadTestArgs, check_evm_balance, finalize_sui_dest_run, load_sui_main_wallet,
+    LoadTestArgs, check_evm_balance, finalize_sui_dest_run_its, load_sui_main_wallet,
     read_sui_axe_token_id, sui_its_dest_lookup, validate_evm_rpc,
 };
 use crate::config::ChainsConfig;
@@ -73,10 +72,9 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
     match network {
         crate::types::Network::DevnetAmplifier => 0,
-        _ if source_chain.starts_with("flow") => 1_000_000_000_000_000_000,
         _ => 10_000_000_000_000_000,
     }
 }
@@ -102,11 +100,11 @@ struct EvmContext {
 }
 
 /// Resolved Sui destination context: recipient bytes (for interchainTransfer
-/// payload), ITS channel id (for verifier), Sui RPC, display address.
+/// payload), Sui RPC, display address. (The ITS channel is logged for
+/// operators but the hub verifier keys off gateway events, not the channel.)
 struct SuiContext {
     recipient_bytes: Bytes,
     recipient_display: String,
-    its_channel: String,
     rpc: String,
 }
 
@@ -247,7 +245,6 @@ fn resolve_sui_context(args: &LoadTestArgs) -> eyre::Result<SuiContext> {
     Ok(SuiContext {
         recipient_bytes,
         recipient_display,
-        its_channel,
         rpc,
     })
 }
@@ -344,6 +341,8 @@ async fn run_burst_pipeline(
 
     let dest_chain_id = args.destination_axelar_id.clone();
     let gas_value = U256::from(evm.gas_value_wei);
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
     let mut tasks = Vec::with_capacity(num_txs);
     for derived_signer in derived {
         let metrics_clone = Arc::clone(&metrics_list);
@@ -371,6 +370,7 @@ async fn run_burst_pipeline(
                     &rb,
                     amount_per_tx,
                     gas_value,
+                    gas_arg_scaling_factor,
                     None,
                 )
                 .await;
@@ -423,15 +423,7 @@ async fn run_burst_pipeline(
         metrics,
     );
 
-    finalize_sui_dest_run(
-        args,
-        &mut report,
-        &sui.its_channel,
-        &sui.rpc,
-        verify::SourceChainType::Evm,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(args, &mut report, &sui.rpc, test_start).await
 }
 
 async fn run_sustained_pipeline(
@@ -467,6 +459,8 @@ async fn run_sustained_pipeline(
     let token_id = evm.token_id;
     let recipient_bytes = sui.recipient_bytes.clone();
     let gas_value = U256::from(evm.gas_value_wei);
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -479,7 +473,15 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 super::its_evm_source::execute_interchain_transfer(
-                    &provider, its_proxy, token_id, &dc, &rb, amt, gas_value, nonce,
+                    &provider,
+                    its_proxy,
+                    token_id,
+                    &dc,
+                    &rb,
+                    amt,
+                    gas_value,
+                    gas_arg_scaling_factor,
+                    nonce,
                 )
                 .await
             })
@@ -507,15 +509,7 @@ async fn run_sustained_pipeline(
     report.tps = Some(tps);
     report.duration_secs = Some(duration_secs);
 
-    finalize_sui_dest_run(
-        args,
-        &mut report,
-        &sui.its_channel,
-        &sui.rpc,
-        verify::SourceChainType::Evm,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(args, &mut report, &sui.rpc, test_start).await
 }
 
 fn parse_main_signer(private_key: Option<&str>) -> eyre::Result<PrivateKeySigner> {

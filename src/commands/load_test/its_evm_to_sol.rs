@@ -23,11 +23,10 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenService};
 use crate::ui;
 
-fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
     match network {
         crate::types::Network::DevnetAmplifier => 0,
-        _ if source_chain.starts_with("flow") => 300_000_000_000_000_000, // 0.3 FLOW
-        _ => 10_000_000_000_000_000,                                      // 0.01 ETH
+        _ => 10_000_000_000_000_000, // 0.01 ETH
     }
 }
 const MAX_CONCURRENT_SENDS: usize = 100;
@@ -52,10 +51,24 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let its = resolve_its_contracts(&cfg, src)?;
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
-    let sizing = compute_run_sizing(&args);
+    let mut sizing = compute_run_sizing(&args);
 
     let token =
         resolve_or_deploy_token(&args, &evm_source, &its, &evm_rpc_url, &sizing, gas_value).await?;
+
+    // compute_run_sizing assumes EVM-18 source decimals; rescale to the
+    // actual on-chain decimals (Hedera HTS-fork AXE = 6 dec).
+    {
+        let read_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+        super::its_evm_source::rescale_sizing_for_decimals(
+            &mut sizing.amount_per_tx,
+            &mut sizing.amount_per_key,
+            &mut sizing.total_supply,
+            &read_provider,
+            token.token_addr,
+        )
+        .await?;
+    }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
         super::verify::wait_for_its_remote_deploy_to_solana(
@@ -93,10 +106,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let sol_keypair = crate::solana::load_keypair(args.keypair.as_deref())?;
     let receiver_bytes = Bytes::from(sol_keypair.pubkey().to_bytes().to_vec());
 
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
+
     let targets = TransferTargets {
         its_proxy_addr: its.its_proxy_addr,
         token_id: token.token_id,
         gas_value,
+        gas_arg_scaling_factor,
         receiver_bytes,
     };
 
@@ -136,6 +153,9 @@ struct TransferTargets {
     its_proxy_addr: Address,
     token_id: FixedBytes<32>,
     gas_value: U256,
+    /// See `its_evm_source::read_gas_arg_scaling_factor` — Hedera = 10,
+    /// other EVM chains = 0.
+    gas_arg_scaling_factor: u32,
     receiver_bytes: Bytes,
 }
 
@@ -230,7 +250,7 @@ async fn resolve_or_deploy_token(
     // upstream — see TODOs in the workflow + script). For Hedera-source we
     // require an explicit pre-registered token; the error message points at
     // the deployments-repo Hedera setup.
-    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
     let config_axe = super::helpers::reusable_config_axe(
         &args.config,
         src,
@@ -288,7 +308,7 @@ async fn resolve_or_deploy_token(
         if let Some((tid, addr)) = cached {
             // Verify token still exists and deployer has enough balance
             let token = ERC20::new(addr, &write_provider);
-            let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+            let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
             let balance = token
                 .balanceOf(evm_source.deployer_address)
                 .call()
@@ -425,12 +445,14 @@ async fn run_sustained_pipeline(
     let its_proxy_addr = targets.its_proxy_addr;
     let token_id = targets.token_id;
     let gas_value = targets.gas_value;
+    let gas_arg_scaling_factor = targets.gas_arg_scaling_factor;
     let receiver_bytes = targets.receiver_bytes.clone();
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let dc = dest_chain_s.clone();
             let gv = gas_value;
+            let gsf = gas_arg_scaling_factor;
             let rb = receiver_bytes.clone();
             let amt = amount_per_tx;
             let its_proxy = its_proxy_addr;
@@ -445,7 +467,7 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 let mut result = execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, nonce,
                 )
                 .await;
                 if result.success {
@@ -532,6 +554,7 @@ async fn run_burst_pipeline(
         let total = num_txs;
         let dc = dest_chain.clone();
         let gv = targets.gas_value;
+        let gsf = targets.gas_arg_scaling_factor;
         let rb = targets.receiver_bytes.clone();
         let amt = sizing.amount_per_tx;
         let its_proxy = targets.its_proxy_addr;
@@ -546,9 +569,10 @@ async fn run_burst_pipeline(
 
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result =
-                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, None)
-                        .await;
+                let result = execute_interchain_transfer(
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, None,
+                )
+                .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);

@@ -83,11 +83,14 @@ jobs:
           # `chains.hedera.contracts.AXE.tokenId` lookup + no-derivation on
           # Hedera source + registeredTokenAddress for the Hedera fork —
           # so flipping these back on is a one-line revert once upstream lands.
+          # Stellar (stellar-2026-q1-2) removed: the Axelar Stellar testnet
+          # executor stopped picking up approved messages around 2026-06-04;
+          # every inbound message has sat at `approved/gas_used=0` since.
+          # Re-add HL↔Stellar (and Stellar↔Solana / HL↔Stellar in GMP below)
+          # once that off-chain service is back up.
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
-            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"}
+            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"}
           ]}'
           # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
           # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
@@ -97,32 +100,34 @@ jobs:
           # upstream, slot Hedera back in (it works fine as GMP destination
           # today). A 5-cycle Stellar→Sol→Sui→HL→Hedera→Stellar keeps strict
           # 1/1 and covers an extra chain.
+          # Stellar removed from testnet (see note on MATRIX_TESTNET_ITS).
+          # 4-cycle collapses to a 2-edge path Solana → Sui → Hyperliquid.
           MATRIX_TESTNET_GMP='{"include":[
-            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
-            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"}
           ]}'
           # Mainnet fleets mirror testnet 1:1 — same routes, same shape, just
           # different chains-config (mainnet.json) so the per-chain AXE
           # tokenIds are read from the mainnet AXE entries (HL, Stellar, Sui).
           # XRPL ↔ XRPL EVM still uses the canonical XRP token (no per-chain
           # AXE needed for that pair).
+          # HL ↔ Stellar / Stellar → Solana / HL → Stellar dropped: the
+          # mainnet Stellar amplifier executor stopped picking up approved
+          # inbound messages ~2026-06-04 — same outage we hit on testnet's
+          # stellar-2026-q1-2. Approved-side reached but gas_used stays 0,
+          # then axe times out at "executed". Re-add when the off-chain
+          # executor is back.
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
-            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
-            {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS (v2 AXE, Sui auto-deployed Move package)"},
-            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS (v2 AXE)"},
-            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS (v2 AXE; both chains seeded by xrpl-evm bridge)"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS (v2 AXE)"}
+            {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
+            {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
+            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
-            {"name":"Stellar -> Solana","src":"Stellar","dst":"Solana","notes":"stellar->sol GMP"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
-            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"},
-            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar GMP"}
+            {"name":"Sui -> Hyperliquid","src":"Sui","dst":"Hyperliquid","notes":"sui->evm GMP"}
           ]}'
           case "$NETWORK/$PROTOCOL" in
             "testnet/its") MATRIX="$MATRIX_TESTNET_ITS" ;;

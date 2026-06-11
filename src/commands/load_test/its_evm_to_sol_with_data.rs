@@ -61,10 +61,9 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-fn fallback_gas_value_wei(network: crate::types::Network, source_chain: &str) -> u128 {
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
     match network {
         crate::types::Network::DevnetAmplifier => 0,
-        _ if source_chain.starts_with("flow") => 300_000_000_000_000_000,
         _ => 10_000_000_000_000_000,
     }
 }

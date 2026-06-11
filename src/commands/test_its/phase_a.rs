@@ -248,7 +248,7 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
 
 /// Wait for the destination-chain ITS to deploy the predicted token contract
 /// (post hub relay). Uses `name()` instead of `get_code_at` since the latter
-/// is unreliable on some EVMs (Flow). Returns the predicted address either
+/// is unreliable on some EVMs. Returns the predicted address either
 /// way; the caller can decide what to do if name() never responds.
 pub(super) async fn poll_for_remote_token_deploy<P: Provider>(
     dest_provider: &P,

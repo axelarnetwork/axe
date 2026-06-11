@@ -628,14 +628,14 @@ fn try_print_governance(data: &[u8], indent: &str, depth: usize) -> bool {
 mod tests {
     use super::*;
 
-    // Real testnet Berachain governance proposals (ScheduleTimeLockProposal → gateway.setPauseStatus(false)),
+    // Real testnet governance proposals (ScheduleTimeLockProposal → gateway.setPauseStatus(false)),
     // from the AxelarnetGateway.call_contract payloads of gov proposals 590 and 588. They differ only in eta.
-    const BERA_SCHEDULE_590: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1f13090000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
-    const BERA_SCHEDULE_588: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1ef11c0000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SCHEDULE_590: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1f13090000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const SCHEDULE_588: &str = "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e432150cce91c13a887f7d836923d5597add8e3100000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a1ef11c0000000000000000000000000000000000000000000000000000000000000024c38bb537000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
     #[test]
     fn governance_parses_real_schedule_timelock_payloads() {
-        for payload in [BERA_SCHEDULE_590, BERA_SCHEDULE_588] {
+        for payload in [SCHEDULE_590, SCHEDULE_588] {
             let data = parse_hex(payload).unwrap();
             let p = parse_governance(&data).expect("should parse as a governance proposal");
             assert_eq!(p.command, 0);
@@ -655,8 +655,8 @@ mod tests {
 
     #[test]
     fn governance_eta_distinguishes_proposals() {
-        let a = parse_governance(&parse_hex(BERA_SCHEDULE_590).unwrap()).unwrap();
-        let b = parse_governance(&parse_hex(BERA_SCHEDULE_588).unwrap()).unwrap();
+        let a = parse_governance(&parse_hex(SCHEDULE_590).unwrap()).unwrap();
+        let b = parse_governance(&parse_hex(SCHEDULE_588).unwrap()).unwrap();
         assert_eq!(a.eta, U256::from(0x6a1f_1309_u64));
         assert_eq!(b.eta, U256::from(0x6a1e_f11c_u64));
         assert_ne!(a.eta, b.eta);
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn governance_maps_all_command_variants() {
-        let base = parse_hex(BERA_SCHEDULE_590).unwrap();
+        let base = parse_hex(SCHEDULE_590).unwrap();
         for (command, name) in [
             (1u8, "CancelTimeLockProposal"),
             (2, "ApproveOperatorProposal"),
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn governance_rejects_unknown_command() {
-        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        let mut data = parse_hex(SCHEDULE_590).unwrap();
         data[31] = 4; // out of the 0..=3 range
         assert!(parse_governance(&data).is_none());
     }
@@ -698,14 +698,14 @@ mod tests {
     #[test]
     fn governance_rejects_non_canonical_offset() {
         // 0xc0 offset (an ITS-shaped layout) must NOT be read as a governance proposal
-        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        let mut data = parse_hex(SCHEDULE_590).unwrap();
         data[95] = 0xc0;
         assert!(parse_governance(&data).is_none());
     }
 
     #[test]
     fn governance_rejects_dirty_address_word() {
-        let mut data = parse_hex(BERA_SCHEDULE_590).unwrap();
+        let mut data = parse_hex(SCHEDULE_590).unwrap();
         data[32] = 0xff; // address word's upper bytes must be zero
         assert!(parse_governance(&data).is_none());
     }
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn decode_governance_schedule_timelock_end_to_end() {
         // full path, including recursion into the inner setPauseStatus(bool) call
-        run(BERA_SCHEDULE_590).unwrap();
+        run(SCHEDULE_590).unwrap();
     }
 
     #[test]

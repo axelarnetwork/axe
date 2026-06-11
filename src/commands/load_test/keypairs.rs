@@ -252,11 +252,21 @@ pub fn derive_evm_signers(main_key: &[u8; 32], count: usize) -> Result<Vec<Priva
         .collect()
 }
 
-/// When a derived EVM key drops below this balance, it gets topped up.
-const MIN_WEI_PER_KEY: u128 = 5_000_000_000_000_000; // 0.005 ETH
-
-/// Top-up target for derived EVM keys.
-const TARGET_WEI_PER_KEY: u128 = 10_000_000_000_000_000; // 0.01 ETH
+/// Per-key native-gas buffer on top of any `extra_wei` the caller adds for
+/// cross-chain `msg.value`. Sized to cover ~300k gas at Monad mainnet's
+/// ~200 gwei (= 0.06 MON) with headroom — at 0.05 ETH the tx still has
+/// budget for one retry or a gas-price spike. The earlier 0.01 ETH value
+/// silently underfunded Monad sources: pre-tx balance 13.972786 MON,
+/// tx value 13.962786 + max-gas 0.052514 = 14.015300 needed, so the EVM
+/// ran the interchainTransfer until gas_used hit gas_limit and reverted
+/// with empty data (looks identical to OOG). Cheap-gas chains (HL ~2 gwei,
+/// XRPL-EVM ~1 gwei) pay the same flat 0.05 once but have plenty of room.
+///
+/// MIN is the trigger threshold (top up when below); TARGET is what we
+/// top up to. 4:5 ratio gives a small dead band so successive runs don't
+/// thrash with refunds.
+const MIN_WEI_PER_KEY: u128 = 40_000_000_000_000_000; // 0.04 ETH
+const TARGET_WEI_PER_KEY: u128 = 50_000_000_000_000_000; // 0.05 ETH
 
 /// Check that all derived EVM signers are funded, and fund any that aren't.
 /// Each key needs gas + `extra_wei` (e.g. for cross-chain gas value).

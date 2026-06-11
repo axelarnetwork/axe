@@ -340,7 +340,7 @@ mod tests {
         .expect("live fetch resolves");
 
         let cfg = ChainsConfig::load(src.path()).expect("testnet.json loads + parses");
-        assert!(cfg.chains.contains_key("flow"), "flow chain present");
+        assert!(cfg.chains.contains_key("hedera"), "hedera chain present");
         assert!(cfg.chains.contains_key("solana"), "solana chain present");
         assert!(cfg.axelar.lcd.is_some(), "axelar.lcd present");
         assert!(
