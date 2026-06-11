@@ -1,4 +1,4 @@
-name: Build axe binaries
+name: Build axe binary
 
 # Pre-builds axe and uploads the binary as an artifact tagged with the commit
 # SHA. The load-test workflows look up the artifact for the exact commit they
