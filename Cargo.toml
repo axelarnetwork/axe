@@ -40,12 +40,13 @@ solana-commitment-config = "~3.0"
 # seed prefixes) — program IDs and CHAIN_NAME_HASH come from
 # `src/solana/programs.rs`, selected at runtime via `--network`. Do not call
 # their `id()` / `find_pda()` / `CHAIN_NAME_HASH` (clippy.toml denies the
-# methods; the const can't be linted). Pinned `=1.0.0` because the programs.rs
-# tables are transcribed from the 1.0.0 sources.
-solana-axelar-gateway = { version = "=1.0.0", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
-solana-axelar-gas-service = { version = "=1.0.0", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
-solana-axelar-memo = { version = "=1.0.0", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
-solana-axelar-its = { version = "=1.0.0", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+# methods; the const can't be linted). Pinned exactly because the programs.rs
+# tables must match the crate version: bump the pin and re-verify the tables
+# together (the guard tests in programs.rs check the devnet row).
+solana-axelar-gateway = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-gas-service = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-memo = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-its = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
 solana-axelar-std = "1.0.0"
 anchor-lang = { version = "1.0.0-rc.5", features = ["event-cpi"] }
 borsh = "1"

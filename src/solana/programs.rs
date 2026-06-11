@@ -1,7 +1,8 @@
 //! Solana Axelar program IDs and the ITS chain-name hash, per network.
 //!
 //! Source of truth: the `declare_id!` / `CHAIN_NAME_HASH` cfg blocks in the
-//! solana-axelar-{gateway,gas-service,memo,its} crates, v1.0.0 (crates.io),
+//! solana-axelar-{gateway,gas-service,memo,its} crates (crates.io,
+//! constants verified identical in v1.0.0 and v1.1.1),
 //! cross-checked against the chains-config JSONs in
 //! axelar-contract-deployments. axe deliberately does NOT use the crates'
 //! `id()` / `find_pda()` / `CHAIN_NAME_HASH` — those are baked per cargo
@@ -59,7 +60,7 @@ impl Network {
 
     /// The chain-name hash baked into the network's deployed ITS program
     /// (used for token-id derivation). Copied verbatim from the
-    /// solana-axelar-its v1.0.0 per-feature constants — these are what the
+    /// solana-axelar-its per-feature constants — these are what the
     /// on-chain programs compute with, so they are the source of truth.
     ///
     /// Note: upstream's testnet and stagenet constants are swapped relative
@@ -113,7 +114,7 @@ mod tests {
     /// covering the three rows the pinned feature can't check directly.
     ///
     /// The testnet/stagenet names really are crossed — upstream
-    /// solana-axelar-its v1.0.0 ships its testnet constant as
+    /// solana-axelar-its (v1.0.0 and v1.1.1) ships its testnet constant as
     /// keccak256("solana-stagenet") and vice versa, and the deployed
     /// programs were compiled with those constants, so axe must mirror
     /// them to derive the same token IDs the chain does.
