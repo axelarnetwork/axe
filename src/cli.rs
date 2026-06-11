@@ -408,3 +408,44 @@ pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
     opt.or_else(|| std::env::var("CHAIN").ok())
         .ok_or_else(|| eyre::eyre!("--axelar-id not provided and CHAIN env var not set"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every subcommand must parse alongside the global `--network` flag.
+    /// Guards against the clap id-collision panic ("Mismatch between
+    /// definition and access of `network`") that occurs when a subcommand
+    /// declares its own `network` arg with a type other than
+    /// `Option<Network>`'s inner type.
+    #[test]
+    fn all_subcommands_parse_with_global_network_flag() {
+        let cases: &[&[&str]] = &[
+            &["axe", "--network", "testnet", "deploy", "status"],
+            &["axe", "--network", "testnet", "test", "gmp"],
+            &["axe", "--network", "testnet", "decode", "calldata", "0x00"],
+            &["axe", "--network", "testnet", "decode", "tx", "0xabc"],
+            &["axe", "--network", "testnet", "decode", "sol-activity"],
+            &[
+                "axe",
+                "decode",
+                "evm-activity",
+                "--network",
+                "testnet",
+                "--chain",
+                "avalanche-fuji",
+            ],
+            &["axe", "verifiers", "testnet", "xrpl"],
+            &["axe", "its-ownership", "testnet"],
+            &["axe", "check-balances", "testnet"],
+            &["axe", "info", "block", "--network", "testnet"],
+            &["axe", "verifier-votes", "testnet", "xrpl", "axelar1abc"],
+            &["axe", "propose", "testnet", "hedera", "--op", "pause"],
+        ];
+        for args in cases {
+            if let Err(e) = Cli::try_parse_from(*args) {
+                panic!("failed to parse {args:?}: {e}");
+            }
+        }
+    }
+}

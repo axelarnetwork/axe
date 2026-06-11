@@ -7,7 +7,7 @@ use clap::{Args, ValueEnum};
 #[derive(Debug, Args)]
 pub struct ProposeArgs {
     /// Network: testnet | stagenet | devnet-amplifier | mainnet.
-    pub network: String,
+    pub network: crate::types::Network,
     /// Edge chain key the ASG lives on (e.g. `hedera`).
     pub chain: String,
     /// Catalog operation to propose. Omit to pass a raw call with `--calldata`/`--target`.

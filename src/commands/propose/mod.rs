@@ -39,7 +39,7 @@ const ETA_BUFFER_SECS: u64 = 300;
 const GAS_BUFFER_UAXL: u128 = 10_000_000;
 
 pub async fn run(args: ProposeArgs) -> Result<()> {
-    let network: Network = args.network.parse()?;
+    let network = args.network;
     gate_mainnet(network, args.confirm_mainnet)?;
 
     let config_source = config_source::resolve(network, None).await?;
