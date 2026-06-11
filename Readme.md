@@ -415,8 +415,7 @@ axe test load-test \
 On stagenet/testnet/mainnet the relayer requires gas payment. The same binary serves every network — the network is picked at runtime from the `--config` filename (or `--network`):
 
 ```bash
-cargo build --release
-cp target/release/axe ~/.cargo/bin/axe
+cargo install --locked --path .   # or `cargo build --release` + run from target/ when iterating
 ```
 
 ### Stagenet example
