@@ -381,13 +381,23 @@ fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) ->
 /// Compute the source-side `message_id` from a confirmed `TxMetrics` based on
 /// the source chain family. EVM/Stellar/Sui pre-format the id in
 /// `tx.signature`; SVM appends the `call_contract` log index.
+///
+/// For SVM, ITS-source paths (its_sol_to_evm, its_sol_to_sui) pre-format the
+/// signature via `solana::extract_its_message_id` because the gateway CPI's
+/// inner-instruction index varies per tx (observed `-1.7` in production vs
+/// the static `-2.1` shape). Detect that by the `-` separator and pass
+/// through; otherwise fall back to the synthetic format for raw GMP paths.
 fn message_id_for_source(tx: &TxMetrics, source_type: SourceChainType) -> String {
     match source_type {
         SourceChainType::Evm | SourceChainType::Stellar | SourceChainType::Sui => {
             tx.signature.clone()
         }
         SourceChainType::Svm => {
-            format!("{}-{}.1", tx.signature, solana_call_contract_index())
+            if tx.signature.contains('-') {
+                tx.signature.clone()
+            } else {
+                format!("{}-{}.1", tx.signature, solana_call_contract_index())
+            }
         }
     }
 }
@@ -893,6 +903,14 @@ pub async fn verify_onchain_sui_gmp(
         .iter()
         .map(|&idx| {
             let tx = &metrics[idx];
+            // VotingVerifier first-leg destination = the source CallContract
+            // event's destination, captured per-tx as gmp_destination_*. For
+            // ITS-hub-routed Sui transfers (e.g. sol→sui) that's
+            // (axelar, AxelarnetGateway) — NOT the final Sui channel passed
+            // as `destination_address`. Using the channel here made the VV
+            // `messages_status` query never match (status "unknown") and the
+            // verify phase timed out at "voted". Plumb the per-tx hub
+            // destination through; for raw Sui-dest GMP it equals the channel.
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
@@ -900,7 +918,7 @@ pub async fn verify_onchain_sui_gmp(
                 Address::ZERO,
                 None,
                 tx.gmp_destination_chain.clone(),
-                destination_address.to_string(),
+                tx.gmp_destination_address.clone(),
                 initial_phase,
             )
         })
@@ -1027,14 +1045,21 @@ pub async fn verify_onchain_solana(
             let tx = &metrics[idx];
             let message_id = message_id_for_source(tx, source_type);
             let cmd_input = [source_chain.as_bytes(), b"-", message_id.as_bytes()].concat();
+            // The voting verifier indexes the message by the *outer* GMP
+            // destination (which is the Axelar Hub for ITS-routed transfers,
+            // a Sui channel for raw GMP). Passing empty strings here made
+            // `messages_status` queries silently no-match and the verify
+            // phase timed out at "voted". The TxMetrics already captured
+            // these from the source-side CallContract event, so plumb them
+            // through.
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
                 message_id,
                 Address::ZERO,
                 Some(keccak256(&cmd_input).into()),
-                String::new(),
-                String::new(),
+                tx.gmp_destination_chain.clone(),
+                tx.gmp_destination_address.clone(),
                 initial_phase,
             )
         })
@@ -1130,6 +1155,73 @@ pub async fn verify_onchain_solana_its(
             cosm_gateway_dest,
             dest: ItsHubDest::Solana {
                 rpc_url: solana_rpc.to_string(),
+            },
+        },
+    )
+    .await?;
+
+    Ok(compute_verification_report(&txs, metrics, peaks))
+}
+
+/// Verify an ITS-via-hub transfer whose **destination is Sui**, batch mode.
+///
+/// Mirrors [`verify_onchain_solana_its`] but drives the Sui destination
+/// through the two-leg hub pipeline ([`ItsHubDest::Sui`]): Voted → HubApproved
+/// → DiscoverSecondLeg → Routed → Approved → Executed. The first leg
+/// (source→hub) message id comes from `tx.signature` (already formatted by
+/// each source sender), and the Sui-side approval/execution events key off the
+/// discovered second-leg id with `source_chain = "axelar"`.
+///
+/// This is the ITS counterpart to [`verify_onchain_sui_gmp`], which handles
+/// only single-leg raw GMP to Sui and so can't see the hub→Sui second leg.
+pub async fn verify_onchain_sui_its(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    sui_rpc: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed = confirmed_indices(metrics);
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
+    let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
+        .collect::<Result<Vec<_>>>()?;
+
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
+
+    let peaks = run_its_hub_pipeline(
+        &mut txs,
+        VerifyMode::Batch,
+        RunItsHubArgs {
+            lcd,
+            voting_verifier,
+            source_chain: source_chain.to_string(),
+            axelarnet_gateway,
+            rpc,
+            cosm_gateway_dest,
+            dest: ItsHubDest::Sui {
+                rpc_url: sui_rpc.to_string(),
+                gateway_pkg,
             },
         },
     )

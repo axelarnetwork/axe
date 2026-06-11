@@ -345,7 +345,10 @@ pub fn send_its_interchain_transfer(
         slot,
         success: true,
         error: None,
-        payload_hash: format!("0x{}", hex::encode(event.payload_hash)),
+        // CosmWasm VotingVerifier rejects `0x`-prefixed hex (sees it as
+        // invalid hex). Match the Sui/EVM convention (no prefix) so the
+        // amplifier `messages_status` query parses.
+        payload_hash: hex::encode(event.payload_hash),
         source_address: event.sender,
         gmp_destination_chain: event.destination_chain,
         gmp_destination_address: event.destination_address,

@@ -110,9 +110,9 @@ runs:
           "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche"},
           "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
           "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
-          "Flow":        {"mainnet": "flow",       "testnet": "flow",             "stagenet": "flow", "devnet-amplifier": "flow"},
           "Hedera":      {"mainnet": "hedera",   "testnet": "hedera"},
           "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
+          "Monad":       {"mainnet": "monad",     "testnet": "monad-3",          "stagenet": "monad"},
           "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
           "Solana":      {"mainnet": "solana",     "testnet": "solana",           "stagenet": "solana-stagenet-3", "devnet-amplifier": "solana-18"},
           "Stellar":     {"mainnet": "stellar",    "testnet": "stellar-2026-q1-2"},
@@ -130,9 +130,9 @@ runs:
           "Avalanche":   "evm",
           "Base":        "evm",
           "Ethereum":    "evm",
-          "Flow":        "evm",
           "Hedera":      "evm",
           "Hyperliquid": "evm",
+          "Monad":       "evm",
           "Optimism":    "evm",
           "Solana":      "sol",
           "Stellar":     "stellar",
@@ -155,10 +155,10 @@ runs:
             "sui":     ["evm"]
           },
           "its": {
-            "evm":     ["sol", "stellar", "sui", "xrpl"],
+            "evm":     ["evm", "sol", "stellar", "sui", "xrpl"],
             "sol":     ["evm", "sui"],
             "stellar": ["evm", "sol", "sui"],
-            "sui":     ["evm"],
+            "sui":     ["evm", "sol"],
             "xrpl":    ["evm"]
           },
           "its-with-data": {

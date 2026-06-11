@@ -25,9 +25,8 @@ use std::time::{Duration, Instant};
 use eyre::{Result, eyre};
 
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::verify;
 use super::{
-    LoadTestArgs, finalize_sui_dest_run, load_stellar_main_wallet, load_sui_main_wallet,
+    LoadTestArgs, finalize_sui_dest_run_its, load_stellar_main_wallet, load_sui_main_wallet,
     read_stellar_contract_address, read_stellar_network_type, read_stellar_token_address,
     read_sui_axe_token_id, sui_its_dest_lookup,
 };
@@ -233,15 +232,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         sustained_params,
     );
 
-    finalize_sui_dest_run(
-        &args,
-        &mut report,
-        &sui_its_channel,
-        &sui_rpc,
-        verify::SourceChainType::Stellar,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(&args, &mut report, &sui_rpc, test_start).await
 }
 
 fn failed_metric(source_addr: String, err: String, elapsed_ms: u64) -> TxMetrics {

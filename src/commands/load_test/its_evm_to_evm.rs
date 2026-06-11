@@ -44,19 +44,11 @@ const MAX_RETRIES: u32 = 5;
 
 #[cfg(feature = "devnet-amplifier")]
 const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 0;
-#[cfg(feature = "devnet-amplifier")]
-const FALLBACK_GAS_VALUE_WEI_FLOW: u128 = 0;
 #[cfg(not(feature = "devnet-amplifier"))]
 const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 10_000_000_000_000_000; // 0.01 ETH
-#[cfg(not(feature = "devnet-amplifier"))]
-const FALLBACK_GAS_VALUE_WEI_FLOW: u128 = 300_000_000_000_000_000; // 0.3 FLOW
 
-fn fallback_gas_value_wei(source_chain: &str) -> u128 {
-    if source_chain.starts_with("flow") {
-        FALLBACK_GAS_VALUE_WEI_FLOW
-    } else {
-        FALLBACK_GAS_VALUE_WEI_DEFAULT
-    }
+fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
+    FALLBACK_GAS_VALUE_WEI_DEFAULT
 }
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
@@ -83,7 +75,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let gas_value_wei = parse_gas_value_wei(&args).await?;
     let gas_value = U256::from(gas_value_wei);
-    let sizing = compute_run_sizing(&args);
+    let mut sizing = compute_run_sizing(&args);
 
     let token = resolve_or_deploy_token(
         &args,
@@ -94,6 +86,22 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         gas_value,
     )
     .await?;
+
+    // compute_run_sizing assumes 18 decimals (the EVM-source convention). For
+    // Hedera HTS-fork AXE the registered token is 6 decimals — 1e16 sub-units
+    // there is 10^10 AXE, way over wallet balance and rejected by the source
+    // burn. Rescale after we know the real on-chain decimals.
+    {
+        let read_provider = ProviderBuilder::new().connect_http(source_rpc_url.parse()?);
+        super::its_evm_source::rescale_sizing_for_decimals(
+            &mut sizing.amount_per_tx,
+            &mut sizing.amount_per_key,
+            &mut sizing.total_supply,
+            &read_provider,
+            token.token_addr,
+        )
+        .await?;
+    }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
         super::verify::wait_for_its_remote_deploy(
@@ -130,10 +138,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 
     let receiver_bytes = Bytes::from(receiver.as_slice().to_vec());
 
+    let gas_arg_scaling_factor =
+        super::its_evm_source::read_gas_arg_scaling_factor(&args.config, &args.source_axelar_id);
+
     let targets = TransferTargets {
         its_proxy_addr: its.its_proxy_addr,
         token_id: token.token_id,
         gas_value,
+        gas_arg_scaling_factor,
         receiver_bytes,
     };
 
@@ -188,6 +200,11 @@ struct TransferTargets {
     its_proxy_addr: Address,
     token_id: FixedBytes<32>,
     gas_value: U256,
+    /// Exponent applied to the `gasValue` *function argument* (msg.value
+    /// stays in EVM-wei). See `execute_interchain_transfer` and
+    /// `read_gas_arg_scaling_factor` for the rationale — Hedera = 10,
+    /// others = 0.
+    gas_arg_scaling_factor: u32,
     receiver_bytes: Bytes,
 }
 
@@ -284,7 +301,7 @@ async fn resolve_or_deploy_token(
     // already holds the AXE supply) skip the source + remote deploy and
     // collapse to a single interchainTransfer; a different wallet with no AXE
     // balance falls through to a fresh deploy (see reusable_config_axe).
-    let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
     let config_axe = super::helpers::reusable_config_axe(
         &args.config,
         src,
@@ -324,7 +341,7 @@ async fn resolve_or_deploy_token(
 
         if let Some((tid, addr)) = cached {
             let token = ERC20::new(addr, &write_provider);
-            let needed = sizing.amount_per_key * U256::from(sizing.num_keys);
+            let needed = sizing.amount_per_tx * U256::from(sizing.num_txs);
             let balance = token
                 .balanceOf(evm_source.deployer_address)
                 .call()
@@ -453,12 +470,14 @@ async fn run_sustained_pipeline(
     let its_proxy_addr = targets.its_proxy_addr;
     let token_id = targets.token_id;
     let gas_value = targets.gas_value;
+    let gas_arg_scaling_factor = targets.gas_arg_scaling_factor;
     let receiver_bytes = targets.receiver_bytes.clone();
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
             let dc = dest_chain_s.clone();
             let gv = gas_value;
+            let gsf = gas_arg_scaling_factor;
             let rb = receiver_bytes.clone();
             let amt = amount_per_tx;
             let its_proxy = its_proxy_addr;
@@ -473,7 +492,7 @@ async fn run_sustained_pipeline(
 
             Box::pin(async move {
                 let mut result = execute_interchain_transfer(
-                    &provider, its_proxy, tid, &dc, &rb, amt, gv, nonce,
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, nonce,
                 )
                 .await;
                 if result.success {
@@ -557,6 +576,7 @@ async fn run_burst_pipeline(
         let total = num_txs;
         let dc = dest_chain.clone();
         let gv = targets.gas_value;
+        let gsf = targets.gas_arg_scaling_factor;
         let rb = targets.receiver_bytes.clone();
         let amt = sizing.amount_per_tx;
         let its_proxy = targets.its_proxy_addr;
@@ -571,9 +591,10 @@ async fn run_burst_pipeline(
 
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result =
-                    execute_interchain_transfer(&provider, its_proxy, tid, &dc, &rb, amt, gv, None)
-                        .await;
+                let result = execute_interchain_transfer(
+                    &provider, its_proxy, tid, &dc, &rb, amt, gv, gsf, None,
+                )
+                .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);

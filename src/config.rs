@@ -47,7 +47,7 @@ impl ChainsConfig {
     }
 }
 
-/// One entry under the top-level `chains` map (e.g. `chains.flow`,
+/// One entry under the top-level `chains` map (e.g. `chains.hedera`,
 /// `chains.solana`). `chain_type` stays a raw `String` because the on-disk
 /// set ("evm", "svm", "stellar", "sui", "xrpl") is wider than the
 /// `crate::types::ChainType` enum's closed set; callers that only handle
@@ -70,7 +70,7 @@ pub struct ChainConfig {
 
 /// Top-level `axelar` block. Holds Axelar-network connection fields plus the
 /// nested `contracts` map keyed by contract name then by chain id (e.g.
-/// `axelar.contracts.Gateway.flow.address`). Some inner maps mix chain
+/// `axelar.contracts.Gateway.hedera.address`). Some inner maps mix chain
 /// entries with metadata keys like `lastUploadedCodeId`, so the inner value
 /// stays untyped (`HashMap<String, Value>`); see [`AxelarConfig::contract_address`].
 #[derive(Debug, Deserialize)]
@@ -181,7 +181,7 @@ impl AxelarConfig {
 }
 
 /// One entry under a chain's `contracts` map (e.g.
-/// `chains.flow.contracts.AxelarGateway`). Most callers only read `address`;
+/// `chains.hedera.contracts.AxelarGateway`). Most callers only read `address`;
 /// the rest of the deployer-side fields are kept as `extra` so we don't
 /// need to model the full `axelar-contract-deployments` shape here.
 #[derive(Debug, Deserialize)]
@@ -227,12 +227,12 @@ mod tests {
     const FIXTURE: &str = r#"
     {
       "chains": {
-        "flow": {
-          "axelarId": "flow",
-          "name": "Flow",
-          "rpc": "https://testnet.evm.nodes.onflow.org",
+        "hedera": {
+          "axelarId": "hedera",
+          "name": "Hedera",
+          "rpc": "https://testnet.hashio.io/api",
           "chainType": "evm",
-          "tokenSymbol": "FLOW",
+          "tokenSymbol": "HBAR",
           "decimals": 18,
           "contracts": {
             "AxelarGateway": {
@@ -240,7 +240,7 @@ mod tests {
               "salt": "v6.0.4"
             }
           },
-          "explorer": { "url": "https://evm-testnet.flowscan.io" }
+          "explorer": { "url": "https://hashscan.io/testnet" }
         },
         "solana": {
           "axelarId": "solana",
@@ -259,7 +259,7 @@ mod tests {
         "unitDenom": "uaxl",
         "contracts": {
           "Gateway": {
-            "flow": {
+            "hedera": {
               "address": "axelar1w8frw33jn0yx59845wdgk0yru6fxvgr6hlh4xfdtdf08y5jamcnsyu0z6u",
               "version": "1.1.1"
             },
@@ -275,16 +275,16 @@ mod tests {
     fn parses_typed_fields() {
         let cfg = ChainsConfig::from_json_str(FIXTURE).expect("fixture parses");
 
-        let flow = cfg.chains.get("flow").expect("flow present");
-        assert_eq!(flow.axelar_id.as_deref(), Some("flow"));
-        assert_eq!(flow.chain_type.as_deref(), Some("evm"));
-        assert_eq!(flow.token_symbol.as_deref(), Some("FLOW"));
-        assert_eq!(flow.decimals, Some(18));
+        let hedera = cfg.chains.get("hedera").expect("hedera present");
+        assert_eq!(hedera.axelar_id.as_deref(), Some("hedera"));
+        assert_eq!(hedera.chain_type.as_deref(), Some("evm"));
+        assert_eq!(hedera.token_symbol.as_deref(), Some("HBAR"));
+        assert_eq!(hedera.decimals, Some(18));
         assert_eq!(
-            flow.contract_address("AxelarGateway", "flow").unwrap(),
+            hedera.contract_address("AxelarGateway", "hedera").unwrap(),
             "0xe432150cce91c13a887f7D836923d5597adD8E31",
         );
-        assert!(flow.contract_address("AxelarMissing", "flow").is_err());
+        assert!(hedera.contract_address("AxelarMissing", "hedera").is_err());
 
         let sol = cfg.chains.get("solana").expect("solana present");
         assert_eq!(sol.chain_type.as_deref(), Some("svm"));
@@ -316,7 +316,7 @@ mod tests {
         assert!((gas_price - 0.007).abs() < 1e-12);
 
         assert_eq!(
-            cfg.axelar.contract_address("Gateway", "flow").unwrap(),
+            cfg.axelar.contract_address("Gateway", "hedera").unwrap(),
             "axelar1w8frw33jn0yx59845wdgk0yru6fxvgr6hlh4xfdtdf08y5jamcnsyu0z6u",
         );
         // Metadata keys (lastUploadedCodeId) carry no `address` field, so the
@@ -344,7 +344,7 @@ mod tests {
         let path =
             Path::new("../axelar-contract-deployments/axelar-chains-config/info/testnet.json");
         let cfg = ChainsConfig::load(path).expect("testnet.json loads + parses");
-        assert!(cfg.chains.contains_key("flow"), "flow chain present");
+        assert!(cfg.chains.contains_key("hedera"), "hedera chain present");
         assert!(cfg.chains.contains_key("solana"), "solana chain present");
         assert!(cfg.axelar.lcd.is_some(), "axelar.lcd present");
         assert!(

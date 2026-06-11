@@ -42,7 +42,7 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
 
-/// How long to wait for an EVM tx receipt before giving up. Flow confirms in
+/// How long to wait for an EVM tx receipt before giving up. Fast chains confirm in
 /// ~8s; other chains typically <20s. 60s gives congested networks enough room
 /// while still catching silently-dropped txs.
 const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -450,6 +450,16 @@ pub(super) async fn distribute_tokens<P: Provider>(
 /// `explicit_nonce`: when `Some`, bypasses alloy's RPC-based nonce fetch to
 /// avoid collisions when the same key fires again before the previous tx
 /// confirms.
+///
+/// `gas_arg_scaling_factor`: per-source-chain divisor exponent applied to the
+/// `gasValue` *argument* of `interchainTransfer` so it matches the
+/// source-side gas service's expected unit. `msg.value` always stays in
+/// 18-decimal EVM-wei (alloy's `.value()` takes wei). For Hedera the factor
+/// is 10 — passing the 18-decimal value as the function arg yields a 10^10
+/// mismatch and the call reverts with empty data (eth_estimateGas →
+/// "CONTRACT_REVERT_EXECUTED, data: 0x" at submit time). Other EVM chains
+/// in the matrix omit `gasScalingFactor` so callers pass 0 and behavior is
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_interchain_transfer<P: Provider>(
     provider: &P,
@@ -459,11 +469,17 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
     receiver_bytes: &Bytes,
     amount: U256,
     gas_value: U256,
+    gas_arg_scaling_factor: u32,
     explicit_nonce: Option<u64>,
 ) -> TxMetrics {
     let submit_start = Instant::now();
 
     let hub_gas = gas_value * U256::from(2);
+    let gas_value_arg = if gas_arg_scaling_factor == 0 {
+        hub_gas
+    } else {
+        hub_gas / U256::from(10).pow(U256::from(gas_arg_scaling_factor))
+    };
     let its = InterchainTokenService::new(its_proxy, provider);
     let base_call = its
         .interchainTransfer(
@@ -472,7 +488,7 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
             receiver_bytes.clone(),
             amount,
             Bytes::new(),
-            hub_gas,
+            gas_value_arg,
         )
         .value(hub_gas);
     let call = match explicit_nonce {
@@ -486,6 +502,25 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
             match tokio::time::timeout(EVM_RECEIPT_TIMEOUT, pending.get_receipt()).await {
                 Ok(Ok(receipt)) => {
                     let latency_ms = submit_start.elapsed().as_millis() as u64;
+
+                    // EVM receipts come back even for reverted txs — `status:
+                    // 0x0` means the tx mined but failed and its logs are
+                    // empty. Without this short-circuit, extract_contract_call
+                    // returns "ContractCall event not found in receipt logs"
+                    // and the user can't tell whether it was a missing event
+                    // or just a revert. Surface the revert (with tx hash) so
+                    // the explorer link in the report points at the right tx.
+                    if !receipt.status() {
+                        return make_failure_with_hash(
+                            submit_start,
+                            &format!(
+                                "source-side interchainTransfer reverted (status 0x0, \
+                                 gas_used {})",
+                                receipt.gas_used
+                            ),
+                            Some(tx_hash),
+                        );
+                    }
 
                     match extract_contract_call_event(&receipt) {
                         Ok((
@@ -517,9 +552,11 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
                                 amplifier_timing: None,
                             }
                         }
-                        Err(e) => {
-                            make_failure(submit_start, &format!("no ContractCall event: {e}"))
-                        }
+                        Err(e) => make_failure_with_hash(
+                            submit_start,
+                            &format!("no ContractCall event: {e}"),
+                            Some(tx_hash),
+                        ),
                     }
                 }
                 Ok(Err(e)) => make_failure_with_hash(submit_start, &e.to_string(), Some(tx_hash)),
@@ -532,6 +569,58 @@ pub(super) async fn execute_interchain_transfer<P: Provider>(
 
 fn make_failure(submit_start: Instant, error: &str) -> TxMetrics {
     make_failure_with_hash(submit_start, error, None)
+}
+
+/// Look up `gasScalingFactor` for a source EVM chain in chains-config. The
+/// caller reads this once at run() entry and threads it through to
+/// `execute_interchain_transfer`. Hedera = 10 (HTS native 8-dec ↔ EVM-wei
+/// 18-dec ⇒ scale by 10^10); most chains omit the field ⇒ 0 (no scaling).
+/// On any IO / parse failure returns 0 — over-paying the gasValue arg via
+/// no-scaling is safe (gas service refunds the excess), whereas under-paying
+/// causes the empty-data revert we're fixing.
+pub(super) fn read_gas_arg_scaling_factor(
+    config_path: &std::path::Path,
+    source_chain_id: &str,
+) -> u32 {
+    let Ok(content) = std::fs::read_to_string(config_path) else {
+        return 0;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return 0;
+    };
+    root.pointer(&format!("/chains/{source_chain_id}/gasScalingFactor"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0)
+}
+
+/// Rescale 18-decimal-assumed sizing amounts to the source token's actual
+/// `decimals()`. `compute_run_sizing` in every its_evm_to_<dest>.rs hardcodes
+/// amounts in 18-decimal sub-units (e.g. `1e16 = 0.01 AXE`). That holds for
+/// standard EVM-18 chains (Monad, HL, XRPL-EVM), but Hedera HTS-fork AXE is 6
+/// decimals — 1e16 sub-units there is 1e10 AXE, exceeds wallet balance, and
+/// the source burn reverts. Dividing by `10^(18 − decimals)` keeps the
+/// intended 0.01 AXE meaning regardless of chain.
+pub(super) async fn rescale_sizing_for_decimals<P: Provider>(
+    amount_per_tx: &mut U256,
+    amount_per_key: &mut U256,
+    total_supply: &mut U256,
+    provider: &P,
+    token_addr: Address,
+) -> eyre::Result<u8> {
+    let decimals = ERC20::new(token_addr, provider)
+        .decimals()
+        .call()
+        .await
+        .map_err(|e| eyre!("failed to read source token decimals at {token_addr}: {e}"))?;
+    if decimals < 18 {
+        let divisor = U256::from(10).pow(U256::from(18 - u32::from(decimals)));
+        *amount_per_tx /= divisor;
+        *amount_per_key /= divisor;
+        *total_supply /= divisor;
+    }
+    ui::kv("source token decimals", &decimals.to_string());
+    Ok(decimals)
 }
 
 fn make_failure_with_hash(

@@ -290,6 +290,29 @@ pub(super) async fn poll_pipeline<P: Provider>(
             .chain(executed_indices.iter())
             .copied()
             .collect();
+        // The VotingVerifier records the message's *first-leg* destination,
+        // which for ITS-hub-routed transfers is (axelar, AxelarnetGateway) —
+        // NOT the final chain. Each tx captured that as gmp_destination_* from
+        // its source-side ContractCall event; for raw GMP it equals the
+        // function-arg destination. Prefer the per-tx value so hub-routed
+        // Sui-destination ITS (e.g. sol→sui) queries (axelar, Hub) instead of
+        // the final Sui channel — the latter returns status "unknown" forever
+        // and the verify phase times out at "voted".
+        let (vv_dest_chain, vv_dest_addr) = voted_indices
+            .first()
+            .map(|&i| {
+                (
+                    txs[i].gmp_destination_chain.clone(),
+                    txs[i].gmp_destination_address.clone(),
+                )
+            })
+            .filter(|(c, a)| !c.is_empty() && !a.is_empty())
+            .unwrap_or_else(|| {
+                (
+                    destination_chain.to_string(),
+                    destination_address.to_string(),
+                )
+            });
         // Fire Cosmos phases concurrently (each internally chunks into COSMOS_BATCH_SIZE).
         let (voted_results, routed_results, hub_results) = tokio::join!(
             // Voted
@@ -302,8 +325,8 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         lcd,
                         vv,
                         source_chain,
-                        destination_chain,
-                        destination_address,
+                        &vv_dest_chain,
+                        &vv_dest_addr,
                         &voted_data,
                     )
                     .await
@@ -685,6 +708,13 @@ pub(super) enum ItsHubDest {
         rpc_url: String,
         recipient_address: String,
     },
+    /// Sui destination — query AxelarGateway events `MessageApproved`
+    /// (Approved phase) and `MessageExecuted` (Executed phase) on the
+    /// second-leg (`source_chain = "axelar"`, second-leg message id).
+    Sui {
+        rpc_url: String,
+        gateway_pkg: String,
+    },
 }
 
 impl ItsHubDest {
@@ -693,6 +723,7 @@ impl ItsHubDest {
             Self::Solana { .. } => "Solana approval",
             Self::Stellar { .. } => "Stellar approval",
             Self::Xrpl { .. } => "XRPL approval",
+            Self::Sui { .. } => "Sui approval",
         }
     }
 
@@ -701,6 +732,7 @@ impl ItsHubDest {
             Self::Solana { .. } => "Solana execution",
             Self::Stellar { .. } => "Stellar execution",
             Self::Xrpl { .. } => "XRPL execution",
+            Self::Sui { .. } => "Sui execution",
         }
     }
 }
@@ -765,6 +797,10 @@ pub(super) async fn poll_pipeline_its_hub(
     .flatten();
     let xrpl_client = match &dest {
         ItsHubDest::Xrpl { rpc_url, .. } => Some(crate::xrpl::XrplClient::new(rpc_url)),
+        _ => None,
+    };
+    let sui_client = match &dest {
+        ItsHubDest::Sui { rpc_url, .. } => Some(crate::sui::SuiClient::new(rpc_url)),
         _ => None,
     };
 
@@ -1176,6 +1212,59 @@ pub(super) async fn poll_pipeline_its_hub(
                                 txs[i].timing.executed_ok = Some(true);
                                 txs[i].phase = Phase::Done;
                                 last_progress = Instant::now();
+                            }
+                        }
+                    }
+                }
+                ItsHubDest::Sui { gateway_pkg, .. } => {
+                    if let Some(client) = sui_client.as_ref() {
+                        // The Sui gateway emits MessageApproved / MessageExecuted
+                        // for the *second* leg (hub→Sui): source_chain="axelar",
+                        // message_id = the second-leg id discovered above.
+                        let approved_event_type = format!("{gateway_pkg}::events::MessageApproved");
+                        let executed_event_type = format!("{gateway_pkg}::events::MessageExecuted");
+                        let pending: Vec<usize> = approved_indices
+                            .iter()
+                            .chain(executed_indices.iter())
+                            .copied()
+                            .collect();
+                        for i in pending {
+                            let second_leg = required_second_leg_field(
+                                &txs[i],
+                                "message_id",
+                                txs[i].second_leg_message_id.as_ref(),
+                            )?;
+                            let approved = client
+                                .has_message_approved(&approved_event_type, "axelar", &second_leg)
+                                .await?;
+                            let executed = client
+                                .has_message_executed(&executed_event_type, "axelar", &second_leg)
+                                .await?;
+                            match txs[i].phase {
+                                Phase::Approved if executed => {
+                                    let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                    if txs[i].timing.approved_secs.is_none() {
+                                        txs[i].timing.approved_secs = Some(elapsed);
+                                    }
+                                    txs[i].timing.executed_secs = Some(elapsed);
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                Phase::Approved if approved => {
+                                    txs[i].timing.approved_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].phase = Phase::Executed;
+                                    last_progress = Instant::now();
+                                }
+                                Phase::Executed if executed => {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                                _ => {}
                             }
                         }
                     }

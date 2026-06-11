@@ -57,7 +57,7 @@ pub async fn check_evm_balances(
 /// Verify the deployer's native balance on an EVM chain. Looks up the chain's
 /// `tokenSymbol` from the target config so balances render in the right unit;
 /// errors if the symbol is missing rather than silently defaulting (a stray
-/// "ETH" on FLOW or HBAR mid-flow used to be confusing).
+/// "ETH" on a non-ETH chain or HBAR mid-flow used to be confusing).
 pub async fn check_deployer_balance(
     rpc_url: &str,
     deployer_address: Address,

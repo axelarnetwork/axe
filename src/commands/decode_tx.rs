@@ -227,9 +227,6 @@ fn alchemy_slug(chain_id: u64) -> Option<&'static str> {
         250 => "fantom-mainnet",
         42220 => "celo-mainnet",
         5000 => "mantle-mainnet",
-        80094 => "berachain-mainnet",
-        747 => "flow-mainnet",
-        545 => "flow-testnet",
         _ => return None,
     })
 }

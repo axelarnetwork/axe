@@ -8,7 +8,7 @@ use clap::{Args, ValueEnum};
 pub struct ProposeArgs {
     /// Network: testnet | stagenet | devnet-amplifier | mainnet.
     pub network: String,
-    /// Edge chain key the ASG lives on (e.g. `berachain`).
+    /// Edge chain key the ASG lives on (e.g. `hedera`).
     pub chain: String,
     /// Catalog operation to propose. Omit to pass a raw call with `--calldata`/`--target`.
     #[arg(long, value_enum)]

@@ -26,9 +26,8 @@ use solana_sdk::signature::{Keypair, Signer};
 use tokio::sync::Mutex;
 
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::verify;
 use super::{
-    LoadTestArgs, finalize_sui_dest_run, load_sui_main_wallet, read_sui_axe_token_id,
+    LoadTestArgs, finalize_sui_dest_run_its, load_sui_main_wallet, read_sui_axe_token_id,
     sui_its_dest_lookup, validate_solana_rpc,
 };
 use crate::solana::{self, rpc_client};
@@ -187,15 +186,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         sustained_params,
     );
 
-    finalize_sui_dest_run(
-        &args,
-        &mut report,
-        &sui_its_channel,
-        &sui_rpc,
-        verify::SourceChainType::Svm,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(&args, &mut report, &sui_rpc, test_start).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,7 +218,19 @@ async fn run_burst(
         );
         match result {
             Ok((sig, mut m)) => {
-                m.signature = sig;
+                // The Amplifier voting verifier indexes Solana ITS messages by
+                // `{sig}-{outer_ix}.{inner_ix}` where the inner index is the
+                // exact CPI position of the gateway's call_contract — which
+                // varies per tx (we observed `-1.7` in CI vs the static
+                // `-2.1` shape this code used to assume). Parse it from the
+                // confirmed tx logs (same helper its_sol_to_evm uses) so the
+                // VotingVerifier `messages_status` query matches what
+                // Axelar actually stored. Fall back to the synthetic
+                // `{sig}-{call_contract_index}.1` if log parsing fails, so we
+                // don't lose verification altogether on RPC hiccups.
+                m.signature = solana::extract_its_message_id(sol_rpc, &sig).unwrap_or_else(|_| {
+                    format!("{}-{}.1", sig, solana::solana_call_contract_index())
+                });
                 metrics.push(m);
             }
             Err(e) => {
@@ -292,6 +295,7 @@ async fn run_sustained(
             let failed_ctr = Arc::clone(&failed);
             let sp = spinner.clone();
 
+            let rpc_for_extract = rpc.clone();
             let handle = tokio::spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let kp = Keypair::new_from_array(kp_secret);
@@ -311,7 +315,13 @@ async fn run_sustained(
 
                 let metric = match result {
                     Ok(Ok((sig, mut mm))) => {
-                        mm.signature = sig;
+                        // Same `{sig}-{outer}.{inner}` format the VotingVerifier
+                        // indexes Solana ITS messages by — see burst path above
+                        // for the full rationale.
+                        mm.signature = solana::extract_its_message_id(&rpc_for_extract, &sig)
+                            .unwrap_or_else(|_| {
+                                format!("{}-{}.1", sig, solana::solana_call_contract_index())
+                            });
                         confirmed_ctr.fetch_add(1, Ordering::Relaxed);
                         mm
                     }
