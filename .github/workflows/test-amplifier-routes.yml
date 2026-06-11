@@ -111,15 +111,15 @@ jobs:
           # tokenIds are read from the mainnet AXE entries (HL, Stellar, Sui).
           # XRPL ↔ XRPL EVM still uses the canonical XRP token (no per-chain
           # AXE needed for that pair).
-          # HL ↔ Stellar / Stellar → Solana / HL → Stellar dropped: the
-          # mainnet Stellar amplifier executor stopped picking up approved
-          # inbound messages ~2026-06-04 — same outage we hit on testnet's
-          # stellar-2026-q1-2. Approved-side reached but gas_used stays 0,
-          # then axe times out at "executed". Re-add when the off-chain
-          # executor is back.
+          # HL ↔ Stellar was briefly dropped during the mainnet Stellar
+          # amplifier executor outage (~2026-06-04 to ~06-09, messages stuck
+          # at "approved" with gas_used 0); restored once the executor came
+          # back (inbound-to-Stellar executing again as of 2026-06-11).
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
