@@ -1163,6 +1163,73 @@ pub async fn verify_onchain_solana_its(
     Ok(compute_verification_report(&txs, metrics, peaks))
 }
 
+/// Verify an ITS-via-hub transfer whose **destination is Sui**, batch mode.
+///
+/// Mirrors [`verify_onchain_solana_its`] but drives the Sui destination
+/// through the two-leg hub pipeline ([`ItsHubDest::Sui`]): Voted → HubApproved
+/// → DiscoverSecondLeg → Routed → Approved → Executed. The first leg
+/// (source→hub) message id comes from `tx.signature` (already formatted by
+/// each source sender), and the Sui-side approval/execution events key off the
+/// discovered second-leg id with `source_chain = "axelar"`.
+///
+/// This is the ITS counterpart to [`verify_onchain_sui_gmp`], which handles
+/// only single-leg raw GMP to Sui and so can't see the hub→Sui second leg.
+pub async fn verify_onchain_sui_its(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    sui_rpc: &str,
+    metrics: &mut [TxMetrics],
+) -> Result<VerificationReport> {
+    let confirmed = confirmed_indices(metrics);
+    if confirmed.is_empty() {
+        ui::warn("no confirmed transactions to verify");
+        return Ok(VerificationReport::default());
+    }
+
+    let ItsAxelarConfig {
+        cfg,
+        lcd,
+        voting_verifier,
+        axelarnet_gateway,
+    } = load_its_axelar_config(config, source_chain)?;
+    let gateway_pkg = crate::sui::read_sui_gateway_pkg(config, destination_chain)?;
+
+    let initial_phase = if voting_verifier.is_some() {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    };
+
+    let mut txs: Vec<PendingTx> = confirmed
+        .iter()
+        .map(|&idx| pending_tx_for_its_batch(&metrics[idx], idx, initial_phase))
+        .collect::<Result<Vec<_>>>()?;
+
+    let rpc = read_axelar_rpc(config)?;
+    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
+
+    let peaks = run_its_hub_pipeline(
+        &mut txs,
+        VerifyMode::Batch,
+        RunItsHubArgs {
+            lcd,
+            voting_verifier,
+            source_chain: source_chain.to_string(),
+            axelarnet_gateway,
+            rpc,
+            cosm_gateway_dest,
+            dest: ItsHubDest::Sui {
+                rpc_url: sui_rpc.to_string(),
+                gateway_pkg,
+            },
+        },
+    )
+    .await?;
+
+    Ok(compute_verification_report(&txs, metrics, peaks))
+}
+
 /// Streaming version of `verify_onchain_solana_its` — runs concurrently with
 /// the send phase, receiving confirmed txs via the channel.
 pub async fn verify_onchain_solana_its_streaming(

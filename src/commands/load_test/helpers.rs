@@ -1141,3 +1141,25 @@ pub(crate) async fn finalize_sui_dest_run(
     report.verification = Some(verification);
     finish_report(args, report, test_start)
 }
+
+/// ITS-to-Sui finalizer: like [`finalize_sui_dest_run`] but routes through the
+/// two-leg hub verifier ([`verify::verify_onchain_sui_its`]) so the hub→Sui
+/// second leg (routed → approved → executed) is actually tracked. Raw
+/// GMP-to-Sui stays on `finalize_sui_dest_run` (single leg).
+pub(crate) async fn finalize_sui_dest_run_its(
+    args: &LoadTestArgs,
+    report: &mut crate::commands::load_test::metrics::LoadTestReport,
+    sui_rpc: &str,
+    test_start: Instant,
+) -> Result<()> {
+    let verification = verify::verify_onchain_sui_its(
+        &args.config,
+        &args.source_axelar_id,
+        &args.destination_axelar_id,
+        sui_rpc,
+        &mut report.transactions,
+    )
+    .await?;
+    report.verification = Some(verification);
+    finish_report(args, report, test_start)
+}

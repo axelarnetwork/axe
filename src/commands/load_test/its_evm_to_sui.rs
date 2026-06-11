@@ -34,9 +34,8 @@ use tokio::sync::{Mutex, Semaphore};
 
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
-use super::verify;
 use super::{
-    LoadTestArgs, check_evm_balance, finalize_sui_dest_run, load_sui_main_wallet,
+    LoadTestArgs, check_evm_balance, finalize_sui_dest_run_its, load_sui_main_wallet,
     read_sui_axe_token_id, sui_its_dest_lookup, validate_evm_rpc,
 };
 use crate::config::ChainsConfig;
@@ -103,11 +102,11 @@ struct EvmContext {
 }
 
 /// Resolved Sui destination context: recipient bytes (for interchainTransfer
-/// payload), ITS channel id (for verifier), Sui RPC, display address.
+/// payload), Sui RPC, display address. (The ITS channel is logged for
+/// operators but the hub verifier keys off gateway events, not the channel.)
 struct SuiContext {
     recipient_bytes: Bytes,
     recipient_display: String,
-    its_channel: String,
     rpc: String,
 }
 
@@ -248,7 +247,6 @@ fn resolve_sui_context(args: &LoadTestArgs) -> eyre::Result<SuiContext> {
     Ok(SuiContext {
         recipient_bytes,
         recipient_display,
-        its_channel,
         rpc,
     })
 }
@@ -427,15 +425,7 @@ async fn run_burst_pipeline(
         metrics,
     );
 
-    finalize_sui_dest_run(
-        args,
-        &mut report,
-        &sui.its_channel,
-        &sui.rpc,
-        verify::SourceChainType::Evm,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(args, &mut report, &sui.rpc, test_start).await
 }
 
 async fn run_sustained_pipeline(
@@ -521,15 +511,7 @@ async fn run_sustained_pipeline(
     report.tps = Some(tps);
     report.duration_secs = Some(duration_secs);
 
-    finalize_sui_dest_run(
-        args,
-        &mut report,
-        &sui.its_channel,
-        &sui.rpc,
-        verify::SourceChainType::Evm,
-        test_start,
-    )
-    .await
+    finalize_sui_dest_run_its(args, &mut report, &sui.rpc, test_start).await
 }
 
 fn parse_main_signer(private_key: Option<&str>) -> eyre::Result<PrivateKeySigner> {

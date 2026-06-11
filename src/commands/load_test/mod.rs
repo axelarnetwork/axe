@@ -45,10 +45,10 @@ pub(crate) use resolve::resolve_from_config;
 pub(super) use helpers::{
     axelar_id_for_chain, check_evm_balance, deploy_or_reuse_sender_receiver,
     deploy_sender_receiver, ensure_evm_contract_deployed, ensure_sender_receiver,
-    finalize_sui_dest_run, finish_report, load_stellar_main_wallet, load_sui_main_wallet,
-    read_stellar_contract_address, read_stellar_network_type, read_stellar_token_address,
-    read_sui_axe_token_id, resolve_sui_axe_token, sui_dest_lookup, sui_its_dest_lookup,
-    validate_evm_rpc, validate_solana_rpc,
+    finalize_sui_dest_run, finalize_sui_dest_run_its, finish_report, load_stellar_main_wallet,
+    load_sui_main_wallet, read_stellar_contract_address, read_stellar_network_type,
+    read_stellar_token_address, read_sui_axe_token_id, resolve_sui_axe_token, sui_dest_lookup,
+    sui_its_dest_lookup, validate_evm_rpc, validate_solana_rpc,
 };
 pub(super) use resolve::{
     compiled_network, detect_network_from_config, read_cache, read_its_cache, save_cache,
