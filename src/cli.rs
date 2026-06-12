@@ -219,9 +219,11 @@ pub enum TestCommands {
 
     /// Cross-chain load test (auto-detects chains, RPCs, and test type from config)
     LoadTest {
-        /// Path to chains config JSON (e.g. devnet-amplifier.json, testnet.json, mainnet.json)
+        /// Path to chains config JSON (e.g. devnet-amplifier.json,
+        /// testnet.json, mainnet.json). Omit to resolve it from `--network`
+        /// (sibling checkout, then cache, then GitHub fetch).
         #[arg(long, env = "CHAINS_CONFIG")]
-        config: PathBuf,
+        config: Option<PathBuf>,
 
         /// Number of transactions to send
         #[arg(long, default_value = "5")]

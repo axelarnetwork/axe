@@ -171,7 +171,11 @@ async fn main() -> Result<()> {
                 key_cycle,
                 extra_accounts,
             } => {
-                let network = cli::resolve_network(cli.network, Some(&config))?;
+                let network = cli::resolve_network(cli.network, config.as_deref())?;
+                let config = match config {
+                    Some(path) => path,
+                    None => config_source::resolve(network, None).await?.into_path(),
+                };
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
                     test_type,
