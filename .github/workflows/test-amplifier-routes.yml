@@ -88,9 +88,26 @@ jobs:
           # every inbound message has sat at `approved/gas_used=0` since.
           # Re-add HL↔Stellar (and Stellar↔Solana / HL↔Stellar in GMP below)
           # once that off-chain service is back up.
+          # Monad-3 ↔ Hedera: a working testnet AXE family (tokenId 0xbcbec67e,
+          # home monad-3, remote-registered on hedera) is recorded in
+          # testnet.json for both chains. Monad-3 reuses its 18-dec balance;
+          # Hedera reuses its HTS 6-dec balance (a one-time TokenManager
+          # approval is set on the workflow wallet, like mainnet). Both
+          # directions verified end-to-end (voted→hub→routed→approved→executed).
+          # Hyperliquid ↔ Solana: a testnet AXE family (tokenId 0x63e3c40e,
+          # home solana, 9 decimals both sides) is registered on both chains
+          # and recorded in testnet.json; both wallets hold supply (Solana
+          # native + HL seeded by a solana->hyperliquid transfer). Both
+          # directions verified — source + on-chain delivery confirmed (axe's
+          # HL-side verify is occasionally flaky on the public HL RPC, but the
+          # transfer itself executes).
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
-            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"}
+            {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
+            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
+            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"}
           ]}'
           # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
           # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
@@ -111,15 +128,15 @@ jobs:
           # tokenIds are read from the mainnet AXE entries (HL, Stellar, Sui).
           # XRPL ↔ XRPL EVM still uses the canonical XRP token (no per-chain
           # AXE needed for that pair).
-          # HL ↔ Stellar / Stellar → Solana / HL → Stellar dropped: the
-          # mainnet Stellar amplifier executor stopped picking up approved
-          # inbound messages ~2026-06-04 — same outage we hit on testnet's
-          # stellar-2026-q1-2. Approved-side reached but gas_used stays 0,
-          # then axe times out at "executed". Re-add when the off-chain
-          # executor is back.
+          # HL ↔ Stellar was briefly dropped during the mainnet Stellar
+          # amplifier executor outage (~2026-06-04 to ~06-09, messages stuck
+          # at "approved" with gas_used 0); restored once the executor came
+          # back (inbound-to-Stellar executing again as of 2026-06-11).
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
+            {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar","notes":"evm->stellar ITS"},
+            {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},

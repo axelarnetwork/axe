@@ -94,6 +94,12 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
         Network::Mainnet => "stellar",
         Network::Testnet | Network::Stagenet | Network::DevnetAmplifier => "stellar-2026-q1-2",
     };
+    // The Monad amplifier chain id differs by network: `monad` on mainnet,
+    // `monad-3` on testnet (the active testnet deployment).
+    let monad_key = match network {
+        Network::Mainnet => "monad",
+        Network::Testnet | Network::Stagenet | Network::DevnetAmplifier => "monad-3",
+    };
     vec![
         ChainTarget {
             chain_key: "hyperliquid".to_string(),
@@ -119,7 +125,7 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             // precompile pricing → Axelar API estimate). axe pays 2× that for
             // the source→hub→dest legs, so each Monad-source ITS run burns
             // ~10 MON. 50 MON keeps a ~5-run buffer above the cron's pace.
-            chain_key: "monad".to_string(),
+            chain_key: monad_key.to_string(),
             kind: ChainKind::Evm,
             threshold_units: 50.0,
         },
