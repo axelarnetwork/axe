@@ -467,4 +467,44 @@ mod tests {
             }
         }
     }
+
+    /// The global `--network` is propagated by clap into subcommand-local
+    /// args that share its id — `main.rs` reading the local field therefore
+    /// reads the global value. This is invisible at the call sites, so pin
+    /// it here against regressions (and against reviewers reasoning it away).
+    #[test]
+    fn global_network_propagates_into_subcommand_args() {
+        let cli = Cli::try_parse_from(["axe", "--network", "mainnet", "info", "block"]).unwrap();
+        let Commands::Info {
+            subcommand: InfoCommands::Block { network, .. },
+        } = cli.command
+        else {
+            panic!("expected info block");
+        };
+        assert_eq!(
+            network,
+            Network::Mainnet,
+            "global flag must beat the local default"
+        );
+
+        let cli =
+            Cli::try_parse_from(["axe", "--network", "mainnet", "decode", "sol-activity"]).unwrap();
+        let Commands::Decode {
+            subcommand: DecodeCommands::SolActivity { network, .. },
+        } = cli.command
+        else {
+            panic!("expected decode sol-activity");
+        };
+        assert_eq!(network, Some(Network::Mainnet));
+
+        // Without the flag, the local default applies.
+        let cli = Cli::try_parse_from(["axe", "info", "block"]).unwrap();
+        let Commands::Info {
+            subcommand: InfoCommands::Block { network, .. },
+        } = cli.command
+        else {
+            panic!("expected info block");
+        };
+        assert_eq!(network, Network::Testnet);
+    }
 }
