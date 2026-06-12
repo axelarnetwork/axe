@@ -34,11 +34,11 @@ pub const SOLANA_RPCS: &[(&str, &str)] = &[
     ("mainnet", "https://api.mainnet-beta.solana.com"),
 ];
 
-pub async fn run(txid: &str, config_rpcs: &[(String, String)]) -> Result<()> {
+pub async fn run(txid: &str, rpcs: &[(String, String)]) -> Result<()> {
     let sig =
         Signature::from_str(txid).map_err(|e| eyre::eyre!("invalid Solana signature: {e}"))?;
 
-    let (network, tx_data) = try_fetch_transaction_from_any_network(&sig, config_rpcs)?;
+    let (network, tx_data) = try_fetch_transaction(&sig, rpcs)?;
 
     let slot = tx_data.slot;
     let block_time = tx_data.block_time.unwrap_or(0);
@@ -68,19 +68,18 @@ pub async fn run(txid: &str, config_rpcs: &[(String, String)]) -> Result<()> {
     Ok(())
 }
 
-/// Try the config-derived RPCs first (better rate limits, private endpoints),
-/// then the public cluster fallbacks. Errors only when none have the tx.
-fn try_fetch_transaction_from_any_network(
+/// Try each candidate RPC in order (deduped) until one returns the
+/// transaction. The caller composes the pool — config-derived RPCs first,
+/// public cluster fallbacks unless `--chain` pinned a specific one.
+fn try_fetch_transaction(
     sig: &Signature,
-    config_rpcs: &[(String, String)],
+    rpcs: &[(String, String)],
 ) -> Result<(String, EncodedConfirmedTransactionWithStatusMeta)> {
     let mut seen = std::collections::HashSet::new();
-    let candidates = config_rpcs
-        .iter()
-        .map(|(network, url)| (network.as_str(), url.as_str()))
-        .chain(SOLANA_RPCS.iter().copied())
-        .filter(|(_, url)| seen.insert(url.to_string()));
-    for (network, rpc_url) in candidates {
+    for (network, rpc_url) in rpcs {
+        if !seen.insert(rpc_url.clone()) {
+            continue;
+        }
         let rpc = crate::solana::rpc_client(rpc_url);
         if let Ok(data) = rpc.get_transaction_with_config(
             sig,
@@ -94,8 +93,8 @@ fn try_fetch_transaction_from_any_network(
         }
     }
     Err(eyre::eyre!(
-        "transaction not found on any Solana RPC (tried {} config RPC(s) plus public devnet/testnet/mainnet)",
-        config_rpcs.len()
+        "transaction not found on any Solana RPC (tried {})",
+        rpcs.len()
     ))
 }
 

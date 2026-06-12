@@ -38,10 +38,21 @@ pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) 
     // Detect Solana vs EVM: Solana signatures are base58, ~88 chars, no 0x prefix
     if !txid.starts_with("0x") && txid.len() > 60 {
         // Likely a Solana signature. Config SVM RPCs (private/QuickNode) are
-        // tried first; the public cluster RPCs remain as fallbacks, so this
-        // works with no config at all.
-        let config_rpcs = solana_rpcs_from_configs(config).await;
-        return super::decode_sol_tx::run(txid, &config_rpcs).await;
+        // tried first; the public cluster RPCs are appended as fallbacks
+        // unless --chain pinned a specific one, so this works with no config.
+        let mut rpcs = solana_rpcs_from_configs(config, chain_filter).await;
+        match chain_filter {
+            Some(filter) if rpcs.is_empty() => {
+                bail!("no SVM chain '{filter}' found in the resolved config(s)")
+            }
+            Some(_) => {}
+            None => rpcs.extend(
+                super::decode_sol_tx::SOLANA_RPCS
+                    .iter()
+                    .map(|(n, u)| (n.to_string(), u.to_string())),
+            ),
+        }
+        return super::decode_sol_tx::run(txid, &rpcs).await;
     }
 
     let tx_hash: TxHash = txid.parse().map_err(|_| eyre::eyre!("invalid tx hash"))?;
@@ -311,9 +322,13 @@ async fn fetch_tx(
 }
 
 /// SVM RPC candidates from the explicit config, or from every resolvable
-/// network's config when none is given. Failures resolve to "no candidates" —
-/// the caller still has the public cluster fallbacks.
-async fn solana_rpcs_from_configs(config: Option<&Path>) -> Vec<(String, String)> {
+/// network's config when none is given, optionally narrowed to one chain
+/// (matched by key or axelarId, like the EVM path). Failures resolve to
+/// "no candidates".
+async fn solana_rpcs_from_configs(
+    config: Option<&Path>,
+    chain_filter: Option<&str>,
+) -> Vec<(String, String)> {
     let configs: Vec<(String, PathBuf)> = match config {
         Some(c) => vec![("config".to_string(), c.to_path_buf())],
         None => {
@@ -331,10 +346,18 @@ async fn solana_rpcs_from_configs(config: Option<&Path>) -> Vec<(String, String)
         let Ok(cfg) = crate::config::ChainsConfig::load(&path) else {
             continue;
         };
-        for chain in cfg.chains.values() {
-            if chain.chain_type.as_deref() == Some("svm")
-                && let Some(rpc) = chain.rpc.clone()
+        for (key, chain) in &cfg.chains {
+            if chain.chain_type.as_deref() != Some("svm") {
+                continue;
+            }
+            let axelar_id = chain.axelar_id.as_deref().unwrap_or(key);
+            if let Some(filter) = chain_filter
+                && axelar_id != filter
+                && key != filter
             {
+                continue;
+            }
+            if let Some(rpc) = chain.rpc.clone() {
                 rpcs.push((label.clone(), rpc));
             }
         }
