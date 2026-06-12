@@ -12,7 +12,7 @@ This guide explains how to use `axe` commands to investigate stuck Axelar cross-
 | Recent Solana gateway activity | `cargo r -- decode sol-activity --program gateway --network devnet-amplifier --limit 10` |
 | Recent EVM gateway events | `cargo r -- decode evm-activity --contract gateway --network devnet-amplifier --chain avalanche-fuji --limit 10` |
 | Recent Solana ITS activity | `cargo r -- decode sol-activity --program its --network devnet-amplifier --limit 10` |
-| Run a GMP test (Solana, no relayer) | `cargo r --no-default-features --features testnet -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana` |
+| Run a GMP test (Solana, no relayer) | `axe test gmp --network testnet --source-chain solana --destination-chain solana` |
 
 ## Debugging a Stuck Message
 
@@ -106,22 +106,20 @@ cargo r -- decode sol-activity --program gateway --network devnet-amplifier --li
 
 Shows recent Gateway instructions and events for read-only diagnostics.
 
-## Network → Feature Flag Mapping
+## Network Selection
 
-axe compiles different Solana program IDs based on the cargo feature:
-
-| Network | Feature flag | Build command |
-|---|---|---|
-| devnet-amplifier | `devnet-amplifier` (default) | `cargo r -- ...` |
-| stagenet | `stagenet` | `cargo r --no-default-features --features stagenet -- ...` |
-| testnet | `testnet` | `cargo r --no-default-features --features testnet -- ...` |
-| mainnet | `mainnet` | `cargo r --no-default-features --features mainnet -- ...` |
-
-**If you build with the wrong feature, Solana program IDs will be wrong** and message ID extraction, PDA derivation, etc. will fail silently.
+One binary serves every network: pass `--network mainnet | testnet | stagenet
+| devnet-amplifier` (or set `AXE_NETWORK`). Solana program IDs are resolved at
+runtime from `src/solana/programs.rs` based on that choice, so there is no
+wrong-build failure mode — a contradicting `--network`/`--config` pair errors
+at startup.
 
 ## Config Auto-Discovery
 
-Most commands auto-discover chain configs from `../axelar-contract-deployments/axelar-chains-config/info/`. The directory structure:
+Commands resolve chain configs automatically (explicit `--config`, then the
+sibling `../axelar-contract-deployments` checkout, then a cached GitHub
+fetch — see the README's Configuration section). The checkout's directory
+structure:
 
 ```
 workspace/

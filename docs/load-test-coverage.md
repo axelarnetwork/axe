@@ -66,7 +66,7 @@ Whether a pair works also depends on whether both chains are deployed on the cho
 | **testnet** | many | `solana` | `stellar-2026-q1-2` | `sui` | `xrpl` | `xrpl-evm` | most coverage |
 | **stagenet** | many | `solana-stagenet-3` | none | `sui` | `xrpl` | `xrpl-evm` | no Stellar |
 | **devnet-amplifier** | `avalanche-fuji`, others | `solana-18` | none | `sui-2` | `xrpl-dev` | `xrpl-evm-devnet` ⚠️ | no Stellar; xrpl-evm-devnet AxelarGateway/ITS not deployed at configured addresses (`eth_getCode` returns `0x`) — GMP/ITS to it falls through pre-flight bytecode check |
-| **mainnet** | many | `solana` | `stellar` | `sui` | `xrpl` | `xrpl-evm` | full coverage; Solana program IDs are feature-gated and resolve to mainnet (`gtwqvLL…`, `gaszjG…`, `memtaCu…`, `itsAUdH…`) when built `--features mainnet --no-default-features` |
+| **mainnet** | many | `solana` | `stellar` | `sui` | `xrpl` | `xrpl-evm` | full coverage; `--network mainnet` resolves the Solana program IDs to mainnet (`gtwqvLL…`, `gaszjG…`, `memtaCu…`, `itsAUdH…`) |
 
 ## Resolving how a `--protocol`/`--source-chain`/`--destination-chain` triple is dispatched
 
@@ -97,7 +97,7 @@ Auto-detect runs through these steps in order:
 
 ## All `axe test load-test` flags
 
-Every flag (other than `--config`) is optional. Defaults are picked from the chain config + env feature flag.
+Every flag is optional. Defaults are picked from the chain config and `--network`.
 
 | Flag | Type | Notes |
 |---|---|---|
@@ -123,19 +123,13 @@ All Solana RPC clients in load-test paths (sender, verifier, keypairs) use `Comm
 
 The `decode tx <solana-signature>` and `decode sol-activity` subcommands stay on `confirmed` — read-only diagnostic paths where the lower-latency commitment doesn't risk consistency.
 
-## Building per environment
+## Picking the environment
 
-The binary feature-gates the Axelar amplifier program IDs at compile time. Pick exactly one of `mainnet | testnet | stagenet | devnet-amplifier`:
+One binary serves every network — select it at runtime with `--network
+mainnet | testnet | stagenet | devnet-amplifier` (or `AXE_NETWORK`). Program
+IDs and chain configs resolve from that choice. Passing a `--config` file
+that names a different network is a hard error:
 
-```sh
-cargo build --release --no-default-features --features testnet
-cargo build --release --no-default-features --features mainnet
-cargo build --release --no-default-features --features stagenet
-cargo build --release --no-default-features --features devnet-amplifier
 ```
-
-If you point a binary built with one feature at a config from another env, the runner bails immediately:
-```
-Error: binary was compiled for 'devnet-amplifier' but config targets 'testnet'.
-       Rebuild with: cargo build --release --features testnet --no-default-features
+Error: --network mainnet contradicts the config file (testnet); pass a matching --config or drop one
 ```

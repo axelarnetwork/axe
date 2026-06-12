@@ -34,7 +34,7 @@ pub const SOLANA_RPCS: &[(&str, &str)] = &[
     ("mainnet", "https://api.mainnet-beta.solana.com"),
 ];
 
-pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
+pub async fn run(txid: &str) -> Result<()> {
     let sig =
         Signature::from_str(txid).map_err(|e| eyre::eyre!("invalid Solana signature: {e}"))?;
 

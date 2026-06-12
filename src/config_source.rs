@@ -81,6 +81,17 @@ async fn resolve_in(
     base_url: &str,
 ) -> Result<ConfigSource> {
     if let Some(path) = explicit {
+        // A path whose filename names a network must name *this* network —
+        // otherwise a stale CHAINS_CONFIG silently runs e.g. "mainnet" logic
+        // against testnet.json. Custom filenames are exempt.
+        if let Some(named) = crate::commands::load_test::detect_network_from_config(&path)
+            && named != network
+        {
+            return Err(eyre!(
+                "chains config '{}' (--config/CHAINS_CONFIG) targets {named},                  but the requested network is {network}; drop one or make them match",
+                path.display()
+            ));
+        }
         if path.exists() {
             return Ok(ConfigSource::Checkout(path));
         }
@@ -216,6 +227,15 @@ mod tests {
             DEAD_URL,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn explicit_path_naming_other_network_bails() {
+        let dir = TempDir::new("axe-cfg-mismatch");
+        let other = dir.path.join("mainnet.json");
+        std::fs::write(&other, "{}").unwrap();
+        let err = resolve_dead(&dir, Some(other)).await.unwrap_err();
+        assert!(err.to_string().contains("targets mainnet"), "{err}");
     }
 
     #[tokio::test]

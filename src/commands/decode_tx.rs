@@ -37,9 +37,9 @@ async fn resolve_all_configs() -> Result<Vec<PathBuf>> {
 pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) -> Result<()> {
     // Detect Solana vs EVM: Solana signatures are base58, ~88 chars, no 0x prefix
     if !txid.starts_with("0x") && txid.len() > 60 {
-        // Likely a Solana signature
-        let solana_rpc = resolve_solana_rpc(config);
-        return super::decode_sol_tx::run(txid, &solana_rpc).await;
+        // Likely a Solana signature; decode_sol_tx tries every Solana
+        // cluster itself, so no config is needed.
+        return super::decode_sol_tx::run(txid).await;
     }
 
     let tx_hash: TxHash = txid.parse().map_err(|_| eyre::eyre!("invalid tx hash"))?;
@@ -306,20 +306,4 @@ async fn fetch_tx(
         "transaction not found on any chain (tried {} RPCs)",
         rpcs.len()
     )
-}
-
-/// Resolve a Solana RPC URL from the config, falling back to devnet.
-fn resolve_solana_rpc(config: Option<&Path>) -> String {
-    const FALLBACK: &str = "https://api.devnet.solana.com";
-    let Some(cfg_path) = config else {
-        return FALLBACK.to_string();
-    };
-    let Ok(cfg) = crate::config::ChainsConfig::load(cfg_path) else {
-        return FALLBACK.to_string();
-    };
-    cfg.chains
-        .values()
-        .find(|c| c.chain_type.as_deref() == Some("svm"))
-        .and_then(|c| c.rpc.clone())
-        .unwrap_or_else(|| FALLBACK.to_string())
 }
