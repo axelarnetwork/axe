@@ -94,11 +94,20 @@ jobs:
           # Hedera reuses its HTS 6-dec balance (a one-time TokenManager
           # approval is set on the workflow wallet, like mainnet). Both
           # directions verified end-to-end (voted→hub→routed→approved→executed).
+          # Hyperliquid ↔ Solana: a testnet AXE family (tokenId 0x63e3c40e,
+          # home solana, 9 decimals both sides) is registered on both chains
+          # and recorded in testnet.json; both wallets hold supply (Solana
+          # native + HL seeded by a solana->hyperliquid transfer). Both
+          # directions verified — source + on-chain delivery confirmed (axe's
+          # HL-side verify is occasionally flaky on the public HL RPC, but the
+          # transfer itself executes).
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
+            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"}
           ]}'
           # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
           # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui

@@ -152,16 +152,18 @@ case "$NETWORK/$PROTOCOL" in
     testnet/its)
         # Mirrors MATRIX_TESTNET_ITS in the workflow. XRPL↔XRPL EVM uses the
         # canonical XRP token; Monad-3↔Hedera uses the testnet AXE family
-        # (tokenId 0xbcbec67e, home monad-3, remote-registered on hedera),
-        # both directions verified end-to-end. Stellar removed during the
-        # testnet Stellar executor outage; Sui/Solana omitted (Sui no
-        # testnet gas to source; Monad-3 ITS doesn't trust solana).
+        # 0xbcbec67e (home monad-3); Hyperliquid↔Solana uses the testnet AXE
+        # family 0x63e3c40e (home solana). All verified end-to-end. Stellar
+        # removed during the testnet Stellar executor outage; Sui omitted (no
+        # testnet gas to source from it).
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera"},
-  {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"}
+  {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"},
+  {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana"},
+  {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"}
 ]
 EOF
 )
