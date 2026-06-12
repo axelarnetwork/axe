@@ -107,8 +107,14 @@ async fn main() -> Result<()> {
                 destination_address,
                 mnemonic,
             } => {
-                if let Some(config) = config {
-                    let network = cli::resolve_network(cli.network, Some(&config))?;
+                // Config mode when --config or the chain pair is given;
+                // legacy state-file mode otherwise.
+                if config.is_some() || source_chain.is_some() || destination_chain.is_some() {
+                    let network = cli::resolve_network(cli.network, config.as_deref())?;
+                    let config = match config {
+                        Some(path) => path,
+                        None => config_source::resolve(network, None).await?.into_path(),
+                    };
                     commands::test_gmp::run_config(
                         config,
                         network,
@@ -133,8 +139,14 @@ async fn main() -> Result<()> {
                 gas_value,
                 fresh_token,
             } => {
-                if let Some(config) = config {
-                    let network = cli::resolve_network(cli.network, Some(&config))?;
+                // Config mode when --config or the chain pair is given;
+                // legacy state-file mode otherwise.
+                if config.is_some() || source_chain.is_some() || destination_chain.is_some() {
+                    let network = cli::resolve_network(cli.network, config.as_deref())?;
+                    let config = match config {
+                        Some(path) => path,
+                        None => config_source::resolve(network, None).await?.into_path(),
+                    };
                     commands::test_its::run_config(
                         config,
                         network,

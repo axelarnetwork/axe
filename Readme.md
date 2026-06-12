@@ -250,12 +250,12 @@ Sends a loopback GMP message on a deployed EVM chain and relays it through the f
 ### Solana manual relaying
 
 ```bash
-cargo run -- test gmp --config ../axelar-contract-deployments/axelar-chains-config/info/testnet.json --source-chain solana --destination-chain solana
+axe test gmp --network testnet --source-chain solana --destination-chain solana
 ```
 
 Sends a GMP message from Solana and manually relays it through the full Amplifier pipeline end-to-end: callContract → verify_messages → vote → end_poll → route_messages → construct_proof → approve on Solana gateway (init verification session → verify all 12 signatures → approve message). Requires `MNEMONIC` env var with a funded Cosmos wallet.
 
-The network follows the `--config` filename (`devnet-amplifier`, `stagenet`, `testnet`, `mainnet`).
+Pick the network with `--network` (or point `--config` at a specific chains-config file).
 
 ## Test ITS
 
@@ -286,7 +286,7 @@ See [docs/load-test-coverage.md](docs/load-test-coverage.md) for the full source
 | Stellar ↔ Sui | ✅ Stellar → Sui | (deferred) |
 | Stellar ↔ XRPL / Sui ↔ XRPL | (deferred) | (deferred) |
 
-**The network is a runtime choice**: pass `--network mainnet | testnet | stagenet | devnet-amplifier` (or set `AXE_NETWORK`). When omitted, the network is inferred from the `--config` filename. The binary fails fast at startup if `--network` contradicts the config filename.
+**The network is a runtime choice**: pass `--network mainnet | testnet | stagenet | devnet-amplifier` (or set `AXE_NETWORK`). The chains-config is resolved automatically (see [Config resolution](#config-resolution)); `--config <path>` overrides it, and the binary fails fast if `--network` contradicts the config filename.
 
 ## Modes
 
@@ -341,7 +341,7 @@ axe test load-test --tps 10 --duration-secs 300 ...
 axe test load-test \
   --source-chain solana-18 \
   --destination-chain avalanche-fuji \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ### GMP: EVM → SOL
@@ -351,7 +351,7 @@ axe test load-test \
   --source-chain avalanche-fuji \
   --destination-chain solana-18 \
   --num-txs 50 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ### ITS: SOL → EVM
@@ -361,7 +361,7 @@ axe test load-test \
   --source-chain solana-18 \
   --destination-chain avalanche-fuji \
   --protocol its \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ### ITS: EVM → SOL
@@ -371,7 +371,7 @@ axe test load-test \
   --source-chain avalanche-fuji \
   --destination-chain solana-18 \
   --protocol its \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ## Sustained examples
@@ -384,7 +384,7 @@ axe test load-test \
   --destination-chain avalanche-fuji \
   --tps 10 \
   --duration-secs 300 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ### GMP: 5 tx/s for 2 minutes, EVM → SOL
@@ -395,7 +395,7 @@ axe test load-test \
   --destination-chain solana-18 \
   --tps 5 \
   --duration-secs 120 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ### ITS: sustained EVM → SOL
@@ -407,12 +407,12 @@ axe test load-test \
   --protocol its \
   --tps 3 \
   --duration-secs 180 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/devnet-amplifier.json
+  --network devnet-amplifier
 ```
 
 ## Stagenet / testnet / mainnet
 
-On stagenet/testnet/mainnet the relayer requires gas payment. The same binary serves every network — the network is picked at runtime from the `--config` filename (or `--network`):
+On stagenet/testnet/mainnet the relayer requires gas payment. The same binary serves every network — just pass `--network`:
 
 ```bash
 cargo install --locked --path .   # or `cargo build --release` + run from target/ when iterating
@@ -426,7 +426,7 @@ axe test load-test \
   --source-chain flow \
   --destination-chain solana-stagenet-3 \
   --num-txs 100 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json
+  --network stagenet
 
 # Sustained with larger wallet pool for Flow
 EVM_PRIVATE_KEY=0x... axe test load-test \
@@ -435,32 +435,32 @@ EVM_PRIVATE_KEY=0x... axe test load-test \
   --tps 2 \
   --duration-secs 120 \
   --key-cycle 6 \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/stagenet.json \
+  --network stagenet \
   --source-rpc https://your-flow-rpc-endpoint
 ```
 
 ### Mainnet examples
 
-Mainnet works for every pair where both chains are deployed there: EVM, Solana, Stellar, Sui, XRPL, and XRPL-EVM. Pointing `--config` at `mainnet.json` resolves all program IDs (Solana gateway/ITS/gas-service/memo) to mainnet automatically.
+Mainnet works for every pair where both chains are deployed there: EVM, Solana, Stellar, Sui, XRPL, and XRPL-EVM. `--network mainnet` resolves all program IDs (Solana gateway/ITS/gas-service/memo) to mainnet automatically.
 
 ```bash
 # Solana → EVM ITS (or any direction)
 axe test load-test \
   --source-chain solana --destination-chain avalanche \
   --num-txs 1 --protocol its \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+  --network mainnet
 
 # EVM → Sui GMP (Sui destination verifier polls suix_queryEvents for MessageApproved/MessageExecuted)
 axe test load-test \
   --source-chain xrpl-evm --destination-chain sui \
   --num-txs 1 --protocol gmp \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+  --network mainnet
 
 # XRPL → XRPL-EVM canonical XRP transfer
 axe test load-test \
   --source-chain xrpl --destination-chain xrpl-evm \
   --num-txs 1 --protocol its \
-  --config ../axelar-contract-deployments/axelar-chains-config/info/mainnet.json
+  --network mainnet
 ```
 
 **Solana commitment**: load-test paths use `CommitmentConfig::finalized` (not `confirmed`) so we don't return from `send_and_confirm_transaction` until the tx is finalized on-chain. This adds ~10–25 s per Solana source tx but eliminates the verifier vote-split race that produced "Failed" polls (5Y / 5N at expiry) on mainnet when verifiers query Solana at different commitments.
