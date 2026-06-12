@@ -1,5 +1,5 @@
 name: Run axe load test
-description: Build axe for the selected network, clone the chains-config repo, and invoke `axe test load-test` with the supplied arguments.
+description: Download or build the axe binary, clone the chains-config repo, and invoke `axe test load-test` for the selected network.
 
 inputs:
   network:

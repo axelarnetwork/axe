@@ -101,12 +101,12 @@ Every flag is optional. Defaults are picked from the chain config and `--network
 
 | Flag | Type | Notes |
 |---|---|---|
-| `--config <path>` | path | **required**. Picks the env (`mainnet.json`, `testnet.json`, `stagenet.json`, `devnet-amplifier.json`). Binary's compiled feature must match. |
+| `--config <path>` | path | Optional override; the config is otherwise resolved from `--network` (checkout → cache → GitHub fetch). A filename naming a different network is a hard error. |
 | `--source-chain <axelarId>` | string | Auto-detected when only one chain of the source type exists. Required for Sui pairs and any ambiguous cases. |
 | `--destination-chain <axelarId>` | string | Same as source. |
 | `--test-type <enum>` | one of `sol-to-evm \| evm-to-sol \| evm-to-evm \| sol-to-sol \| xrpl-to-evm \| evm-to-xrpl \| stellar-to-evm \| evm-to-stellar \| stellar-to-sol \| sol-to-stellar \| sui-to-evm \| evm-to-sui \| sol-to-sui \| sui-to-sol \| stellar-to-sui \| sui-to-stellar \| xrpl-to-sui \| sui-to-xrpl` | Auto-detected from the chain types — only set this if you want to override. |
 | `--protocol <gmp \| its \| its-with-data>` | enum | Default `gmp`. `its-with-data` only supports `evm-to-sol`. |
-| `--num-txs <N>` | u64 | Burst-mode tx count (default 5). |
+| `--num-txs <N>` | u64 | Burst-mode tx count (default 1). |
 | `--tps <N>` + `--duration-secs <N>` | u64 | Sustained-mode (EVM↔Solana only today). Pool size = `tps × key_cycle`. |
 | `--key-cycle <N>` | u64 | Sustained-mode wallet rotation (default 3). Higher reduces per-address mempool pressure. |
 | `--source-rpc <url>` / `--destination-rpc <url>` | string | Override the per-chain RPC URLs from config. Also via `SOURCE_RPC` / `DESTINATION_RPC` env. |
