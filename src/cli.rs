@@ -239,8 +239,8 @@ pub enum TestCommands {
         #[arg(long, env = "CHAINS_CONFIG")]
         config: Option<PathBuf>,
 
-        /// Number of transactions to send
-        #[arg(long, default_value = "5")]
+        /// Number of transactions to send (default: a single end-to-end test)
+        #[arg(long, default_value = "1")]
         num_txs: u64,
 
         /// Load test type (auto-detected from source/destination chain types if omitted)
