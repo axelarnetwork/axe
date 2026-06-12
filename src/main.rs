@@ -72,7 +72,10 @@ async fn main() -> Result<()> {
                 chain,
                 limit,
                 json,
-            } => commands::decode_evm_activity::run(contract, network, chain, limit, json).await,
+            } => {
+                let network = cli::network_or_default(network, cli.network)?;
+                commands::decode_evm_activity::run(contract, network, chain, limit, json).await
+            }
         },
         cli::Commands::Info { subcommand } => match subcommand {
             cli::InfoCommands::Block {
@@ -87,9 +90,13 @@ async fn main() -> Result<()> {
             json,
         } => commands::verifiers::run(network, chain, json).await,
         cli::Commands::ItsOwnership { network, json } => {
+            let network = cli::network_or_default(network, cli.network)?;
             commands::its_ownership::run(network, json).await
         }
-        cli::Commands::CheckBalances { network } => commands::check_balances::run(network).await,
+        cli::Commands::CheckBalances { network } => {
+            let network = cli::network_or_default(network, cli.network)?;
+            commands::check_balances::run(network).await
+        }
         cli::Commands::VerifierVotes {
             network,
             chain,

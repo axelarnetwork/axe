@@ -35,6 +35,20 @@ pub fn resolve_network(flag: Option<Network>, config: Option<&std::path::Path>) 
     }
 }
 
+/// Resolve a command's own (optional) network arg against the global flag:
+/// the command's arg wins, then `--network`/`AXE_NETWORK`, then testnet.
+/// Contradicting values are a hard error.
+pub fn network_or_default(arg: Option<Network>, global: Option<Network>) -> Result<Network> {
+    match (arg, global) {
+        (Some(a), Some(g)) if a != g => {
+            eyre::bail!("network argument {a} contradicts --network {g}; drop one")
+        }
+        (Some(a), _) => Ok(a),
+        (None, Some(g)) => Ok(g),
+        (None, None) => Ok(Network::Testnet),
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Deploy and manage chain deployments
@@ -68,8 +82,8 @@ pub enum Commands {
 
     /// Show ITS owner/operator addresses across a network
     ItsOwnership {
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: Network,
+        /// Axelar network (defaults to --network / AXE_NETWORK, else testnet)
+        network: Option<Network>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -79,8 +93,8 @@ pub enum Commands {
     /// balance needed by the cron amplifier-routes load tests. Fails the
     /// process if any wallet is underfunded.
     CheckBalances {
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: Network,
+        /// Axelar network (defaults to --network / AXE_NETWORK, else testnet)
+        network: Option<Network>,
     },
 
     /// Show network info (e.g. block height + timestamp)
@@ -314,7 +328,7 @@ pub enum InfoCommands {
         number: Option<u64>,
 
         /// Axelar network (mainnet, testnet, stagenet, devnet-amplifier)
-        #[arg(long, default_value = "mainnet")]
+        #[arg(long, default_value = "testnet")]
         network: Network,
 
         /// Predict the block at this time (RFC3339, e.g.
@@ -373,9 +387,9 @@ pub enum DecodeCommands {
         #[arg(long, value_enum)]
         contract: Option<EvmContract>,
 
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        /// Axelar network (defaults to AXE_NETWORK, else testnet)
         #[arg(long)]
-        network: Network,
+        network: Option<Network>,
 
         /// EVM chain name (e.g. avalanche-fuji, eth-sepolia)
         #[arg(long)]
@@ -439,7 +453,10 @@ mod tests {
             ],
             &["axe", "verifiers", "testnet", "xrpl"],
             &["axe", "its-ownership", "testnet"],
+            &["axe", "its-ownership"],
             &["axe", "check-balances", "testnet"],
+            &["axe", "check-balances"],
+            &["axe", "--network", "mainnet", "check-balances"],
             &["axe", "info", "block", "--network", "testnet"],
             &["axe", "verifier-votes", "testnet", "xrpl", "axelar1abc"],
             &["axe", "propose", "testnet", "hedera", "--op", "pause"],
