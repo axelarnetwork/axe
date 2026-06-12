@@ -88,7 +88,8 @@ async fn resolve_in(
             && named != network
         {
             return Err(eyre!(
-                "chains config '{}' (--config/CHAINS_CONFIG) targets {named},                  but the requested network is {network}; drop one or make them match",
+                "chains config '{}' (--config/CHAINS_CONFIG) targets {named}, but the \
+                 requested network is {network}; drop one or make them match",
                 path.display()
             ));
         }
