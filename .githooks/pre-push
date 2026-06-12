@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Pre-push hook: fmt + clippy across all four feature flags + tests.
+# Pre-push hook: fmt + clippy + tests.
 #
-# This is the *thorough* gate before sharing with the remote (~2-3 min).
-# Catches feature-flag-specific clippy warnings the pre-commit hook doesn't.
+# Same gate as pre-commit — kept as a backstop for commits made with
+# `--no-verify` or from clones that enabled hooks after committing.
 #
 # Enable for this clone:
 #   git config core.hooksPath .githooks
@@ -16,11 +16,9 @@ cd "$ROOT"
 echo "==> cargo fmt --all --check"
 cargo fmt --all --check
 
-for feature in mainnet testnet stagenet devnet-amplifier; do
-    echo "==> cargo clippy --no-default-features --features $feature --all-targets -- -D warnings (too_many_lines suppressed)"
-    cargo clippy --no-default-features --features "$feature" --all-targets -- -D warnings \
-        -A clippy::too_many_lines
-done
+echo "==> cargo clippy --all-targets -- -D warnings (too_many_lines suppressed)"
+cargo clippy --all-targets -- -D warnings \
+    -A clippy::too_many_lines
 
 echo "==> cargo test --all-targets"
 cargo test --all-targets --quiet

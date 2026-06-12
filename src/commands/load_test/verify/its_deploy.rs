@@ -465,6 +465,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     destination_chain: &str,
     deploy_message_id: &str,
     solana_rpc: &str,
+    network: crate::types::Network,
 ) -> Result<()> {
     let cfg = ChainsConfig::load(config)?;
     let (lcd, _, _, _) = cfg.axelar.cosmos_tx_params()?;
@@ -565,7 +566,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
                     .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg message_id"))?;
                 let input = [b"axelar-".as_slice(), sl_id.as_bytes()].concat();
                 let cmd_id: [u8; 32] = keccak256(&input).into();
-                match check_solana_incoming_message(&sol_rpc_client, &cmd_id) {
+                match check_solana_incoming_message(&sol_rpc_client, network, &cmd_id) {
                     Ok(Some(_)) => {
                         phase = DeployPhase::Done;
                         continue;

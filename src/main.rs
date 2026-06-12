@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod config_source;
 mod cosmos;
 mod error;
 mod evm;
@@ -71,7 +72,10 @@ async fn main() -> Result<()> {
                 chain,
                 limit,
                 json,
-            } => commands::decode_evm_activity::run(contract, network, chain, limit, json).await,
+            } => {
+                let network = cli::network_or_default(network, cli.network)?;
+                commands::decode_evm_activity::run(contract, network, chain, limit, json).await
+            }
         },
         cli::Commands::Info { subcommand } => match subcommand {
             cli::InfoCommands::Block {
@@ -86,9 +90,13 @@ async fn main() -> Result<()> {
             json,
         } => commands::verifiers::run(network, chain, json).await,
         cli::Commands::ItsOwnership { network, json } => {
+            let network = cli::network_or_default(network, cli.network)?;
             commands::its_ownership::run(network, json).await
         }
-        cli::Commands::CheckBalances { network } => commands::check_balances::run(network).await,
+        cli::Commands::CheckBalances { network } => {
+            let network = cli::network_or_default(network, cli.network)?;
+            commands::check_balances::run(network).await
+        }
         cli::Commands::VerifierVotes {
             network,
             chain,
@@ -106,9 +114,17 @@ async fn main() -> Result<()> {
                 destination_address,
                 mnemonic,
             } => {
-                if let Some(config) = config {
+                // Config mode when --config or the chain pair is given;
+                // legacy state-file mode otherwise.
+                if config.is_some() || source_chain.is_some() || destination_chain.is_some() {
+                    let network = cli::resolve_network(cli.network, config.as_deref())?;
+                    let config = match config {
+                        Some(path) => path,
+                        None => config_source::resolve(network, None).await?.into_path(),
+                    };
                     commands::test_gmp::run_config(
                         config,
+                        network,
                         source_chain,
                         destination_chain,
                         destination_address,
@@ -130,9 +146,17 @@ async fn main() -> Result<()> {
                 gas_value,
                 fresh_token,
             } => {
-                if let Some(config) = config {
+                // Config mode when --config or the chain pair is given;
+                // legacy state-file mode otherwise.
+                if config.is_some() || source_chain.is_some() || destination_chain.is_some() {
+                    let network = cli::resolve_network(cli.network, config.as_deref())?;
+                    let config = match config {
+                        Some(path) => path,
+                        None => config_source::resolve(network, None).await?.into_path(),
+                    };
                     commands::test_its::run_config(
                         config,
+                        network,
                         source_chain,
                         destination_chain,
                         mnemonic,
@@ -166,6 +190,11 @@ async fn main() -> Result<()> {
                 key_cycle,
                 extra_accounts,
             } => {
+                let network = cli::resolve_network(cli.network, config.as_deref())?;
+                let config = match config {
+                    Some(path) => path,
+                    None => config_source::resolve(network, None).await?.into_path(),
+                };
                 let resolved = commands::load_test::resolve_from_config(
                     &config,
                     test_type,
@@ -178,6 +207,7 @@ async fn main() -> Result<()> {
 
                 commands::load_test::run(commands::load_test::LoadTestArgs {
                     config,
+                    network,
                     test_type: resolved.test_type,
                     protocol,
                     destination_chain: resolved.destination_chain,

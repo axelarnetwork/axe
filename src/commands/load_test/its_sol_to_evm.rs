@@ -50,14 +50,10 @@ fn mint_decimals(rpc_client: &RpcClient, mint: &solana_sdk::pubkey::Pubkey) -> u
 /// with `availableGasBalance.amount must be positive: -2449`. For very-high-
 /// throughput burst tests where the per-tx cost matters, override with
 /// `--gas-value`.
-fn default_gas_value() -> u64 {
-    #[cfg(feature = "devnet-amplifier")]
-    {
-        0
-    }
-    #[cfg(not(feature = "devnet-amplifier"))]
-    {
-        500_000
+fn default_gas_value(network: crate::types::Network) -> u64 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ => 500_000,
     }
 }
 
@@ -92,10 +88,13 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     ui::kv("destination", dest);
     ui::kv("protocol", "ITS (interchainTransfer via hub)");
 
-    let (rpc_client, main_keypair) =
-        init_solana_client_and_main_keypair(&args.source_rpc, args.keypair.as_deref())?;
+    let (rpc_client, main_keypair) = init_solana_client_and_main_keypair(
+        &args.source_rpc,
+        args.keypair.as_deref(),
+        args.network,
+    )?;
 
-    let gas_value = parse_gas_value(args.gas_value.as_deref())?;
+    let gas_value = parse_gas_value(args.gas_value.as_deref(), args.network)?;
     let (evm, dest_address_bytes) =
         resolve_evm_targets_and_receiver(&cfg, dest, args.private_key.as_deref())?;
 
@@ -104,6 +103,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let (token_id, _salt, mint) = setup_its_token(
         &args.source_rpc,
         &main_keypair,
+        args.network,
         src,
         dest,
         sizing.num_keys,
@@ -209,6 +209,7 @@ fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> eyre::Result<(
 fn init_solana_client_and_main_keypair(
     solana_rpc: &str,
     keypair_path: Option<&str>,
+    network: crate::types::Network,
 ) -> eyre::Result<(RpcClient, Keypair)> {
     let main_keypair = solana::load_keypair(keypair_path)?;
     let rpc_client = RpcClient::new_with_commitment(
@@ -222,10 +223,10 @@ fn init_solana_client_and_main_keypair(
     if balance == 0 {
         return Err(eyre!(
             "wallet ({pubkey}) has no SOL. {}",
-            if cfg!(feature = "mainnet") {
-                format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
-            } else {
-                format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+            match network {
+                crate::types::Network::Mainnet =>
+                    format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying."),
+                _ => format!("Fund it first:\n  solana airdrop 2 {pubkey}"),
             }
         ));
     }
@@ -234,10 +235,10 @@ fn init_solana_client_and_main_keypair(
 
 /// Parse the user-supplied gas value (lamports), defaulting to
 /// `default_gas_value()`, and emit the matching UI line.
-fn parse_gas_value(gas_value: Option<&str>) -> eyre::Result<u64> {
+fn parse_gas_value(gas_value: Option<&str>, network: crate::types::Network) -> eyre::Result<u64> {
     let gas_value: u64 = match gas_value {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
-        None => default_gas_value(),
+        None => default_gas_value(network),
     };
     ui::kv("gas value", &format!("{gas_value} lamports"));
     Ok(gas_value)
@@ -400,6 +401,7 @@ async fn run_sustained_pipeline(
         solana_sdk::pubkey::Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let ata_program_s =
         solana_sdk::pubkey::Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+    let network = args.network;
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, _nonce: Option<u64>| {
@@ -427,6 +429,7 @@ async fn run_sustained_pipeline(
                 match solana::send_its_interchain_transfer(
                     &rpc,
                     &kp,
+                    network,
                     &tid,
                     &source_ata,
                     &m,
@@ -437,7 +440,7 @@ async fn run_sustained_pipeline(
                 ) {
                     Ok((_sig, mut metrics)) => {
                         metrics.signature =
-                            solana::extract_its_message_id(&rpc, &metrics.signature)
+                            solana::extract_its_message_id(&rpc, network, &metrics.signature)
                                 .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
                         metrics.source_address = source_addr;
                         metrics.send_instant = Some(submit_start);
@@ -556,6 +559,7 @@ async fn run_burst_pipeline(
         let amt = amount_per_tx;
         let kp = kp.clone();
         let gmp_dest_addr = evm.axelarnet_gw_addr.clone();
+        let network = args.network;
 
         let handle = tokio::spawn(async move {
             let submit_start = Instant::now();
@@ -576,6 +580,7 @@ async fn run_burst_pipeline(
             match solana::send_its_interchain_transfer(
                 &rpc,
                 &kp,
+                network,
                 &tid,
                 &source_ata,
                 &m,
@@ -587,8 +592,9 @@ async fn run_burst_pipeline(
                 Ok((_sig, mut metrics)) => {
                     // Format message_id: the ITS program CPI's gateway.call_contract
                     // at inner instruction index 1.4 (discovered empirically).
-                    metrics.signature = solana::extract_its_message_id(&rpc, &metrics.signature)
-                        .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
+                    metrics.signature =
+                        solana::extract_its_message_id(&rpc, network, &metrics.signature)
+                            .unwrap_or_else(|_| format!("{}-1.4", metrics.signature));
                     metrics.source_address = source_addr;
                     metrics.send_instant = Some(submit_start);
                     // ITS always routes through the hub
@@ -753,6 +759,7 @@ fn deployer_spl_balance(
 async fn setup_its_token(
     solana_rpc: &str,
     keypair: &Keypair,
+    network: crate::types::Network,
     src: &str,
     dest: &str,
     num_txs: usize,
@@ -771,8 +778,8 @@ async fn setup_its_token(
         }
         let mut token_id = [0u8; 32];
         token_id.copy_from_slice(&tid_bytes);
-        let (its_root, _) = solana::find_its_root_pda();
-        let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
+        let (its_root, _) = solana::find_its_root_pda(network);
+        let (mint, _) = solana::find_interchain_token_pda(network, &its_root, &token_id);
         ui::kv("token ID (provided)", tid_hex);
         return Ok((token_id, [0u8; 32], mint));
     }
@@ -782,8 +789,8 @@ async fn setup_its_token(
     // through to the cache / fresh-deploy path (matches the EVM/Stellar
     // resolvers). Salt is unknown for an adopted token, so return the zero salt.
     if let Some(tid) = super::helpers::read_pre_registered_axe_token(config, src)? {
-        let (its_root, _) = solana::find_its_root_pda();
-        let (mint, _) = solana::find_interchain_token_pda(&its_root, &tid.0);
+        let (its_root, _) = solana::find_its_root_pda(network);
+        let (mint, _) = solana::find_interchain_token_pda(network, &its_root, &tid.0);
         if rpc_client.get_account_data(&mint).is_ok() {
             let decimals = mint_decimals(rpc_client, &mint);
             let needed = WHOLE_TOKENS_PER_KEY
@@ -818,8 +825,8 @@ async fn setup_its_token(
             if salt_bytes.len() == 32 {
                 salt.copy_from_slice(&salt_bytes);
             }
-            let (its_root, _) = solana::find_its_root_pda();
-            let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
+            let (its_root, _) = solana::find_its_root_pda(network);
+            let (mint, _) = solana::find_interchain_token_pda(network, &its_root, &token_id);
 
             // Verify token still exists on-chain and deployer has enough supply
             if rpc_client.get_account_data(&mint).is_ok() {
@@ -857,6 +864,7 @@ async fn setup_its_token(
     let deploy_sig = solana::send_its_deploy_interchain_token(
         solana_rpc,
         keypair,
+        network,
         &salt,
         spec.name,
         spec.symbol,
@@ -866,9 +874,9 @@ async fn setup_its_token(
     )?;
     ui::tx_hash("deploy tx", &deploy_sig);
 
-    let token_id = solana::interchain_token_id(&keypair.pubkey(), &salt);
-    let (its_root, _) = solana::find_its_root_pda();
-    let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
+    let token_id = solana::interchain_token_id(network, &keypair.pubkey(), &salt);
+    let (its_root, _) = solana::find_its_root_pda(network);
+    let (mint, _) = solana::find_interchain_token_pda(network, &its_root, &token_id);
 
     ui::kv("token ID", &hex::encode(token_id));
     ui::address("mint", &mint.to_string());
@@ -888,6 +896,7 @@ async fn setup_its_token(
     let remote_sig = solana::send_its_deploy_remote_interchain_token(
         solana_rpc,
         keypair,
+        network,
         &salt,
         dest,
         deploy_gas_value,
@@ -900,8 +909,8 @@ async fn setup_its_token(
     // index varies by program version. We MUST extract it from the tx logs —
     // a wrong fallback ID would silently send the verifier into a 5-minute
     // pipeline timeout waiting for a message that does not exist.
-    let deploy_message_id =
-        solana::extract_its_message_id(solana_rpc, &remote_sig).map_err(|e| {
+    let deploy_message_id = solana::extract_its_message_id(solana_rpc, network, &remote_sig)
+        .map_err(|e| {
             eyre!(
                 "could not extract remote-deploy message ID from tx logs: {e}\n\
                  Tip: the public Solana devnet RPC is rate-limited and slow to index. \

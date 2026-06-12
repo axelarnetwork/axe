@@ -1,9 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use comfy_table::{Cell, ContentArrangement, Table};
 use eyre::Result;
 use serde_json::{Value, json};
 
+use crate::config_source;
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
 use crate::types::Network;
 use crate::ui;
@@ -175,20 +176,6 @@ pub fn lookup_name(network: Network, addr: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-fn resolve_config(network: crate::types::Network) -> Result<PathBuf> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let path = config_dir.join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre::eyre!(
-            "config not found for network '{}' at {}. \
-             Make sure axelar-contract-deployments is a sibling directory.",
-            network,
-            path.display()
-        ));
-    }
-    Ok(path)
-}
-
 fn resolve_chain_axelar_id(config_path: &Path, chain_input: &str) -> Result<String> {
     let content = std::fs::read_to_string(config_path)?;
     let root: Value = serde_json::from_str(&content)?;
@@ -260,10 +247,9 @@ fn truncate_address(addr: &str) -> String {
     }
 }
 
-pub async fn run(network: String, chain: String, json_mode: bool) -> Result<()> {
-    let network: crate::types::Network = network.parse()?;
+pub async fn run(network: Network, chain: String, json_mode: bool) -> Result<()> {
     let known_verifiers = verifiers_for_network(network)?;
-    let config_path = resolve_config(network)?;
+    let config_path = config_source::resolve(network, None).await?.into_path();
     let chain_axelar_id = resolve_chain_axelar_id(&config_path, &chain)?;
 
     let (lcd, _chain_id, _fee_denom, _gas_price) = read_axelar_config(&config_path)?;

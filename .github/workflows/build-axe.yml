@@ -1,10 +1,13 @@
-name: Build axe binaries
+name: Build axe binary
 
-# Pre-builds axe for every feature flag and uploads each binary as an artifact
-# tagged with the commit SHA. The load-test workflows look up the artifact for
-# the exact commit they're running against, so freshness is enforced
-# automatically: if the code changes, the SHA changes, the cache misses, and
-# the load-test falls back to building locally.
+# Pre-builds axe and uploads the binary as an artifact tagged with the commit
+# SHA. The load-test workflows look up the artifact for the exact commit they
+# are running against, so freshness is enforced automatically: if the code
+# changes, the SHA changes, the cache misses, and the load-test falls back to
+# building locally.
+#
+# Network selection is runtime (`--network`), so a single binary serves all
+# four networks.
 #
 # Triggers on every push to `main` (so main is always pre-built) and on manual
 # dispatch (run this once per feature branch before kicking off long load
@@ -17,10 +20,6 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        network: [mainnet, testnet, stagenet, devnet-amplifier]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,15 +30,15 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
-          key: build-axe-${{ matrix.network }}
+          key: build-axe
 
-      - name: Build axe (${{ matrix.network }})
-        run: cargo build --release --locked --no-default-features --features "${{ matrix.network }}"
+      - name: Build axe
+        run: cargo build --release --locked
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: axe-${{ matrix.network }}-${{ github.sha }}
+          name: axe-${{ github.sha }}
           path: target/release/axe
           retention-days: 30
           if-no-files-found: error

@@ -12,6 +12,8 @@ use std::str::FromStr;
 
 use super::decode_sol_tx;
 use crate::cli::SolProgram;
+use crate::config_source;
+use crate::types::Network;
 
 // ---------------------------------------------------------------------------
 // Config discovery
@@ -26,21 +28,9 @@ struct DiscoveredProgram {
 }
 
 fn discover_programs(
-    network_filter: Option<&str>,
+    configs: &[(Network, PathBuf)],
     program_filter: Option<SolProgram>,
 ) -> Vec<DiscoveredProgram> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let networks = if let Some(n) = network_filter {
-        vec![n.to_string()]
-    } else {
-        vec![
-            "devnet-amplifier".to_string(),
-            "stagenet".to_string(),
-            "testnet".to_string(),
-            "mainnet".to_string(),
-        ]
-    };
-
     let program_type_filter = program_filter.map(|p| match p {
         SolProgram::Gateway => "gateway",
         SolProgram::Its => "its",
@@ -50,9 +40,8 @@ fn discover_programs(
 
     let mut programs = Vec::new();
 
-    for network in &networks {
-        let config_path = config_dir.join(format!("{network}.json"));
-        let Ok(config_content) = std::fs::read_to_string(&config_path) else {
+    for (network, config_path) in configs {
+        let Ok(config_content) = std::fs::read_to_string(config_path) else {
             continue;
         };
         let config: serde_json::Value = match serde_json::from_str(&config_content) {
@@ -105,7 +94,7 @@ fn discover_programs(
 
                 if let Some(addr) = address {
                     programs.push(DiscoveredProgram {
-                        network: network.clone(),
+                        network: network.to_string(),
                         chain_name: chain_name.clone(),
                         rpc_url: rpc_url.clone(),
                         label: label.to_string(),
@@ -148,16 +137,30 @@ struct ActivityEntry {
 
 pub async fn run(
     program_filter: Option<SolProgram>,
-    network: Option<String>,
+    network: Option<Network>,
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    let programs = discover_programs(network.as_deref(), program_filter);
+    let networks: Vec<Network> = match network {
+        Some(n) => vec![n],
+        None => Network::ALL.to_vec(),
+    };
+    let mut configs: Vec<(Network, PathBuf)> = Vec::new();
+    for net in networks {
+        if let Ok(source) = config_source::resolve(net, None).await {
+            configs.push((net, source.into_path()));
+        }
+    }
+    if configs.is_empty() {
+        return Err(eyre::eyre!(
+            "no chains config found for any network. Set CHAINS_CONFIG or connect to the network."
+        ));
+    }
+
+    let programs = discover_programs(&configs, program_filter);
 
     if programs.is_empty() {
-        return Err(eyre::eyre!(
-            "no Solana programs found. Make sure axelar-contract-deployments is a sibling directory."
-        ));
+        return Err(eyre::eyre!("no Solana programs found in chains config(s)"));
     }
 
     let known = decode_sol_tx::known_programs();

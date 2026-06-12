@@ -72,7 +72,7 @@ pub fn read_contract_address(
 }
 
 /// Derive the axelar-contract-deployments repo root from target_json path.
-/// target_json is like `.../axelar-contract-deployments/axelar-chains-config/info/testnet.json`
+/// target_json is like `<root>/axelar-chains-config/info/testnet.json`
 pub fn deployments_root(target_json: &Path) -> Result<PathBuf> {
     target_json
         .parent()

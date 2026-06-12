@@ -19,16 +19,16 @@ use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
 use super::sustained;
 use crate::solana;
+use crate::types::Network;
 use crate::ui;
 
 /// Per-network funding hint for an empty Solana wallet. `solana airdrop`
 /// only works on devnet/testnet; on mainnet users have to source SOL
 /// elsewhere.
-fn fund_hint(pubkey: &solana_sdk::pubkey::Pubkey) -> String {
-    if cfg!(feature = "mainnet") {
-        format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying.")
-    } else {
-        format!("Fund it first:\n  solana airdrop 2 {pubkey}")
+fn fund_hint(network: Network, pubkey: &solana_sdk::pubkey::Pubkey) -> String {
+    match network {
+        Network::Mainnet => format!("Fund {pubkey} with mainnet SOL (no faucet) before retrying."),
+        _ => format!("Fund it first:\n  solana airdrop 2 {pubkey}"),
     }
 }
 
@@ -106,7 +106,7 @@ pub async fn run_load_test_with_metrics(
     if balance == 0 {
         return Err(eyre!(
             "wallet ({pubkey}) has no SOL. {}",
-            fund_hint(&pubkey)
+            fund_hint(args.network, &pubkey)
         ));
     }
 
@@ -120,7 +120,7 @@ pub async fn run_load_test_with_metrics(
         Option::None => Option::None,
     };
 
-    let memo_program_id = super::evm_sender::memo_program_id();
+    let memo_program_id = super::evm_sender::memo_program_id(args.network);
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let metrics_list: Arc<Mutex<Vec<TxMetrics>>> = Arc::new(Mutex::new(Vec::new()));
@@ -147,11 +147,13 @@ pub async fn run_load_test_with_metrics(
         let counter = Arc::clone(&confirmed_counter);
         let sp = spinner.clone();
         let total = key_count;
+        let network = args.network;
 
         let handle = tokio::spawn(async move {
             execute_and_record(
                 &rpc,
                 kp,
+                network,
                 &dest_chain,
                 &dest_addr,
                 &tx_payload,
@@ -235,6 +237,7 @@ pub async fn run_load_test_with_metrics(
 fn send_sol_tx(
     solana_rpc: &str,
     keypair: &(dyn Signer + Send + Sync),
+    network: Network,
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
@@ -242,7 +245,7 @@ fn send_sol_tx(
     let submit_start = Instant::now();
     let source_addr = keypair.pubkey().to_string();
     let payload_hash = alloy::hex::encode(alloy::primitives::keccak256(payload));
-    match solana::send_call_contract(solana_rpc, keypair, dest_chain, dest_addr, payload) {
+    match solana::send_call_contract(solana_rpc, keypair, network, dest_chain, dest_addr, payload) {
         Ok((_sig, mut metrics)) => {
             metrics.payload = payload.to_vec();
             metrics.payload_hash = payload_hash;
@@ -306,7 +309,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     if balance == 0 {
         return Err(eyre!(
             "wallet ({pubkey}) has no SOL. {}",
-            fund_hint(&pubkey)
+            fund_hint(args.network, &pubkey)
         ));
     }
 
@@ -319,10 +322,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     // fire costs `gas_per_tx` lamports in gas (on non-devnet).
     let derived = keypairs::derive_keypairs(&main_keypair, pool_size)?;
     let fires_per_key = (duration_secs / key_cycle as u64).max(1);
-    #[cfg(not(feature = "devnet-amplifier"))]
-    let gas_per_tx: u64 = solana::pay_gas_lamports(&args.destination_chain);
-    #[cfg(feature = "devnet-amplifier")]
-    let gas_per_tx: u64 = 0; // devnet-amplifier doesn't pay gas
+    let gas_per_tx: u64 = match args.network {
+        Network::DevnetAmplifier => 0, // devnet-amplifier doesn't pay gas
+        _ => solana::pay_gas_lamports(&args.destination_chain),
+    };
     let _balances = keypairs::ensure_funded_for_sustained(
         &args.source_rpc,
         &main_keypair,
@@ -341,7 +344,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         pool_size, tps, key_cycle
     ));
 
-    let memo_program_id = super::evm_sender::memo_program_id();
+    let memo_program_id = super::evm_sender::memo_program_id(args.network);
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained send..."));
@@ -353,6 +356,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let solana_rpc = args.source_rpc.clone();
     let evm_dest = evm_destination;
     let source_chain = args.source_axelar_id.clone();
+    let network = args.network;
 
     // Check if source chain has a voting verifier (for correct initial phase).
     let cfg = crate::config::ChainsConfig::load(&args.config)?;
@@ -377,7 +381,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
 
         Box::pin(async move {
             let mut result = tokio::task::spawn_blocking(move || {
-                send_sol_tx(&rpc, kp.as_ref(), &dc, &da, &tx_payload)
+                send_sol_tx(&rpc, kp.as_ref(), network, &dc, &da, &tx_payload)
             })
             .await
             .unwrap_or_else(|e| TxMetrics {
@@ -407,6 +411,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                     &sc,
                     has_vv,
                     super::verify::SourceChainType::Svm,
+                    network,
                 ) {
                     Ok(pending) => {
                         if tx_sender.send(pending).is_err() {
@@ -448,6 +453,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
 async fn execute_and_record(
     solana_rpc: &str,
     keypair: Arc<dyn Signer + Send + Sync>,
+    network: Network,
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
@@ -461,7 +467,14 @@ async fn execute_and_record(
     let source_addr = keypair.pubkey().to_string();
     let payload_hash = alloy::hex::encode(keccak256(payload));
 
-    match solana::send_call_contract(solana_rpc, keypair.as_ref(), dest_chain, dest_addr, payload) {
+    match solana::send_call_contract(
+        solana_rpc,
+        keypair.as_ref(),
+        network,
+        dest_chain,
+        dest_addr,
+        payload,
+    ) {
         Ok((_sig, mut metrics)) => {
             metrics.payload = payload.to_vec();
             metrics.payload_hash = payload_hash;

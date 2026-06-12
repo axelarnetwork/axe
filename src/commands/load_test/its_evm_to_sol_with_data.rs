@@ -41,7 +41,7 @@ async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
     if let Some(quoted) = quote_route_gas(args).await {
         return quoted;
     }
-    fallback_gas_value_wei(&args.source_chain)
+    fallback_gas_value_wei(args.network, &args.source_chain)
 }
 
 async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
@@ -52,6 +52,7 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
         .token_symbol
         .as_deref()?;
     super::gas_estimate::estimate_route_gas(
+        args.network,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         symbol,
@@ -60,13 +61,11 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-#[cfg(feature = "devnet-amplifier")]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    0
-}
-#[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    10_000_000_000_000_000
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ => 10_000_000_000_000_000,
+    }
 }
 
 const MAX_CONCURRENT_SENDS: usize = 100;
@@ -154,7 +153,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         .wallet(evm.signer.clone())
         .connect_http(evm_rpc_url.parse()?);
 
-    let memo_program_id = super::evm_sender::memo_program_id();
+    let memo_program_id = super::evm_sender::memo_program_id(args.network);
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
     ui::kv("memo program", &memo_program_id.to_string());
     ui::kv("counter PDA", &counter_pda.to_string());
@@ -468,6 +467,7 @@ async fn wait_for_remote_deploy_if_needed(
             &args.destination_chain,
             deploy_msg_id,
             &args.destination_rpc,
+            args.network,
         )
         .await?;
     }
@@ -487,8 +487,9 @@ fn setup_extra_accounts_ata(
     }
 
     // Derive the ITS token mint on Solana and compute an ATA for the memo program.
-    let (its_root, _) = crate::solana::find_its_root_pda();
-    let (sol_mint, _) = crate::solana::find_interchain_token_pda(&its_root, token_id.as_slice());
+    let (its_root, _) = crate::solana::find_its_root_pda(args.network);
+    let (sol_mint, _) =
+        crate::solana::find_interchain_token_pda(args.network, &its_root, token_id.as_slice());
     let token_program = Pubkey::from_str_const("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
     let ata_program = Pubkey::from_str_const("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
     let ata = Pubkey::find_program_address(
@@ -627,10 +628,11 @@ async fn run_sustained_pipeline(
     let vdest = args.destination_axelar_id.clone();
     let vdest_rpc = args.destination_rpc.clone();
     let vdone = std::sync::Arc::clone(&send_done);
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_solana_its_streaming(
-            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
+            &vconfig, &vsource, &vdest, &vdest_rpc, vnetwork, verify_rx, vdone, spinner,
         )
         .await
     });
@@ -908,6 +910,7 @@ async fn run_burst_pipeline(
         &args.destination_axelar_id,
         &format!("{its_proxy_addr}"),
         &args.destination_rpc,
+        args.network,
         &mut report.transactions,
     )
     .await?;

@@ -4,56 +4,31 @@
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 
+use crate::types::Network;
+
 // ---------------------------------------------------------------------------
-// Known program IDs (resolved at runtime from crates)
+// Known program IDs (all networks, resolved at runtime)
 // ---------------------------------------------------------------------------
 
 pub fn known_programs() -> HashMap<Pubkey, &'static str> {
     let mut m = HashMap::new();
 
-    // Compiled feature's IDs (always included)
-    m.insert(solana_axelar_gateway::id(), "AxelarGateway");
-    m.insert(solana_axelar_gas_service::id(), "AxelarGasService");
-    m.insert(solana_axelar_memo::id(), "AxelarMemo");
-    m.insert(solana_axelar_its::id(), "AxelarITS");
+    // Every network's current Axelar program IDs, derived from the canonical
+    // per-network table in `crate::solana::programs` — decode works on any
+    // network without rebuilding.
+    for network in Network::ALL {
+        m.insert(network.solana_gateway_id(), "AxelarGateway");
+        m.insert(network.solana_gas_service_id(), "AxelarGasService");
+        m.insert(network.solana_memo_id(), "AxelarMemo");
+        m.insert(network.solana_its_id(), "AxelarITS");
+    }
 
-    // All known program IDs across all networks so decode works regardless of build feature
     let all_ids: &[(&str, &str)] = &[
-        // devnet-amplifier
-        (
-            "gtwT4uGVTYSPnTGv6rSpMheyFyczUicxVWKqdtxNGw9",
-            "AxelarGateway",
-        ),
+        // Legacy devnet deploys (kept so old transactions still decode)
         (
             "gasHyxjNZSNsEiMbRLa5JGLCNx1TRsdCy1xwfMBehYB",
             "AxelarGasService",
         ),
-        ("memKnP9ex71TveNFpsFNVqAYGEe1v9uHVsHNdFPW6FY", "AxelarMemo"),
-        ("itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B", "AxelarITS"),
-        // stagenet
-        (
-            "gtwYHfHHipAoj8Hfp3cGr3vhZ8f3UtptGCQLqjBkaSZ",
-            "AxelarGateway",
-        ),
-        (
-            "gasgy6jz24wrfZL98uMy8QFUFziVPZ3bNLGXqnyTstW",
-            "AxelarGasService",
-        ),
-        ("mem4E22pPgkbHAvoUYHa7HybBgUKn6jFjvj1YnPdkaq", "AxelarMemo"),
-        ("itsm3zZhp2oGgEfq7XBu9ojRCYZJnhzecbAEPCrvx2B", "AxelarITS"),
-        // testnet
-        (
-            "gtwJ8LWDRWZpbvCqp8sDeTgy3GSyuoEsiaKC8wSXJqq",
-            "AxelarGateway",
-        ),
-        (
-            "gasq7KHHv9Rs8C82hu3dgoBD9wk5LTKpWqbdf5o5juu",
-            "AxelarGasService",
-        ),
-        ("mem7UJouaeyTgySvXhQSxWtGFrWPQ89jywjc8YvQFRT", "AxelarMemo"),
-        ("itsJo4kNJ3mdh3requwbtTTt7vyYTudp1pxhn2KiHMc", "AxelarITS"),
-        // older devnet deployments
-        ("itsYxmqAxNKUL5zaj3fD1K1whuVhqpxKVoiLGie1reF", "AxelarITS"),
         // Well-known system programs
         ("11111111111111111111111111111111", "SystemProgram"),
         (

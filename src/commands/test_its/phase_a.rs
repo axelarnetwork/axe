@@ -33,6 +33,7 @@ const INITIAL_SUPPLY: u64 = 1_000_000_000_000;
 pub(super) async fn run_phase_a_deploy<P: Provider>(
     src: &str,
     dst: &str,
+    network: crate::types::Network,
     src_axelar_id: &crate::types::ChainAxelarId,
     dst_axelar_id: &crate::types::ChainAxelarId,
     src_rpc: &str,
@@ -67,7 +68,7 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
     // Step A1: generate salt, derive token id
     let salt = generate_salt();
     let salt_bytes: [u8; 32] = salt.0;
-    let token_id = crate::solana::interchain_token_id(&sol_pubkey, &salt_bytes);
+    let token_id = crate::solana::interchain_token_id(network, &sol_pubkey, &salt_bytes);
     let token_id_b32 = FixedBytes::<32>::from(token_id);
 
     ui::step_header(1, PHASE_A_STEPS, "Generate salt + tokenId");
@@ -80,6 +81,7 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
     let local_sig = crate::solana::send_its_deploy_interchain_token(
         src_rpc,
         sol_keypair,
+        network,
         &salt_bytes,
         spec.name,
         spec.symbol,
@@ -101,13 +103,14 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
     let remote_sig = crate::solana::send_its_deploy_remote_interchain_token(
         src_rpc,
         sol_keypair,
+        network,
         &salt_bytes,
         dst_axelar_id.as_str(),
         gas_value,
     )?;
     ui::tx_hash("solana tx", &remote_sig);
 
-    let first_leg_id = crate::solana::extract_its_message_id(src_rpc, &remote_sig)?;
+    let first_leg_id = crate::solana::extract_its_message_id(src_rpc, network, &remote_sig)?;
     ui::kv("first-leg message_id", &first_leg_id);
 
     // Read the actual on-chain CallContractEvent. The verifiers will look up

@@ -20,9 +20,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo build --locked
-      - name: Clippy feature matrix
-        run: |
-          for feature in mainnet testnet stagenet devnet-amplifier; do
-            cargo clippy --locked --no-default-features --features "$feature" --all-targets -- -D warnings -A clippy::too_many_lines
-          done
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings -A clippy::too_many_lines
       - run: cargo test --locked --all-targets --quiet

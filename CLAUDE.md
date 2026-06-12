@@ -119,23 +119,18 @@ If you find yourself reaching for `<'a>` on a bundle struct, ask: is the alloc a
 
 - If a rule can be expressed as a lint or a hook, do that — don't rely on review or memory to catch it.
 - Before adding a guideline here, ask: "Can clippy/rustfmt/a git hook enforce this?" If yes, configure the tool. CLAUDE.md is for what the tooling can't catch.
-- Existing deterministic gates: `[lints.clippy]` in `Cargo.toml`, `.githooks/pre-commit` (fmt + clippy + tests on default features), `.githooks/pre-push` (clippy across all four feature flags). Extend these in preference to writing more prose.
+- Existing deterministic gates: `[lints.clippy]` in `Cargo.toml`, `clippy.toml` (`disallowed-methods` blocking the solana-axelar crates' compile-time IDs), `.githooks/pre-commit` and `.githooks/pre-push` (fmt + clippy + tests). Extend these in preference to writing more prose.
 
 ### Before reporting an edit as done
 
 After any Rust edit, run both of these and resolve every diagnostic before handing back:
 
 - `cargo fmt --all --check`
-- The pre-push hook's clippy matrix (one invocation per feature flag — cfg-gated code only surfaces under its own flag):
-  ```bash
-  for f in mainnet testnet stagenet devnet-amplifier; do
-      cargo clippy --no-default-features --features "$f" --all-targets -- -D warnings -A clippy::too_many_lines
-  done
-  ```
+- `cargo clippy --all-targets -- -D warnings -A clippy::too_many_lines`
 
 The `-A clippy::too_many_lines` flag is **mandatory** — it matches the project gate in `.githooks/pre-push`. The repo intentionally keeps `too_many_lines = "warn"` in `Cargo.toml` for visibility, but does not deny on it (see the inline rationale next to the lint). Running plain `cargo clippy ... -D warnings` will report ~60 pre-existing too-many-lines warnings on orchestrators that are large by design — those are not your bug to fix.
 
-A passing `cargo check` is not sufficient; the matrix above is the bar.
+A passing `cargo check` is not sufficient; the clippy invocation above is the bar.
 
 ---
 

@@ -2,6 +2,9 @@
 name = "axe"
 version = "0.1.0"
 edition = "2024"
+description = "Swiss army knife CLI for Axelar cross-chain development: deploy, test, decode, monitor"
+repository = "https://github.com/axelarnetwork/axe"
+license = "MIT"
 
 [dependencies]
 alloy = { version = "1.6.3", features = ["provider-http", "signer-local", "network", "rpc-types", "contract", "dyn-abi", "json-abi"] }
@@ -31,10 +34,19 @@ solana-sdk = "~3.0"
 solana-client = "~3.0"
 solana-transaction-status = "~3.0"
 solana-commitment-config = "~3.0"
-solana-axelar-gateway = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
-solana-axelar-gas-service = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
-solana-axelar-memo = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
-solana-axelar-its = { version = "1.0.0", features = ["no-entrypoint"], default-features = false }
+# The solana-axelar crates require exactly one network feature to compile
+# (`ensure_single_feature!`); devnet-amplifier is pinned arbitrarily. axe only
+# uses their network-independent items (instruction/event structs, encodings,
+# seed prefixes) — program IDs and CHAIN_NAME_HASH come from
+# `src/solana/programs.rs`, selected at runtime via `--network`. Do not call
+# their `id()` / `find_pda()` / `CHAIN_NAME_HASH` (clippy.toml denies the
+# methods; the const can't be linted). Pinned exactly because the programs.rs
+# tables must match the crate version: bump the pin and re-verify the tables
+# together (the guard tests in programs.rs check the devnet row).
+solana-axelar-gateway = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-gas-service = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-memo = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
+solana-axelar-its = { version = "=1.1.1", features = ["no-entrypoint", "devnet-amplifier"], default-features = false }
 solana-axelar-std = "1.0.0"
 anchor-lang = { version = "1.0.0-rc.5", features = ["event-cpi"] }
 borsh = "1"
@@ -67,13 +79,6 @@ sui-sdk-types = { version = "0.3", features = ["serde", "hash"] }
 bech32 = "0.11"
 bcs = "0.1"
 blake2 = "0.10"
-
-[features]
-default = ["devnet-amplifier"]
-devnet-amplifier = ["solana-axelar-gateway/devnet-amplifier", "solana-axelar-gas-service/devnet-amplifier", "solana-axelar-memo/devnet-amplifier", "solana-axelar-its/devnet-amplifier"]
-stagenet = ["solana-axelar-gateway/stagenet", "solana-axelar-gas-service/stagenet", "solana-axelar-memo/stagenet", "solana-axelar-its/stagenet"]
-testnet = ["solana-axelar-gateway/testnet", "solana-axelar-gas-service/testnet", "solana-axelar-memo/testnet", "solana-axelar-its/testnet"]
-mainnet = ["solana-axelar-gateway/mainnet", "solana-axelar-gas-service/mainnet", "solana-axelar-memo/mainnet", "solana-axelar-its/mainnet"]
 
 [lints.clippy]
 # Catch new functions whose cognitive complexity grows past clippy's default

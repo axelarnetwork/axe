@@ -5,12 +5,48 @@ use eyre::Result;
 
 use crate::commands::load_test::{Protocol, TestType};
 use crate::commands::propose::ProposeArgs;
+use crate::types::Network;
 
 #[derive(Parser)]
 #[command(name = "axe")]
 pub struct Cli {
+    /// Axelar network to target (defaults to the config filename's network,
+    /// else testnet)
+    #[arg(long, global = true, env = "AXE_NETWORK", value_enum)]
+    pub network: Option<Network>,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+/// Pick the network for this invocation: explicit `--network`/`AXE_NETWORK`
+/// wins, else the network named by the config filename, else testnet. A flag
+/// that contradicts the config filename is a hard error — that's the runtime
+/// replacement for the old compiled-network-vs-config guard.
+pub fn resolve_network(flag: Option<Network>, config: Option<&std::path::Path>) -> Result<Network> {
+    let from_config = config.and_then(crate::commands::load_test::detect_network_from_config);
+    match (flag, from_config) {
+        (Some(f), Some(c)) if f != c => eyre::bail!(
+            "--network {f} contradicts the config file ({c}); pass a matching --config or drop one"
+        ),
+        (Some(f), _) => Ok(f),
+        (None, Some(c)) => Ok(c),
+        (None, None) => Ok(Network::Testnet),
+    }
+}
+
+/// Resolve a command's own (optional) network arg against the global flag:
+/// the command's arg wins, then `--network`/`AXE_NETWORK`, then testnet.
+/// Contradicting values are a hard error.
+pub fn network_or_default(arg: Option<Network>, global: Option<Network>) -> Result<Network> {
+    match (arg, global) {
+        (Some(a), Some(g)) if a != g => {
+            eyre::bail!("network argument {a} contradicts --network {g}; drop one")
+        }
+        (Some(a), _) => Ok(a),
+        (None, Some(g)) => Ok(g),
+        (None, None) => Ok(Network::Testnet),
+    }
 }
 
 #[derive(Subcommand)]
@@ -36,7 +72,7 @@ pub enum Commands {
     /// Show active verifiers for a chain
     Verifiers {
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        network: Network,
         /// Chain axelar ID (e.g. solana, ethereum, avalanche-fuji)
         chain: String,
         /// Output as JSON
@@ -46,8 +82,8 @@ pub enum Commands {
 
     /// Show ITS owner/operator addresses across a network
     ItsOwnership {
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        /// Axelar network (defaults to --network / AXE_NETWORK, else testnet)
+        network: Option<Network>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -57,8 +93,8 @@ pub enum Commands {
     /// balance needed by the cron amplifier-routes load tests. Fails the
     /// process if any wallet is underfunded.
     CheckBalances {
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
-        network: String,
+        /// Axelar network (defaults to --network / AXE_NETWORK, else testnet)
+        network: Option<Network>,
     },
 
     /// Show network info (e.g. block height + timestamp)
@@ -70,7 +106,7 @@ pub enum Commands {
     /// Show recent votes cast by a single verifier on a given chain
     VerifierVotes {
         /// Axelar network (testnet, mainnet)
-        network: String,
+        network: Network,
         /// Chain axelar ID (e.g. solana, xrpl, hedera)
         chain: String,
         /// Verifier axelar1... address
@@ -197,12 +233,14 @@ pub enum TestCommands {
 
     /// Cross-chain load test (auto-detects chains, RPCs, and test type from config)
     LoadTest {
-        /// Path to chains config JSON (e.g. devnet-amplifier.json, testnet.json, mainnet.json)
+        /// Path to chains config JSON (e.g. devnet-amplifier.json,
+        /// testnet.json, mainnet.json). Omit to resolve it from `--network`
+        /// (sibling checkout, then cache, then GitHub fetch).
         #[arg(long, env = "CHAINS_CONFIG")]
-        config: PathBuf,
+        config: Option<PathBuf>,
 
-        /// Number of transactions to send
-        #[arg(long, default_value = "5")]
+        /// Number of transactions to send (default: a single end-to-end test)
+        #[arg(long, default_value = "1")]
         num_txs: u64,
 
         /// Load test type (auto-detected from source/destination chain types if omitted)
@@ -290,8 +328,8 @@ pub enum InfoCommands {
         number: Option<u64>,
 
         /// Axelar network (mainnet, testnet, stagenet, devnet-amplifier)
-        #[arg(long, default_value = "mainnet")]
-        network: String,
+        #[arg(long, default_value = "testnet")]
+        network: Network,
 
         /// Predict the block at this time (RFC3339, e.g.
         /// `2026-05-18T14:00:00Z`, or unix seconds). Mutually exclusive
@@ -332,7 +370,7 @@ pub enum DecodeCommands {
 
         /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
         #[arg(long)]
-        network: Option<String>,
+        network: Option<Network>,
 
         /// Number of recent transactions to show per program (default: 20)
         #[arg(long, default_value = "20")]
@@ -349,9 +387,9 @@ pub enum DecodeCommands {
         #[arg(long, value_enum)]
         contract: Option<EvmContract>,
 
-        /// Axelar network (devnet-amplifier, stagenet, testnet, mainnet)
+        /// Axelar network (defaults to AXE_NETWORK, else testnet)
         #[arg(long)]
-        network: String,
+        network: Option<Network>,
 
         /// EVM chain name (e.g. avalanche-fuji, eth-sepolia)
         #[arg(long)]
@@ -385,4 +423,88 @@ pub enum EvmContract {
 pub fn resolve_axelar_id(opt: Option<String>) -> Result<String> {
     opt.or_else(|| std::env::var("CHAIN").ok())
         .ok_or_else(|| eyre::eyre!("--axelar-id not provided and CHAIN env var not set"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every subcommand must parse alongside the global `--network` flag.
+    /// Guards against the clap id-collision panic ("Mismatch between
+    /// definition and access of `network`") that occurs when a subcommand
+    /// declares its own `network` arg with a type other than
+    /// `Option<Network>`'s inner type.
+    #[test]
+    fn all_subcommands_parse_with_global_network_flag() {
+        let cases: &[&[&str]] = &[
+            &["axe", "--network", "testnet", "deploy", "status"],
+            &["axe", "--network", "testnet", "test", "gmp"],
+            &["axe", "--network", "testnet", "decode", "calldata", "0x00"],
+            &["axe", "--network", "testnet", "decode", "tx", "0xabc"],
+            &["axe", "--network", "testnet", "decode", "sol-activity"],
+            &[
+                "axe",
+                "decode",
+                "evm-activity",
+                "--network",
+                "testnet",
+                "--chain",
+                "avalanche-fuji",
+            ],
+            &["axe", "verifiers", "testnet", "xrpl"],
+            &["axe", "its-ownership", "testnet"],
+            &["axe", "its-ownership"],
+            &["axe", "check-balances", "testnet"],
+            &["axe", "check-balances"],
+            &["axe", "--network", "mainnet", "check-balances"],
+            &["axe", "info", "block", "--network", "testnet"],
+            &["axe", "verifier-votes", "testnet", "xrpl", "axelar1abc"],
+            &["axe", "propose", "testnet", "hedera", "--op", "pause"],
+        ];
+        for args in cases {
+            if let Err(e) = Cli::try_parse_from(*args) {
+                panic!("failed to parse {args:?}: {e}");
+            }
+        }
+    }
+
+    /// The global `--network` is propagated by clap into subcommand-local
+    /// args that share its id — `main.rs` reading the local field therefore
+    /// reads the global value. This is invisible at the call sites, so pin
+    /// it here against regressions (and against reviewers reasoning it away).
+    #[test]
+    fn global_network_propagates_into_subcommand_args() {
+        let cli = Cli::try_parse_from(["axe", "--network", "mainnet", "info", "block"]).unwrap();
+        let Commands::Info {
+            subcommand: InfoCommands::Block { network, .. },
+        } = cli.command
+        else {
+            panic!("expected info block");
+        };
+        assert_eq!(
+            network,
+            Network::Mainnet,
+            "global flag must beat the local default"
+        );
+
+        let cli =
+            Cli::try_parse_from(["axe", "--network", "mainnet", "decode", "sol-activity"]).unwrap();
+        let Commands::Decode {
+            subcommand: DecodeCommands::SolActivity { network, .. },
+        } = cli.command
+        else {
+            panic!("expected decode sol-activity");
+        };
+        assert_eq!(network, Some(Network::Mainnet));
+
+        // Without the flag, the local default applies.
+        let cli = Cli::try_parse_from(["axe", "info", "block"]).unwrap();
+        let Commands::Info {
+            subcommand: InfoCommands::Block { network, .. },
+        } = cli.command
+        else {
+            panic!("expected info block");
+        };
+        assert_eq!(network, Network::Testnet);
+    }
 }

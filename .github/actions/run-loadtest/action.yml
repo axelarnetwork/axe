@@ -1,9 +1,9 @@
 name: Run axe load test
-description: Build axe for the selected network, clone the chains-config repo, and invoke `axe test load-test` with the supplied arguments.
+description: Download or build the axe binary, clone the chains-config repo, and invoke `axe test load-test` for the selected network.
 
 inputs:
   network:
-    description: Axelar network feature flag (mainnet/testnet/stagenet/devnet-amplifier).
+    description: Axelar network (mainnet/testnet/stagenet/devnet-amplifier).
     required: true
   source_chain:
     description: Source chain display name (resolved to the actual ID by the action)
@@ -206,12 +206,12 @@ runs:
     # Try to grab the pre-built binary for this exact commit. Tagged by
     # `${{ github.sha }}`, so a code change automatically invalidates: new
     # SHA, no artifact, fall through to the local build.
-    - name: Download pre-built axe (${{ inputs.network }} @ ${{ github.sha }})
+    - name: Download pre-built axe (${{ github.sha }})
       id: download_axe
       uses: dawidd6/action-download-artifact@v6
       with:
         workflow: build-axe.yml
-        name: axe-${{ inputs.network }}-${{ github.sha }}
+        name: axe-${{ github.sha }}
         commit: ${{ github.sha }}
         path: target/release
         if_no_artifact_found: warn
@@ -231,13 +231,11 @@ runs:
     - name: Cargo cache (fallback)
       if: steps.download_axe.outputs.found_artifact != 'true'
       uses: Swatinem/rust-cache@v2
-      with:
-        key: ${{ inputs.network }}
 
-    - name: Build axe (fallback, ${{ inputs.network }})
+    - name: Build axe (fallback)
       if: steps.download_axe.outputs.found_artifact != 'true'
       shell: bash
-      run: cargo build --release --locked --no-default-features --features "${{ inputs.network }}"
+      run: cargo build --release --locked
 
     - name: Clone axelar-contract-deployments
       shell: bash
@@ -323,6 +321,7 @@ runs:
         fi
 
         ARGS=(
+          --network "$NETWORK"
           test load-test
           --config "$CONFIG_PATH"
           --source-chain "$SOURCE_CHAIN"

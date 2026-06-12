@@ -66,8 +66,8 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let token_id = read_sui_axe_token_id(&args.config, dest, args.token_id.as_deref())?;
     ui::kv("Sui token id", &format!("0x{}", hex::encode(token_id)));
 
-    let (its_root, _) = solana::find_its_root_pda();
-    let (mint, _) = solana::find_interchain_token_pda(&its_root, &token_id);
+    let (its_root, _) = solana::find_its_root_pda(args.network);
+    let (mint, _) = solana::find_interchain_token_pda(args.network, &its_root, &token_id);
     ui::address("Solana mint (linked)", &mint.to_string());
 
     let rpc = rpc_client(&sol_rpc);
@@ -134,6 +134,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         run_sustained(
             &sol_rpc,
             main_kp_secret,
+            args.network,
             main_pubkey.to_string(),
             token_id,
             source_ata,
@@ -149,6 +150,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         run_burst(
             &sol_rpc,
             &main_keypair,
+            args.network,
             main_pubkey.to_string(),
             token_id,
             source_ata,
@@ -193,6 +195,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
 async fn run_burst(
     sol_rpc: &str,
     main_keypair: &Keypair,
+    network: crate::types::Network,
     main_pubkey_str: String,
     token_id: [u8; 32],
     source_ata: Pubkey,
@@ -208,6 +211,7 @@ async fn run_burst(
         let result = solana::send_its_interchain_transfer(
             sol_rpc,
             main_keypair,
+            network,
             &token_id,
             &source_ata,
             &mint,
@@ -228,9 +232,10 @@ async fn run_burst(
                 // Axelar actually stored. Fall back to the synthetic
                 // `{sig}-{call_contract_index}.1` if log parsing fails, so we
                 // don't lose verification altogether on RPC hiccups.
-                m.signature = solana::extract_its_message_id(sol_rpc, &sig).unwrap_or_else(|_| {
-                    format!("{}-{}.1", sig, solana::solana_call_contract_index())
-                });
+                m.signature = solana::extract_its_message_id(sol_rpc, network, &sig)
+                    .unwrap_or_else(|_| {
+                        format!("{}-{}.1", sig, solana::solana_call_contract_index(network))
+                    });
                 metrics.push(m);
             }
             Err(e) => {
@@ -257,6 +262,7 @@ async fn run_burst(
 async fn run_sustained(
     sol_rpc: &str,
     main_kp_secret: [u8; 32],
+    network: crate::types::Network,
     main_pubkey_str: String,
     token_id: [u8; 32],
     source_ata: Pubkey,
@@ -302,6 +308,7 @@ async fn run_sustained(
                     solana::send_its_interchain_transfer(
                         &rpc,
                         &kp,
+                        network,
                         &tid,
                         &ata,
                         &m,
@@ -318,10 +325,15 @@ async fn run_sustained(
                         // Same `{sig}-{outer}.{inner}` format the VotingVerifier
                         // indexes Solana ITS messages by — see burst path above
                         // for the full rationale.
-                        mm.signature = solana::extract_its_message_id(&rpc_for_extract, &sig)
-                            .unwrap_or_else(|_| {
-                                format!("{}-{}.1", sig, solana::solana_call_contract_index())
-                            });
+                        mm.signature =
+                            solana::extract_its_message_id(&rpc_for_extract, network, &sig)
+                                .unwrap_or_else(|_| {
+                                    format!(
+                                        "{}-{}.1",
+                                        sig,
+                                        solana::solana_call_contract_index(network)
+                                    )
+                                });
                         confirmed_ctr.fetch_add(1, Ordering::Relaxed);
                         mm
                     }

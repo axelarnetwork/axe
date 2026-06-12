@@ -1136,6 +1136,7 @@ pub(crate) async fn finalize_sui_dest_run(
         sui_rpc,
         &mut report.transactions,
         source_type,
+        args.network,
     )
     .await?;
     report.verification = Some(verification);

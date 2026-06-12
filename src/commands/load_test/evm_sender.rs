@@ -25,11 +25,12 @@ use super::LoadTestArgs;
 use super::keypairs;
 use super::metrics::{LoadTestReport, TxMetrics};
 use crate::evm::{ContractCall, SenderReceiver};
+use crate::types::Network;
 use crate::ui;
 
-/// Solana memo program address (resolved at compile time via feature flags).
-pub fn memo_program_id() -> Pubkey {
-    solana_axelar_memo::id()
+/// Solana memo program address for the target network.
+pub fn memo_program_id(network: Network) -> Pubkey {
+    network.solana_memo_id()
 }
 
 /// Default gas value sent with sendPayload for cross-chain gas.
@@ -43,7 +44,7 @@ async fn default_gas_value_wei(args: &LoadTestArgs) -> u128 {
     if let Some(quoted) = quote_route_gas(args).await {
         return quoted;
     }
-    fallback_gas_value_wei(&args.source_chain)
+    fallback_gas_value_wei(args.network, &args.source_chain)
 }
 
 async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
@@ -54,6 +55,7 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
         .token_symbol
         .as_deref()?;
     super::gas_estimate::estimate_route_gas(
+        args.network,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         symbol,
@@ -62,13 +64,12 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-#[cfg(feature = "devnet-amplifier")]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    0 // devnet-amplifier relayer doesn't require gas payment
-}
-#[cfg(not(feature = "devnet-amplifier"))]
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    20_000_000_000_000_000 // 0.02 ETH
+fn fallback_gas_value_wei(network: Network, _source_chain: &str) -> u128 {
+    match network {
+        // devnet-amplifier relayer doesn't require gas payment
+        Network::DevnetAmplifier => 0,
+        _ => 20_000_000_000_000_000, // 0.02 ETH
+    }
 }
 
 // Solana ExecutablePayload ABI types (matches axelar-amplifier-solana gateway)
@@ -135,7 +136,7 @@ pub async fn run_load_test_with_metrics(
     let num_txs = args.num_txs.max(1) as usize;
 
     // Derive the memo program's counter PDA
-    let memo_program_id = memo_program_id();
+    let memo_program_id = memo_program_id(args.network);
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let payload: Option<Vec<u8>> = match &args.payload {
@@ -437,7 +438,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     let pool_size = tps * key_cycle;
     let total_expected = tps as u64 * duration_secs;
 
-    let memo_program_id = memo_program_id();
+    let memo_program_id = memo_program_id(args.network);
     let (counter_pda, _) = Pubkey::find_program_address(&[b"counter"], &memo_program_id);
 
     let payload: Option<Vec<u8>> = match &args.payload {
@@ -508,6 +509,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         .contract_address("VotingVerifier", &args.source_chain)
         .is_ok();
     let source_chain = args.source_axelar_id.clone();
+    let network = args.network;
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -544,6 +546,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                         &sc,
                         has_vv,
                         super::verify::SourceChainType::Evm,
+                        network,
                     ) {
                         Ok(pending) => {
                             if tx_sender.send(pending).is_err() {

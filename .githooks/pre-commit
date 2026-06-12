@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Pre-commit hook: fmt + clippy + tests on the default feature flag.
+# Pre-commit hook: fmt + clippy + tests.
 #
-# This is the *fast* gate (~30s). The full matrix across all four feature
-# flags runs in the pre-push hook (~2-3 min).
+# Network selection is runtime (`--network`) — there is a single build, so
+# this one gate is complete; pre-push repeats it as a backstop.
 #
 # Enable for this clone:
 #   git config core.hooksPath .githooks

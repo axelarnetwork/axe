@@ -334,22 +334,8 @@ mod tests {
         assert!(cfg.extra.contains_key("someUnknownTopLevelKey"));
     }
 
-    /// Sanity check against a real on-disk config. Ignored by default
-    /// because it depends on the sibling `axelar-contract-deployments` repo
-    /// being checked out at the canonical relative path. Run manually after
-    /// schema bumps with `cargo test -- --ignored loads_real_testnet_json`.
-    #[test]
-    #[ignore = "depends on sibling axelar-contract-deployments checkout"]
-    fn loads_real_testnet_json() {
-        let path =
-            Path::new("../axelar-contract-deployments/axelar-chains-config/info/testnet.json");
-        let cfg = ChainsConfig::load(path).expect("testnet.json loads + parses");
-        assert!(cfg.chains.contains_key("hedera"), "hedera chain present");
-        assert!(cfg.chains.contains_key("solana"), "solana chain present");
-        assert!(cfg.axelar.lcd.is_some(), "axelar.lcd present");
-        assert!(
-            cfg.axelar.parse_gas_price().is_ok(),
-            "axelar.gasPrice parses",
-        );
-    }
+    // The real-schema sanity check lives in `config_source::tests::
+    // fetches_and_parses_real_testnet_json` (`cargo test -- --ignored`),
+    // which fetches testnet.json from GitHub instead of depending on a
+    // sibling checkout.
 }

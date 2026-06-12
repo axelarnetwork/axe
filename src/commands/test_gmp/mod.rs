@@ -152,6 +152,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 
 pub async fn run_config(
     config: PathBuf,
+    network: crate::types::Network,
     source_chain: Option<String>,
     destination_chain: Option<String>,
     destination_address: Option<String>,
@@ -277,9 +278,14 @@ pub async fn run_config(
     };
 
     let sent = match src_type {
-        ChainType::Svm => {
-            source::send_svm_call_contract(src_rpc, &dst, destination_address.as_deref(), 1, 8)?
-        }
+        ChainType::Svm => source::send_svm_call_contract(
+            src_rpc,
+            network,
+            &dst,
+            destination_address.as_deref(),
+            1,
+            8,
+        )?,
         ChainType::Evm => {
             return Err(eyre::eyre!(
                 "EVM source not yet supported in config mode. Use --axelar-id for EVM chains."
@@ -339,6 +345,7 @@ pub async fn run_config(
                 .ok_or_else(|| eyre::eyre!("no RPC for destination chain '{dst}'"))?;
             destination::approve_and_execute_svm(
                 dst_rpc,
+                network,
                 &src,
                 &dst,
                 &source_address,

@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use comfy_table::{Cell, ContentArrangement, Table};
 use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::verifiers::lookup_name;
+use crate::config_source;
 use crate::cosmos::{read_axelar_contract_field, rpc_block_time, rpc_tx_search};
 use crate::ui;
 
@@ -12,19 +13,6 @@ const SUPPORTED_NETWORKS: &[crate::types::Network] = &[
     crate::types::Network::Testnet,
     crate::types::Network::Mainnet,
 ];
-
-fn resolve_config(network: crate::types::Network) -> Result<PathBuf> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let path = config_dir.join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre::eyre!(
-            "config not found for network '{}' at {}. Make sure axelar-contract-deployments is a sibling directory.",
-            network,
-            path.display()
-        ));
-    }
-    Ok(path)
-}
 
 fn resolve_chain_axelar_id(config_path: &Path, chain_input: &str) -> Result<String> {
     let content = std::fs::read_to_string(config_path)?;
@@ -153,13 +141,12 @@ fn vote_summary(votes: &[String]) -> String {
 }
 
 pub async fn run(
-    network: String,
+    network: crate::types::Network,
     chain: String,
     verifier: String,
     limit: usize,
     json_mode: bool,
 ) -> Result<()> {
-    let network: crate::types::Network = network.parse()?;
     if !SUPPORTED_NETWORKS.contains(&network) {
         return Err(eyre::eyre!(
             "verifier-votes only supports: {}",
@@ -171,7 +158,7 @@ pub async fn run(
         ));
     }
 
-    let config_path = resolve_config(network)?;
+    let config_path = config_source::resolve(network, None).await?.into_path();
     let chain_axelar_id = resolve_chain_axelar_id(&config_path, &chain)?;
     let rpc = read_axelar_rpc_from(&config_path)?;
 

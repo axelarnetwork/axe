@@ -42,13 +42,11 @@ use crate::ui;
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
 
-#[cfg(feature = "devnet-amplifier")]
-const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 0;
-#[cfg(not(feature = "devnet-amplifier"))]
-const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 10_000_000_000_000_000; // 0.01 ETH
-
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    FALLBACK_GAS_VALUE_WEI_DEFAULT
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ => 10_000_000_000_000_000, // 0.01 ETH
+    }
 }
 
 pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
@@ -232,8 +230,11 @@ async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => {
-            its_evm_source::default_gas_value_wei(args, fallback_gas_value_wei(&args.source_chain))
-                .await
+            its_evm_source::default_gas_value_wei(
+                args,
+                fallback_gas_value_wei(args.network, &args.source_chain),
+            )
+            .await
         }
     };
     ui::kv(

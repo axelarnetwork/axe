@@ -1,9 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::{DateTime, Local, Utc};
 use eyre::Result;
 use serde_json::Value;
 
+use crate::config_source;
 use crate::cosmos::rpc_block_info;
 use crate::types::Network;
 use crate::ui;
@@ -13,20 +14,6 @@ use crate::ui;
 /// is ~90 minutes of history — long enough to smooth out one-off slow blocks
 /// without going so far back that consensus parameter changes skew the rate.
 const RATE_SAMPLE_WINDOW: u64 = 1000;
-
-fn resolve_config(network: Network) -> Result<PathBuf> {
-    let config_dir = PathBuf::from("../axelar-contract-deployments/axelar-chains-config/info");
-    let path = config_dir.join(format!("{network}.json"));
-    if !path.exists() {
-        return Err(eyre::eyre!(
-            "config not found for network '{}' at {}. \
-             Make sure axelar-contract-deployments is a sibling directory.",
-            network,
-            path.display()
-        ));
-    }
-    Ok(path)
-}
 
 fn read_axelar_rpc_from(config_path: &Path) -> Result<String> {
     let content = std::fs::read_to_string(config_path)?;
@@ -69,9 +56,8 @@ fn print_times(time: DateTime<Utc>) {
     );
 }
 
-pub async fn run(network: String, number: Option<u64>, at_time: Option<String>) -> Result<()> {
-    let network: Network = network.parse()?;
-    let config_path = resolve_config(network)?;
+pub async fn run(network: Network, number: Option<u64>, at_time: Option<String>) -> Result<()> {
+    let config_path = config_source::resolve(network, None).await?.into_path();
     let rpc = read_axelar_rpc_from(&config_path)?;
 
     ui::section(&format!("Info: block ({network})"));

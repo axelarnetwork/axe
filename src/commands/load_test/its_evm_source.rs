@@ -85,6 +85,7 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
         .token_symbol
         .as_deref()?;
     super::gas_estimate::estimate_route_gas(
+        args.network,
         &args.source_axelar_id,
         &args.destination_axelar_id,
         symbol,

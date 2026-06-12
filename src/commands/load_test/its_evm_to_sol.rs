@@ -23,13 +23,11 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenService};
 use crate::ui;
 
-#[cfg(feature = "devnet-amplifier")]
-const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 0;
-#[cfg(not(feature = "devnet-amplifier"))]
-const FALLBACK_GAS_VALUE_WEI_DEFAULT: u128 = 10_000_000_000_000_000; // 0.01 ETH
-
-fn fallback_gas_value_wei(_source_chain: &str) -> u128 {
-    FALLBACK_GAS_VALUE_WEI_DEFAULT
+fn fallback_gas_value_wei(network: crate::types::Network, _source_chain: &str) -> u128 {
+    match network {
+        crate::types::Network::DevnetAmplifier => 0,
+        _ => 10_000_000_000_000_000, // 0.01 ETH
+    }
 }
 const MAX_CONCURRENT_SENDS: usize = 100;
 const MAX_RETRIES: u32 = 5;
@@ -79,6 +77,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
             dest,
             deploy_msg_id,
             &args.destination_rpc,
+            args.network,
         )
         .await?;
     }
@@ -166,8 +165,11 @@ async fn parse_gas_value_wei(args: &LoadTestArgs) -> eyre::Result<u128> {
     let gas_value_wei: u128 = match args.gas_value.as_deref() {
         Some(v) => v.parse().map_err(|e| eyre!("invalid --gas-value: {e}"))?,
         None => {
-            its_evm_source::default_gas_value_wei(args, fallback_gas_value_wei(&args.source_chain))
-                .await
+            its_evm_source::default_gas_value_wei(
+                args,
+                fallback_gas_value_wei(args.network, &args.source_chain),
+            )
+            .await
         }
     };
 
@@ -422,10 +424,11 @@ async fn run_sustained_pipeline(
     let vdest = args.destination_axelar_id.clone();
     let vdest_rpc = args.destination_rpc.clone();
     let vdone = std::sync::Arc::clone(&send_done);
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_solana_its_streaming(
-            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
+            &vconfig, &vsource, &vdest, &vdest_rpc, vnetwork, verify_rx, vdone, spinner,
         )
         .await
     });
@@ -679,6 +682,7 @@ async fn run_burst_pipeline(
         &args.destination_axelar_id,
         &format!("{}", targets.its_proxy_addr),
         &args.destination_rpc,
+        args.network,
         &mut report.transactions,
     )
     .await?;

@@ -75,7 +75,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         stellar.use_friendbot,
     )
     .await?;
-    let solana = resolve_solana_target(args.keypair.as_deref())?;
+    let solana = resolve_solana_target(args.keypair.as_deref(), args.network)?;
     let gas_stroops = parse_gas_stroops(args.gas_value.as_deref())?;
     let sizing = compute_run_sizing(&args);
 
@@ -225,12 +225,15 @@ async fn init_stellar_main_wallet(
 /// Resolve the Solana destination: load the keypair (only used for its
 /// pubkey — the relayer drives destination-side execution), build the 32-byte
 /// address, and emit the matching UI lines.
-fn resolve_solana_target(keypair: Option<&str>) -> Result<SolanaTarget> {
+fn resolve_solana_target(
+    keypair: Option<&str>,
+    network: crate::types::Network,
+) -> Result<SolanaTarget> {
     let sol_keypair = crate::solana::load_keypair(keypair)?;
     let recipient = sol_keypair.pubkey();
     let address_bytes = recipient.to_bytes().to_vec();
     ui::kv("Solana recipient", &recipient.to_string());
-    ui::address("Solana ITS program", &solana_axelar_its::id().to_string());
+    ui::address("Solana ITS program", &network.solana_its_id().to_string());
     Ok(SolanaTarget {
         recipient,
         address_bytes,
@@ -343,6 +346,7 @@ async fn prepare_token_and_wallets(
     let (token_id, _salt, token_address, decimals) = setup_its_token(
         &stellar.client,
         main_wallet,
+        args.network,
         &stellar.its_addr,
         &stellar.gateway_addr,
         &stellar.xlm_addr,
@@ -411,10 +415,11 @@ async fn run_sustained_pipeline(
     let vdest = args.destination_axelar_id.clone();
     let vdest_rpc = args.destination_rpc.clone();
     let vdone = Arc::clone(&send_done);
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_solana_its_streaming(
-            &vconfig, &vsource, &vdest, &vdest_rpc, verify_rx, vdone, spinner,
+            &vconfig, &vsource, &vdest, &vdest_rpc, vnetwork, verify_rx, vdone, spinner,
         )
         .await
     });
@@ -599,6 +604,7 @@ async fn run_burst_pipeline(
         &args.destination_axelar_id,
         &solana.recipient.to_string(),
         &args.destination_rpc,
+        args.network,
         &mut report.transactions,
     )
     .await?;
@@ -615,6 +621,7 @@ async fn run_burst_pipeline(
 async fn setup_its_token(
     client: &StellarClient,
     main_wallet: &StellarWallet,
+    network: crate::types::Network,
     its_contract: &str,
     gateway_contract: &str,
     xlm_token: &str,
@@ -786,6 +793,7 @@ async fn setup_its_token(
         dest_axelar_id,
         &deploy_message_id,
         solana_rpc_url,
+        network,
     )
     .await?;
 

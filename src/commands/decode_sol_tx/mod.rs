@@ -34,11 +34,11 @@ pub const SOLANA_RPCS: &[(&str, &str)] = &[
     ("mainnet", "https://api.mainnet-beta.solana.com"),
 ];
 
-pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
+pub async fn run(txid: &str, rpcs: &[(String, String)]) -> Result<()> {
     let sig =
         Signature::from_str(txid).map_err(|e| eyre::eyre!("invalid Solana signature: {e}"))?;
 
-    let (network, tx_data) = try_fetch_transaction_from_any_network(&sig)?;
+    let (network, tx_data) = try_fetch_transaction(&sig, rpcs)?;
 
     let slot = tx_data.slot;
     let block_time = tx_data.block_time.unwrap_or(0);
@@ -68,12 +68,18 @@ pub async fn run(txid: &str, _solana_rpc: &str) -> Result<()> {
     Ok(())
 }
 
-/// Try each known Solana network in order until one returns the transaction.
-/// Errors only when none have it.
-fn try_fetch_transaction_from_any_network(
+/// Try each candidate RPC in order (deduped) until one returns the
+/// transaction. The caller composes the pool — config-derived RPCs first,
+/// public cluster fallbacks unless `--chain` pinned a specific one.
+fn try_fetch_transaction(
     sig: &Signature,
+    rpcs: &[(String, String)],
 ) -> Result<(String, EncodedConfirmedTransactionWithStatusMeta)> {
-    for (network, rpc_url) in SOLANA_RPCS {
+    let mut seen = std::collections::HashSet::new();
+    for (network, rpc_url) in rpcs {
+        if !seen.insert(rpc_url.clone()) {
+            continue;
+        }
         let rpc = crate::solana::rpc_client(rpc_url);
         if let Ok(data) = rpc.get_transaction_with_config(
             sig,
@@ -87,7 +93,8 @@ fn try_fetch_transaction_from_any_network(
         }
     }
     Err(eyre::eyre!(
-        "transaction not found on any Solana network (tried devnet, testnet, mainnet)"
+        "transaction not found on any Solana RPC (tried {})",
+        rpcs.len()
     ))
 }
 

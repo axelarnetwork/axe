@@ -37,6 +37,8 @@ use alloy::sol_types::SolStruct;
 use eyre::{Result, eyre};
 use serde_json::json;
 
+use crate::types::Network;
+
 const MAINNET_API: &str = "https://api.hyperliquid.xyz/exchange";
 const TESTNET_API: &str = "https://api.hyperliquid-testnet.xyz/exchange";
 
@@ -66,14 +68,13 @@ impl HyperliquidEnv {
     }
 }
 
-/// Pick the right Hyperliquid environment for the network axe was compiled
-/// against. Stagenet and devnet-amplifier share testnet (no separate
-/// Hyperliquid endpoint exists for those).
-pub fn env_for_compiled_network() -> HyperliquidEnv {
-    if cfg!(feature = "mainnet") {
-        HyperliquidEnv::Mainnet
-    } else {
-        HyperliquidEnv::Testnet
+/// Pick the right Hyperliquid environment for the target Axelar network.
+/// Stagenet and devnet-amplifier share testnet (no separate Hyperliquid
+/// endpoint exists for those).
+pub fn env_for(network: Network) -> HyperliquidEnv {
+    match network {
+        Network::Mainnet => HyperliquidEnv::Mainnet,
+        _ => HyperliquidEnv::Testnet,
     }
 }
 

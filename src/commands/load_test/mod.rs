@@ -50,10 +50,10 @@ pub(super) use helpers::{
     read_stellar_token_address, read_sui_axe_token_id, resolve_sui_axe_token, sui_dest_lookup,
     sui_its_dest_lookup, validate_evm_rpc, validate_solana_rpc,
 };
-pub(super) use resolve::{
-    compiled_network, detect_network_from_config, read_cache, read_its_cache, save_cache,
-    save_its_cache,
-};
+pub(super) use resolve::{read_cache, read_its_cache, save_cache, save_its_cache};
+// `pub(crate)` (not `pub(super)`): cli::resolve_network also detects the
+// network from `--config` filenames.
+pub(crate) use resolve::detect_network_from_config;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -157,6 +157,9 @@ impl std::fmt::Display for Protocol {
 /// CLI arguments for the load test command.
 pub struct LoadTestArgs {
     pub config: PathBuf,
+    /// The Axelar network this run targets (resolved in `main.rs` from
+    /// `--network` / the config filename).
+    pub network: crate::types::Network,
     pub test_type: TestType,
     pub protocol: Protocol,
     pub destination_chain: String,
@@ -187,17 +190,6 @@ pub struct LoadTestArgs {
 
 #[allow(clippy::cognitive_complexity)] // wide match over (protocol, test-type) pairs; flat by design
 pub async fn run(args: LoadTestArgs) -> Result<()> {
-    // Check for network mismatch between compiled binary and config
-    if let Some(target_network) = detect_network_from_config(&args.config) {
-        let compiled = compiled_network();
-        if compiled != target_network {
-            eyre::bail!(
-                "binary was compiled for '{compiled}' but config targets '{target_network}'. \
-                 Rebuild with:\n  cargo build --release --features {target_network} --no-default-features"
-            );
-        }
-    }
-
     let run_start = Instant::now();
 
     ui::section(&format!(
@@ -218,7 +210,7 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
             .clone()
             .or_else(|| std::env::var("EVM_PRIVATE_KEY").ok());
         if let Some(key) = key {
-            let env = crate::hyperliquid::env_for_compiled_network();
+            let env = crate::hyperliquid::env_for(args.network);
             match crate::hyperliquid::enable_big_blocks_from_key(&key, env).await {
                 Ok(addr) => {
                     ui::info(&format!("Hyperliquid big-blocks enabled for {addr}"));
