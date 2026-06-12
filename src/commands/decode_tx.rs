@@ -37,9 +37,11 @@ async fn resolve_all_configs() -> Result<Vec<PathBuf>> {
 pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) -> Result<()> {
     // Detect Solana vs EVM: Solana signatures are base58, ~88 chars, no 0x prefix
     if !txid.starts_with("0x") && txid.len() > 60 {
-        // Likely a Solana signature; decode_sol_tx tries every Solana
-        // cluster itself, so no config is needed.
-        return super::decode_sol_tx::run(txid).await;
+        // Likely a Solana signature. Config SVM RPCs (private/QuickNode) are
+        // tried first; the public cluster RPCs remain as fallbacks, so this
+        // works with no config at all.
+        let config_rpcs = solana_rpcs_from_configs(config).await;
+        return super::decode_sol_tx::run(txid, &config_rpcs).await;
     }
 
     let tx_hash: TxHash = txid.parse().map_err(|_| eyre::eyre!("invalid tx hash"))?;
@@ -306,4 +308,36 @@ async fn fetch_tx(
         "transaction not found on any chain (tried {} RPCs)",
         rpcs.len()
     )
+}
+
+/// SVM RPC candidates from the explicit config, or from every resolvable
+/// network's config when none is given. Failures resolve to "no candidates" —
+/// the caller still has the public cluster fallbacks.
+async fn solana_rpcs_from_configs(config: Option<&Path>) -> Vec<(String, String)> {
+    let configs: Vec<(String, PathBuf)> = match config {
+        Some(c) => vec![("config".to_string(), c.to_path_buf())],
+        None => {
+            let mut v = Vec::new();
+            for network in crate::types::Network::ALL {
+                if let Ok(src) = crate::config_source::resolve(network, None).await {
+                    v.push((network.to_string(), src.into_path()));
+                }
+            }
+            v
+        }
+    };
+    let mut rpcs = Vec::new();
+    for (label, path) in configs {
+        let Ok(cfg) = crate::config::ChainsConfig::load(&path) else {
+            continue;
+        };
+        for chain in cfg.chains.values() {
+            if chain.chain_type.as_deref() == Some("svm")
+                && let Some(rpc) = chain.rpc.clone()
+            {
+                rpcs.push((label.clone(), rpc));
+            }
+        }
+    }
+    rpcs
 }
