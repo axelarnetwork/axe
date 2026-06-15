@@ -150,22 +150,20 @@ EOF
 #     within each group so same-wallet nonce races don't happen.
 case "$NETWORK/$PROTOCOL" in
     testnet/its)
-        # Two bidirectional pairs. Sui is omitted (axe Sui-source ITS needs a
-        # pre-registered AXE token, Sui-as-ITS-destination is unwired in the
-        # dispatcher — see mod.rs:323-326).
-        #
-        # Hedera ↔ Solana ITS is deliberately NOT in the fleet: AXE was
-        # registered with `--initialSupply 0` on the Hedera HTS fork (the
-        # only initialSupply the deploy accepts), so the source wallet has
-        # zero AXE to interchain-transfer. Re-add only after a mint path
-        # for HTS-fork InterchainTokens is wired into axe + a supply has
-        # been minted to the workflow wallet.
+        # Mirrors MATRIX_TESTNET_ITS in the workflow. XRPL↔XRPL EVM uses the
+        # canonical XRP token; Monad-3↔Hedera uses the testnet AXE family
+        # 0xbcbec67e (home monad-3); Hyperliquid↔Solana uses the testnet AXE
+        # family 0x63e3c40e (home solana). All verified end-to-end. Stellar
+        # removed during the testnet Stellar executor outage; Sui omitted (no
+        # testnet gas to source from it).
         FLEET=$(cat <<'EOF'
 [
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
-  {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},
-  {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid"}
+  {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera"},
+  {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"},
+  {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana"},
+  {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"}
 ]
 EOF
 )
