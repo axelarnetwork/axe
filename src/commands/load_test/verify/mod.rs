@@ -20,10 +20,10 @@ use crate::ui;
 /// Resets every time a tx makes progress, so large batches naturally get more time.
 // Mainnet Amplifier voters can sit behind a queue of other messages for 5+ min
 // before they confirm a new vote, especially on cold routes (first message of
-// the day for a given source). 600s of stalled-progress patience covers what
+// the day for a given source). 1000s of stalled-progress patience covers what
 // we've observed on Sui-mainnet ITS without making slow-failures egregiously
 // long to surface.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(600);
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(1000);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
