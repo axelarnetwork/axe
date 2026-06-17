@@ -82,6 +82,10 @@ sol! {
             address contractAddress,
             bytes32 payloadHash
         ) external view returns (bool);
+        /// Legacy consensus gateway: true once the approval command has been
+        /// executed (i.e. the destination contract consumed it). Returns false
+        /// before approval and after the approval is otherwise spent.
+        function isCommandExecuted(bytes32 commandId) external view returns (bool);
     }
 
     #[sol(rpc)]
@@ -137,6 +141,22 @@ sol! {
         bytes32 indexed payloadHash,
         bytes payload
     );
+
+    // Legacy consensus AxelarGateway destination events (IAxelarConsensusGateway).
+    // `contractAddress` and `payloadHash` are indexed, so the destination
+    // approval can be located with a cheap topic-filtered eth_getLogs; the
+    // non-indexed `sourceTxHash` then pins the match to our exact source tx and
+    // carries the on-chain `commandId` (topic1).
+    event ContractCallApproved(
+        bytes32 indexed commandId,
+        string sourceChain,
+        string sourceAddress,
+        address indexed contractAddress,
+        bytes32 indexed payloadHash,
+        bytes32 sourceTxHash,
+        uint256 sourceEventIndex
+    );
+    event ContractCallExecuted(bytes32 indexed commandId);
 
     #[sol(rpc)]
     contract InterchainTokenFactory {

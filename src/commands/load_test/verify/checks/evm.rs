@@ -25,3 +25,13 @@ pub(in super::super) async fn check_evm_is_message_approved<P: Provider>(
         .await?;
     Ok(approved)
 }
+
+/// Check `isCommandExecuted` on a legacy consensus gateway (single attempt).
+/// True once the destination contract has consumed the approval command.
+pub(in super::super) async fn check_evm_command_executed<P: Provider>(
+    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
+    command_id: FixedBytes<32>,
+) -> Result<bool> {
+    let executed = gw_contract.isCommandExecuted(command_id).call().await?;
+    Ok(executed)
+}

@@ -21,7 +21,7 @@ use owo_colors::OwoColorize;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::metrics::LoadTestReport;
+use super::metrics::{AmplifierTiming, LoadTestReport};
 use super::verify;
 use super::{LoadTestArgs, read_cache, save_cache};
 use crate::config::ChainsConfig;
@@ -397,6 +397,37 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     Ok(addr)
 }
 
+/// Print the per-stage Amplifier pipeline progress line. Phases that don't
+/// apply to the route stay 0 and are omitted — a legacy (consensus) source has
+/// no `voted`, a legacy destination has no `routed` — so a legacy run reads
+/// cleanly as approved/executed. The "stuck at X" line elsewhere still reports
+/// where a stalled message sits.
+fn print_pipeline_counts(report: &LoadTestReport) {
+    let total = report.total_confirmed;
+    let count = |sel: fn(&AmplifierTiming) -> bool| -> u64 {
+        report
+            .transactions
+            .iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(sel))
+            .count() as u64
+    };
+    let voted = count(|a| a.voted_secs.is_some());
+    let routed = count(|a| a.routed_secs.is_some());
+    let approved = count(|a| a.approved_secs.is_some());
+    let executed = count(|a| a.executed_secs.is_some());
+
+    let mut parts = Vec::new();
+    if voted > 0 {
+        parts.push(format!("voted {voted}/{total}"));
+    }
+    if routed > 0 {
+        parts.push(format!("routed {routed}/{total}"));
+    }
+    parts.push(format!("approved {approved}/{total}"));
+    parts.push(format!("executed {executed}/{total}"));
+    println!("  pipeline         {}", parts.join("  "));
+}
+
 pub(crate) fn print_final_report(report: &LoadTestReport) {
     println!();
     println!(
@@ -428,54 +459,7 @@ pub(crate) fn print_final_report(report: &LoadTestReport) {
 
         // Per-stage pipeline counts (computed from transaction records).
         // Shown even when verification times out so partial progress is visible.
-        let total = report.total_confirmed;
-        let voted = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.voted_secs.is_some())
-            })
-            .count() as u64;
-        let routed = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.routed_secs.is_some())
-            })
-            .count() as u64;
-        let approved = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.approved_secs.is_some())
-            })
-            .count() as u64;
-        let executed = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.executed_secs.is_some())
-            })
-            .count() as u64;
-        {
-            let mut parts = Vec::new();
-            // Skip voted for consensus chains (no VotingVerifier → always 0).
-            if voted > 0 {
-                parts.push(format!("voted {voted}/{total}"));
-            }
-            parts.push(format!("routed {routed}/{total}"));
-            parts.push(format!("approved {approved}/{total}"));
-            parts.push(format!("executed {executed}/{total}"));
-            println!("  pipeline         {}", parts.join("  "));
-        }
+        print_pipeline_counts(report);
 
         // End-to-end line
         match (

@@ -434,6 +434,13 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 
     let cfg = ChainsConfig::load(&args.config)?;
 
+    // Classify each end as legacy (consensus) or Amplifier. A legacy-touching
+    // route is verified entirely on the destination gateway, so it does not
+    // need the Amplifier Cosmos contracts the standard path requires.
+    let (src_legacy, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    let legacy_route = src_legacy || dst_legacy;
+
     let source_rpc_url = args.source_rpc.clone();
     let dest_rpc_url = args.destination_rpc.clone();
 
@@ -441,12 +448,21 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     validate_evm_rpc(&source_rpc_url).await?;
     validate_evm_rpc(&dest_rpc_url).await?;
 
-    // Check that verification contracts exist
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // Amplifier destinations need a Cosmos Gateway for verification; legacy
+    // (consensus) destinations are verified directly on their on-chain gateway.
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
             list_gateway_chains(&cfg).join(", ")
+        );
+    }
+
+    // Streaming/sustained verification for legacy routes is not wired yet.
+    if legacy_route && args.tps.is_some() && args.duration_secs.is_some() {
+        eyre::bail!(
+            "sustained/streaming verification is not yet supported for legacy (consensus) \
+             routes; run in burst mode (omit --tps/--duration-secs)"
         );
     }
 
@@ -631,18 +647,40 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         )
         .await?;
 
-        let verification = verify::verify_onchain(
-            &args.config,
-            &args.source_axelar_id,
-            &args.destination_axelar_id,
-            &destination_address,
-            dest_gateway_addr,
-            &dest_read_provider,
-            &mut report.transactions,
-            verify::SourceChainType::Evm,
-            args.network,
-        )
-        .await?;
+        let verification = if legacy_route {
+            // Destination EVM chainId feeds the offline commandId cross-check.
+            let dest_chain_id = cfg
+                .chains
+                .get(dest)
+                .and_then(|c| c.extra.get("chainId"))
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| eyre::eyre!("no numeric chainId for destination '{dest}'"))?;
+            verify::verify_onchain_evm_legacy(
+                &args.config,
+                &args.source_axelar_id,
+                &args.destination_axelar_id,
+                &destination_address,
+                dest_gateway_addr,
+                dest_chain_id,
+                &dest_read_provider,
+                &mut report.transactions,
+                args.network,
+            )
+            .await?
+        } else {
+            verify::verify_onchain(
+                &args.config,
+                &args.source_axelar_id,
+                &args.destination_axelar_id,
+                &destination_address,
+                dest_gateway_addr,
+                &dest_read_provider,
+                &mut report.transactions,
+                verify::SourceChainType::Evm,
+                args.network,
+            )
+            .await?
+        };
         report.verification = Some(verification);
         report
     };

@@ -228,23 +228,36 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         }
     }
 
-    // Block consensus chains that have no VotingVerifier — we can't verify them.
-    // XRPL uses `XrplVotingVerifier` (not `VotingVerifier`), so we also accept
-    // that as evidence of a verifiable source.
+    // A consensus (legacy) source has no VotingVerifier. XRPL uses
+    // `XrplVotingVerifier` (not `VotingVerifier`), so we also accept that as
+    // evidence of a verifiable Amplifier source. Stellar shares the
+    // `VotingVerifier` contract name, so the standard check covers it too.
     let src = &args.source_chain;
     let cfg = ChainsConfig::load(&args.config)?;
-    let has_standard_vv = cfg.axelar.contract_address("VotingVerifier", src).is_ok();
+    let has_standard_vv = cfg
+        .axelar
+        .contract_address("VotingVerifier", &args.source_axelar_id)
+        .is_ok();
     let has_xrpl_vv = cfg
         .axelar
-        .contract_address("XrplVotingVerifier", src)
+        .contract_address("XrplVotingVerifier", &args.source_axelar_id)
         .is_ok();
-    // Stellar shares the `VotingVerifier` contract name in the config, so the
-    // standard check above already covers it; this branch is just documentation.
+    // Legacy (consensus) source chains are supported for GMP evm-to-evm only;
+    // the destination-side verification handles both legacy and Amplifier
+    // destinations on-chain. Other protocols/route shapes from a legacy source
+    // are not yet wired.
     if !has_standard_vv && !has_xrpl_vv {
-        eyre::bail!(
-            "source chain '{src}' has no VotingVerifier (or XrplVotingVerifier) in the config. \
-             Load test verification requires an Amplifier chain with a voting verifier."
-        );
+        let legacy_gmp_evm_to_evm =
+            args.protocol == Protocol::Gmp && args.test_type == TestType::EvmToEvm;
+        if !legacy_gmp_evm_to_evm {
+            eyre::bail!(
+                "source chain '{src}' is a legacy (consensus) chain with no VotingVerifier. \
+                 Legacy support currently covers GMP evm-to-evm only — the {}/{} route is not \
+                 yet supported.",
+                args.protocol,
+                args.test_type
+            );
+        }
     }
 
     match (args.protocol, args.test_type) {

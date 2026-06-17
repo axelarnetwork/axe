@@ -22,7 +22,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::PendingTx;
-use super::checks::{batch_check_solana_incoming_messages, check_evm_is_message_approved};
+use super::checks::{
+    batch_check_solana_incoming_messages, check_evm_command_executed, check_evm_is_message_approved,
+};
+use super::legacy;
 use super::report::compute_peak_throughput;
 use super::state::{Phase, RealTimeStats, phase_counts};
 use super::{INACTIVITY_TIMEOUT, POLL_INTERVAL};
@@ -92,6 +95,16 @@ pub(super) enum DestinationChecker<'a, P: Provider> {
     Evm {
         gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
     },
+    /// Legacy (consensus) EVM destination — verified via the old
+    /// `AxelarGateway`: locate the emitted `ContractCallApproved` (authoritative
+    /// `commandId`) then confirm `isCommandExecuted`. `dest_chain_id` feeds the
+    /// offline commandId cross-check; `from_block` bounds the approval-event
+    /// scan to blocks produced since verification started.
+    EvmLegacy {
+        gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+        dest_chain_id: u64,
+        from_block: u64,
+    },
     Solana {
         rpc_client: Arc<solana_client::rpc_client::RpcClient>,
         network: crate::types::Network,
@@ -117,6 +130,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
     fn approval_label(&self) -> &str {
         match self {
             Self::Evm { .. } => "EVM approval",
+            Self::EvmLegacy { .. } => "EVM(legacy) approval",
             Self::Solana { .. } => "Solana approval",
             Self::Stellar { .. } => "Stellar approval",
             Self::Sui { .. } => "Sui approval",
@@ -126,6 +140,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
     fn execution_label(&self) -> &str {
         match self {
             Self::Evm { .. } => "EVM execution",
+            Self::EvmLegacy { .. } => "EVM(legacy) execution",
             Self::Solana { .. } => "Solana execution",
             Self::Stellar { .. } => "Stellar execution",
             Self::Sui { .. } => "Sui execution",
@@ -367,7 +382,14 @@ pub(super) async fn poll_pipeline<P: Provider>(
         for (i, ok) in voted_results {
             if ok {
                 txs[i].timing.voted_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
-                txs[i].phase = Phase::Routed;
+                // No destination Cosmos Gateway (legacy/consensus destination)
+                // means there is no `routed` phase to observe — skip straight to
+                // the destination approval check so timings stay honest.
+                txs[i].phase = if cosm_gateway.is_some() {
+                    Phase::Routed
+                } else {
+                    Phase::Approved
+                };
                 last_progress = Instant::now();
             }
         }
@@ -502,6 +524,79 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         }
                     }
                 }
+                DestinationChecker::EvmLegacy {
+                    gw_contract,
+                    dest_chain_id,
+                    from_block,
+                } => {
+                    // Sequential per-tx (one eth_getLogs each); fine for the
+                    // burst sizes legacy GMP runs at today.
+                    for &i in &dest_indices {
+                        match txs[i].phase {
+                            Phase::Approved => {
+                                let (src_tx_hash, event_index) =
+                                    legacy::parse_evm_message_id(&txs[i].message_id)?;
+                                let payload_hash = required_payload_hash(&txs[i])?;
+                                let found = legacy::find_contract_call_approved(
+                                    gw_contract.provider(),
+                                    *gw_contract.address(),
+                                    txs[i].contract_addr,
+                                    payload_hash,
+                                    src_tx_hash,
+                                    *from_block,
+                                )
+                                .await?;
+                                let Some(cmd_id) = found else { continue };
+                                let derived = legacy::derive_command_id(
+                                    src_tx_hash,
+                                    event_index,
+                                    *dest_chain_id,
+                                );
+                                if derived != cmd_id {
+                                    ui::warn(&format!(
+                                        "legacy commandId cross-check mismatch for {}: \
+                                         on-chain 0x{} vs derived 0x{} (using on-chain)",
+                                        txs[i].message_id,
+                                        hex::encode(cmd_id),
+                                        hex::encode(derived),
+                                    ));
+                                }
+                                txs[i].command_id = Some(cmd_id);
+                                txs[i].timing.approved_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                // Execution may already have landed in the same
+                                // window — check now to avoid a spurious extra poll.
+                                let executed =
+                                    check_evm_command_executed(gw_contract, cmd_id.into()).await?;
+                                if executed {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                } else {
+                                    txs[i].phase = Phase::Executed;
+                                }
+                                last_progress = Instant::now();
+                            }
+                            Phase::Executed => {
+                                let cmd_id = txs[i].command_id.ok_or_else(|| {
+                                    eyre::eyre!(
+                                        "legacy tx {} in Executed phase without a commandId",
+                                        txs[i].message_id
+                                    )
+                                })?;
+                                if check_evm_command_executed(gw_contract, cmd_id.into()).await? {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 DestinationChecker::Stellar {
                     client,
                     gateway_contract,
@@ -630,6 +725,7 @@ pub(super) async fn poll_pipeline<P: Provider>(
                     total,
                     error_msg.as_deref(),
                     voting_verifier.is_some(),
+                    cosm_gateway.is_some(),
                 )
             };
             spinner.set_message(msg);
