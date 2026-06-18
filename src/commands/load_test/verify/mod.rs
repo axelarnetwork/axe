@@ -525,6 +525,9 @@ pub async fn verify_onchain<P: Provider>(
 
     let checker = DestinationChecker::Evm {
         gw_contract: &gw_contract,
+        // Amplifier→amplifier: the tx only reaches Approved after `routed`, so
+        // the fast-path (unapproved ⇒ executed-between-polls) is sound.
+        require_observed_approval: false,
     };
 
     let peaks = run_gmp_pipeline(
@@ -582,7 +585,6 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
     destination_chain: &str,
     destination_address: &str,
     gateway_addr: Address,
-    dest_chain_id: u64,
     provider: &P,
     metrics: &mut [TxMetrics],
     network: Network,
@@ -645,12 +647,16 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
     let checker = if dest_legacy {
         DestinationChecker::EvmLegacy {
             gw_contract: &gw_contract,
-            dest_chain_id,
             from_block,
         }
     } else {
+        // Amplifier destination reached from a consensus source: there is no
+        // `routed` gate, so the message enters the Approved phase immediately.
+        // Require an observed approval before concluding execution, else the
+        // first (unapproved) poll would false-positive.
         DestinationChecker::Evm {
             gw_contract: &gw_contract,
+            require_observed_approval: true,
         }
     };
 
@@ -701,6 +707,9 @@ pub async fn verify_onchain_evm_streaming(
 
     let checker = DestinationChecker::Evm {
         gw_contract: &gw_contract,
+        // Amplifier→amplifier streaming: same as the burst path — the fast-path
+        // is sound because Approved is only reached after `routed`.
+        require_observed_approval: false,
     };
 
     let mut txs: Vec<PendingTx> = Vec::new();

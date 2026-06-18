@@ -94,15 +94,22 @@ fn is_message_not_yet_routed_error(error: &eyre::Report) -> bool {
 pub(super) enum DestinationChecker<'a, P: Provider> {
     Evm {
         gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+        /// When true, only conclude execution after the approval has actually
+        /// been observed (`isMessageApproved == true`) at least once. The
+        /// amplifier fast-path otherwise reads an unapproved result as
+        /// "approved+executed between polls" — valid only once the message is
+        /// known to be en route (it passed the `routed` phase). A
+        /// consensus→amplifier route enters the Approved phase immediately, so
+        /// it must observe the real approval or it would false-positive on the
+        /// first poll.
+        require_observed_approval: bool,
     },
     /// Legacy (consensus) EVM destination — verified via the old
     /// `AxelarGateway`: locate the emitted `ContractCallApproved` (authoritative
-    /// `commandId`) then confirm `isCommandExecuted`. `dest_chain_id` feeds the
-    /// offline commandId cross-check; `from_block` bounds the approval-event
-    /// scan to blocks produced since verification started.
+    /// `commandId`) then confirm `isCommandExecuted`. `from_block` bounds the
+    /// approval-event scan to blocks produced since verification started.
     EvmLegacy {
         gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
-        dest_chain_id: u64,
         from_block: u64,
     },
     Solana {
@@ -469,7 +476,10 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         }
                     }
                 }
-                DestinationChecker::Evm { gw_contract } => {
+                DestinationChecker::Evm {
+                    gw_contract,
+                    require_observed_approval,
+                } => {
                     let mut futs = Vec::with_capacity(dest_indices.len());
                     for &i in &dest_indices {
                         let phase = txs[i].phase;
@@ -503,7 +513,13 @@ pub(super) async fn poll_pipeline<P: Provider>(
                                 txs[i].phase = Phase::Executed;
                                 last_progress = Instant::now();
                             }
-                            Phase::Approved => {
+                            // Unapproved while in the Approved phase. The
+                            // amplifier fast-path treats this as
+                            // approved+executed-between-polls; a route that has
+                            // not yet observed a real approval (consensus
+                            // source) must keep waiting instead, or it would
+                            // conclude success before the message even lands.
+                            Phase::Approved if !require_observed_approval => {
                                 let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
                                 if txs[i].timing.approved_secs.is_none() {
                                     txs[i].timing.approved_secs = Some(elapsed);
@@ -526,7 +542,6 @@ pub(super) async fn poll_pipeline<P: Provider>(
                 }
                 DestinationChecker::EvmLegacy {
                     gw_contract,
-                    dest_chain_id,
                     from_block,
                 } => {
                     // Sequential per-tx (one eth_getLogs each); fine for the
@@ -534,8 +549,8 @@ pub(super) async fn poll_pipeline<P: Provider>(
                     for &i in &dest_indices {
                         match txs[i].phase {
                             Phase::Approved => {
-                                let (src_tx_hash, event_index) =
-                                    legacy::parse_evm_message_id(&txs[i].message_id)?;
+                                let src_tx_hash =
+                                    legacy::source_tx_hash_from_message_id(&txs[i].message_id)?;
                                 let payload_hash = required_payload_hash(&txs[i])?;
                                 let found = legacy::find_contract_call_approved(
                                     gw_contract.provider(),
@@ -547,20 +562,6 @@ pub(super) async fn poll_pipeline<P: Provider>(
                                 )
                                 .await?;
                                 let Some(cmd_id) = found else { continue };
-                                let derived = legacy::derive_command_id(
-                                    src_tx_hash,
-                                    event_index,
-                                    *dest_chain_id,
-                                );
-                                if derived != cmd_id {
-                                    ui::warn(&format!(
-                                        "legacy commandId cross-check mismatch for {}: \
-                                         on-chain 0x{} vs derived 0x{} (using on-chain)",
-                                        txs[i].message_id,
-                                        hex::encode(cmd_id),
-                                        hex::encode(derived),
-                                    ));
-                                }
                                 txs[i].command_id = Some(cmd_id);
                                 txs[i].timing.approved_secs =
                                     Some(txs[i].send_instant.elapsed().as_secs_f64());

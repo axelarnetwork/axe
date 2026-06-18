@@ -648,20 +648,12 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         .await?;
 
         let verification = if legacy_route {
-            // Destination EVM chainId feeds the offline commandId cross-check.
-            let dest_chain_id = cfg
-                .chains
-                .get(dest)
-                .and_then(|c| c.extra.get("chainId"))
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| eyre::eyre!("no numeric chainId for destination '{dest}'"))?;
             verify::verify_onchain_evm_legacy(
                 &args.config,
                 &args.source_axelar_id,
                 &args.destination_axelar_id,
                 &destination_address,
                 dest_gateway_addr,
-                dest_chain_id,
                 &dest_read_provider,
                 &mut report.transactions,
                 args.network,
