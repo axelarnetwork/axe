@@ -46,13 +46,59 @@ pub(super) fn source_tx_hash_from_message_id(message_id: &str) -> Result<FixedBy
 /// Scan the destination legacy gateway for the `ContractCallApproved` matching
 /// this message and return the on-chain `commandId`. Filters by the indexed
 /// `payloadHash`, then pins the match with `contractAddress` + the exact
-/// `sourceTxHash`. Returns `None` until the approval is observed.
+/// `sourceTxHash` (the source-chain tx that emitted the original
+/// `callContract`). Used for GMP, where the dest message's source is the EVM
+/// source chain. Returns `None` until the approval is observed.
 pub(super) async fn find_contract_call_approved<P: Provider>(
     provider: &P,
     gateway: Address,
     contract_addr: Address,
     payload_hash: FixedBytes<32>,
     source_tx_hash: FixedBytes<32>,
+    from_block: u64,
+) -> Result<Option<[u8; 32]>> {
+    find_approval(
+        provider,
+        gateway,
+        contract_addr,
+        payload_hash,
+        Some(source_tx_hash),
+        from_block,
+    )
+    .await
+}
+
+/// Like [`find_contract_call_approved`] but matches on `payloadHash` +
+/// `contractAddress` only. Used for the ITS second leg (hub→dest), whose
+/// `sourceTxHash` is an Axelar tx — not an EVM hash we can reconstruct. The
+/// second-leg `payloadHash` is unique per transfer, so it pins the match.
+pub(super) async fn find_contract_call_approved_by_payload<P: Provider>(
+    provider: &P,
+    gateway: Address,
+    contract_addr: Address,
+    payload_hash: FixedBytes<32>,
+    from_block: u64,
+) -> Result<Option<[u8; 32]>> {
+    find_approval(
+        provider,
+        gateway,
+        contract_addr,
+        payload_hash,
+        None,
+        from_block,
+    )
+    .await
+}
+
+/// Shared `ContractCallApproved` scan: filter by indexed `payloadHash`, match
+/// `contractAddress`, and (when given) the exact `sourceTxHash`. Returns the
+/// emitted `commandId` of the first match.
+async fn find_approval<P: Provider>(
+    provider: &P,
+    gateway: Address,
+    contract_addr: Address,
+    payload_hash: FixedBytes<32>,
+    source_tx_hash: Option<FixedBytes<32>>,
     from_block: u64,
 ) -> Result<Option<[u8; 32]>> {
     let filter = Filter::new()
@@ -66,7 +112,7 @@ pub(super) async fn find_contract_call_approved<P: Provider>(
             continue;
         };
         if decoded.data.contractAddress == contract_addr
-            && decoded.data.sourceTxHash == source_tx_hash
+            && source_tx_hash.is_none_or(|h| decoded.data.sourceTxHash == h)
         {
             return Ok(Some(decoded.data.commandId.into()));
         }

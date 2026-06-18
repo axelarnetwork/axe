@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, keccak256};
+use alloy::providers::Provider;
 use eyre::{Result, WrapErr};
 
 use super::POLL_INTERVAL;
-use super::checks::{check_evm_is_message_approved, check_solana_incoming_message};
+use super::checks::{
+    check_evm_command_executed, check_evm_is_message_approved, check_solana_incoming_message,
+};
+use super::legacy;
 use super::pipeline::{check_cosmos_routed, check_hub_approved, parse_payload_hash};
 use crate::config::ChainsConfig;
 use crate::cosmos::{SecondLegInfo, discover_second_leg, read_axelar_rpc};
@@ -64,13 +68,30 @@ pub async fn wait_for_its_remote_deploy(
         .ok()
         .map(String::from);
 
-    let cosm_gateway_dest = cfg
+    // A legacy (consensus) destination has no Cosmos Gateway: skip the `routed`
+    // phase and verify the deploy's second leg on the legacy gateway via events.
+    let dest_legacy = cfg
         .axelar
-        .contract_address("Gateway", destination_chain)?
-        .to_string();
+        .contract_address("VotingVerifier", destination_chain)
+        .is_err();
+    let cosm_gateway_dest = if dest_legacy {
+        String::new()
+    } else {
+        cfg.axelar
+            .contract_address("Gateway", destination_chain)?
+            .to_string()
+    };
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
+    let from_block = if dest_legacy {
+        provider
+            .get_block_number()
+            .await?
+            .saturating_sub(super::LEGACY_LOG_LOOKBACK_BLOCKS)
+    } else {
+        0
+    };
 
     ui::kv("deploy message ID", deploy_message_id);
     let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub...");
@@ -95,6 +116,8 @@ pub async fn wait_for_its_remote_deploy(
     };
     let mut second_leg_id: Option<String> = None;
     let mut second_leg_ph: Option<String> = None;
+    let mut second_leg_dest: Option<String> = None;
+    let mut command_id: Option<[u8; 32]> = None;
 
     loop {
         if start.elapsed() >= timeout {
@@ -144,7 +167,13 @@ pub async fn wait_for_its_remote_deploy(
                         ));
                         second_leg_id = Some(info.message_id);
                         second_leg_ph = Some(info.payload_hash);
-                        phase = DeployPhase::Routed;
+                        second_leg_dest = Some(info.destination_address);
+                        // Legacy dest has no Cosmos Gateway → skip `routed`.
+                        phase = if dest_legacy {
+                            DeployPhase::Approved
+                        } else {
+                            DeployPhase::Routed
+                        };
                         continue;
                     }
                     Ok(None) => {
@@ -166,6 +195,43 @@ pub async fn wait_for_its_remote_deploy(
                     continue;
                 }
                 spinner.set_message("remote deploy: waiting for routing...");
+            }
+            DeployPhase::Approved if dest_legacy => {
+                let sl_ph_str = second_leg_ph
+                    .as_deref()
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing second-leg payload_hash"))?;
+                let ph = parse_payload_hash(sl_ph_str)
+                    .wrap_err("remote deploy second-leg payload_hash is invalid")?;
+                let sl_dst = second_leg_dest.as_deref().ok_or_else(|| {
+                    eyre::eyre!("remote deploy missing second-leg destination_address")
+                })?;
+                let dst_addr: Address = sl_dst
+                    .parse()
+                    .wrap_err_with(|| format!("invalid second-leg destination address {sl_dst}"))?;
+                if let Some(cmd_id) = legacy::find_contract_call_approved_by_payload(
+                    gw_contract.provider(),
+                    *gw_contract.address(),
+                    dst_addr,
+                    ph,
+                    from_block,
+                )
+                .await?
+                {
+                    command_id = Some(cmd_id);
+                    spinner.set_message("remote deploy: approved on legacy gateway");
+                    phase = DeployPhase::Executed;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for legacy approval...");
+            }
+            DeployPhase::Executed if dest_legacy => {
+                let cmd_id = command_id
+                    .ok_or_else(|| eyre::eyre!("remote deploy missing legacy commandId"))?;
+                if check_evm_command_executed(&gw_contract, cmd_id.into()).await? {
+                    phase = DeployPhase::Done;
+                    continue;
+                }
+                spinner.set_message("remote deploy: waiting for legacy execution...");
             }
             DeployPhase::Approved => {
                 let sl_id = second_leg_id

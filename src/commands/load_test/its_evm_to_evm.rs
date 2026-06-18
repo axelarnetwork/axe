@@ -59,7 +59,18 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     validate_evm_rpc(&dest_rpc_url).await?;
 
     let cfg = ChainsConfig::load(&args.config)?;
-    verify_axelar_prerequisites(&cfg, dest)?;
+    verify_axelar_prerequisites(&cfg, &args.destination_axelar_id)?;
+
+    // Legacy (consensus) routes are burst-only for now — the streaming verifier
+    // is not wired for the legacy destination path.
+    let (src_legacy, dst_legacy) =
+        super::verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    if (src_legacy || dst_legacy) && args.tps.is_some() && args.duration_secs.is_some() {
+        eyre::bail!(
+            "sustained/streaming ITS verification is not yet supported for legacy (consensus) \
+             routes; run in burst mode (omit --tps/--duration-secs)"
+        );
+    }
 
     ui::kv("source", src);
     ui::kv("destination", dest);
@@ -102,10 +113,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
+        // Use axelar IDs (not the config keys) — the ITS Hub records messages
+        // under the chain's axelarId, which differs from the key for consensus
+        // chains (e.g. key "avalanche" vs axelarId "Avalanche"). Passing the key
+        // makes the hub `executable_messages` query never match.
         super::verify::wait_for_its_remote_deploy(
             &args.config,
-            src,
-            dest,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
             deploy_msg_id,
             dest_gateway_addr,
             &dest_rpc_url,

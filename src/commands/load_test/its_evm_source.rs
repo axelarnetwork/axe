@@ -94,13 +94,27 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
-/// AxelarnetGateway). Bails with the original error strings if either is
-/// missing.
-pub(super) fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> eyre::Result<()> {
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+/// Verify Axelar-side prerequisites: an Amplifier destination needs a Cosmos
+/// Gateway (the `routed` phase); a legacy (consensus) destination has none and
+/// is verified on its on-chain gateway instead. The global AxelarnetGateway
+/// (the ITS Hub) is always required. `dest_axelar_id` is the destination's
+/// axelarId (not the config key — they differ for consensus chains).
+pub(super) fn verify_axelar_prerequisites(
+    cfg: &ChainsConfig,
+    dest_axelar_id: &str,
+) -> eyre::Result<()> {
+    let dest_amplifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", dest_axelar_id)
+        .is_ok();
+    if dest_amplifier
+        && cfg
+            .axelar
+            .contract_address("Gateway", dest_axelar_id)
+            .is_err()
+    {
         eyre::bail!(
-            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+            "destination chain '{dest_axelar_id}' has no Cosmos Gateway in the config — verification would fail."
         );
     }
     if cfg

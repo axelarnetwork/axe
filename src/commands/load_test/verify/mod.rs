@@ -45,8 +45,9 @@ mod report;
 mod state;
 
 use self::pipeline::{
-    DestinationChecker, ItsHubDest, PollItsHubArgs, PollItsHubEvmArgs, PollPipelineArgs,
-    parse_payload_hash, poll_pipeline, poll_pipeline_its_hub, poll_pipeline_its_hub_evm,
+    DestinationChecker, ItsEvmDest, ItsHubDest, PollItsHubArgs, PollItsHubEvmArgs,
+    PollPipelineArgs, parse_payload_hash, poll_pipeline, poll_pipeline_its_hub,
+    poll_pipeline_its_hub_evm,
 };
 use self::report::compute_verification_report;
 use self::state::Phase;
@@ -289,6 +290,7 @@ struct RunItsHubEvmArgs {
     rpc: String,
     cosm_gateway_dest: String,
     destination_chain: String,
+    dest: ItsEvmDest,
 }
 
 /// Drive the ITS-via-hub polling pipeline with an EVM destination
@@ -307,6 +309,7 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
         rpc,
         cosm_gateway_dest,
         destination_chain,
+        dest,
     } = args;
     let (rx, send_done, spinner) = mode.parts();
     poll_pipeline_its_hub_evm(
@@ -323,6 +326,7 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
             rpc,
             cosm_gateway_dest,
             _destination_chain: destination_chain,
+            dest,
         },
     )
     .await
@@ -1711,10 +1715,13 @@ pub async fn verify_onchain_evm_its(
         .collect::<Result<Vec<_>>>()?;
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
+
+    // A legacy (consensus) destination has no Cosmos Gateway: skip the `routed`
+    // phase and verify the second leg on the legacy gateway via events.
+    let (dest, cosm_gateway_dest) = its_evm_dest(&cfg, destination_chain, &provider).await?;
 
     let peaks = run_its_hub_evm_pipeline(
         &mut txs,
@@ -1728,11 +1735,38 @@ pub async fn verify_onchain_evm_its(
             rpc,
             cosm_gateway_dest,
             destination_chain: destination_chain.to_string(),
+            dest,
         },
     )
     .await?;
 
     Ok(compute_verification_report(&txs, metrics, peaks))
+}
+
+/// Resolve the ITS EVM destination descriptor + the Cosmos Gateway address the
+/// `routed` phase needs. Amplifier dest → `(Amplifier, <cosm gateway>)`; legacy
+/// dest → `(Legacy { from_block }, "")` (no Cosmos Gateway, `routed` skipped).
+async fn its_evm_dest<P: Provider>(
+    cfg: &ChainsConfig,
+    destination_chain: &str,
+    provider: &P,
+) -> Result<(ItsEvmDest, String)> {
+    let dest_legacy = cfg
+        .axelar
+        .contract_address("VotingVerifier", destination_chain)
+        .is_err();
+    if dest_legacy {
+        let from_block = provider
+            .get_block_number()
+            .await?
+            .saturating_sub(LEGACY_LOG_LOOKBACK_BLOCKS);
+        Ok((ItsEvmDest::Legacy { from_block }, String::new()))
+    } else {
+        Ok((
+            ItsEvmDest::Amplifier,
+            lookup_cosm_gateway_dest(cfg, destination_chain)?,
+        ))
+    }
 }
 
 /// Streaming version of `verify_onchain_evm_its` — runs concurrently with
@@ -1757,10 +1791,11 @@ pub async fn verify_onchain_evm_its_streaming(
         .to_string();
 
     let rpc = read_axelar_rpc(config)?;
-    let cosm_gateway_dest = lookup_cosm_gateway_dest(&cfg, destination_chain)?;
 
     let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let gw_contract = AxelarAmplifierGateway::new(evm_gateway_addr, &provider);
+
+    let (dest, cosm_gateway_dest) = its_evm_dest(&cfg, destination_chain, &provider).await?;
 
     let mut txs: Vec<PendingTx> = Vec::new();
     let mut rx = rx;
@@ -1781,6 +1816,7 @@ pub async fn verify_onchain_evm_its_streaming(
             rpc,
             cosm_gateway_dest,
             destination_chain: destination_chain.to_string(),
+            dest,
         },
     )
     .await?;

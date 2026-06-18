@@ -1438,6 +1438,16 @@ pub(super) async fn poll_pipeline_its_hub(
     Ok(compute_peak_throughput(txs))
 }
 
+/// EVM destination kind for the ITS-via-hub pipeline. Amplifier destinations
+/// have a Cosmos Gateway (the `routed` phase) and verify the second leg via
+/// `isMessageApproved`. Legacy (consensus) destinations have neither — the
+/// second leg lands as a `ContractCallApproved` event on the legacy gateway
+/// (read for its `commandId`, then confirmed via `isCommandExecuted`).
+pub(super) enum ItsEvmDest {
+    Amplifier,
+    Legacy { from_block: u64 },
+}
+
 pub(super) struct PollItsHubEvmArgs {
     pub lcd: String,
     pub voting_verifier: Option<String>,
@@ -1446,6 +1456,7 @@ pub(super) struct PollItsHubEvmArgs {
     pub rpc: String,
     pub cosm_gateway_dest: String,
     pub _destination_chain: String,
+    pub dest: ItsEvmDest,
 }
 
 /// Full ITS polling pipeline with EVM destination (batch + streaming):
@@ -1467,7 +1478,12 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
         rpc,
         cosm_gateway_dest,
         _destination_chain,
+        dest,
     } = args;
+    let (dest_legacy, dest_from_block) = match dest {
+        ItsEvmDest::Legacy { from_block } => (true, from_block),
+        ItsEvmDest::Amplifier => (false, 0),
+    };
     let lcd = lcd.as_str();
     let voting_verifier = voting_verifier.as_deref();
     let source_chain = source_chain.as_str();
@@ -1689,7 +1705,14 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                     txs[i].second_leg_payload_hash = Some(info.payload_hash);
                     txs[i].second_leg_source_address = Some(info.source_address);
                     txs[i].second_leg_destination_address = Some(info.destination_address);
-                    txs[i].phase = Phase::Routed;
+                    // A legacy destination has no Cosmos Gateway, so there is no
+                    // `routed` phase to observe — go straight to the on-chain
+                    // approval check on the legacy gateway.
+                    txs[i].phase = if dest_legacy {
+                        Phase::Approved
+                    } else {
+                        Phase::Routed
+                    };
                     last_progress = Instant::now();
                 }
             }
@@ -1701,7 +1724,8 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
             .chain(executed_indices.iter())
             .copied()
             .collect();
-        if !evm_check_indices.is_empty() {
+        if !evm_check_indices.is_empty() && !dest_legacy {
+            // Amplifier destination: verify the second leg via `isMessageApproved`.
             let mut evm_futs = Vec::with_capacity(evm_check_indices.len());
             for &i in &evm_check_indices {
                 let phase = txs[i].phase;
@@ -1757,6 +1781,66 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                         txs[i].timing.executed_ok = Some(true);
                         txs[i].phase = Phase::Done;
                         last_progress = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        } else if !evm_check_indices.is_empty() {
+            // Legacy (consensus) destination: the second leg lands as a
+            // `ContractCallApproved` event on the legacy gateway, matched by its
+            // (unique) second-leg payload hash + dest ITS address; execution is
+            // then confirmed directly via `isCommandExecuted` (no approve→execute
+            // race). Sequential per-tx — fine for legacy burst sizes.
+            for &i in &evm_check_indices {
+                let sl_dst = required_second_leg_field(
+                    &txs[i],
+                    "destination_address",
+                    txs[i].second_leg_destination_address.as_ref(),
+                )?;
+                let dst_addr: Address = sl_dst.parse().wrap_err_with(|| {
+                    format!("invalid second-leg EVM destination address {sl_dst}")
+                })?;
+                let ph = required_second_leg_payload_hash(&txs[i])?;
+                match txs[i].phase {
+                    Phase::Approved => {
+                        let found = legacy::find_contract_call_approved_by_payload(
+                            gw_contract.provider(),
+                            *gw_contract.address(),
+                            dst_addr,
+                            ph,
+                            dest_from_block,
+                        )
+                        .await?;
+                        let Some(cmd_id) = found else { continue };
+                        txs[i].command_id = Some(cmd_id);
+                        txs[i].timing.approved_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        let executed =
+                            check_evm_command_executed(gw_contract, cmd_id.into()).await?;
+                        if executed {
+                            txs[i].timing.executed_secs =
+                                Some(txs[i].send_instant.elapsed().as_secs_f64());
+                            txs[i].timing.executed_ok = Some(true);
+                            txs[i].phase = Phase::Done;
+                        } else {
+                            txs[i].phase = Phase::Executed;
+                        }
+                        last_progress = Instant::now();
+                    }
+                    Phase::Executed => {
+                        let cmd_id = txs[i].command_id.ok_or_else(|| {
+                            eyre::eyre!(
+                                "legacy ITS tx {} in Executed phase without a commandId",
+                                txs[i].message_id
+                            )
+                        })?;
+                        if check_evm_command_executed(gw_contract, cmd_id.into()).await? {
+                            txs[i].timing.executed_secs =
+                                Some(txs[i].send_instant.elapsed().as_secs_f64());
+                            txs[i].timing.executed_ok = Some(true);
+                            txs[i].phase = Phase::Done;
+                            last_progress = Instant::now();
+                        }
                     }
                     _ => {}
                 }
