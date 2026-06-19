@@ -305,6 +305,12 @@ async fn resolve_or_deploy_token(
 ) -> eyre::Result<TokenIdentity> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    // The ITS edge / hub identify the destination by its axelarId, which differs
+    // from the config key for consensus chains ("avalanche" key vs "Avalanche"
+    // axelarId). Passing the key to deployRemoteInterchainToken makes the source
+    // revert with `UntrustedChain()`, so the on-chain destination name must be
+    // the axelarId. (`dest` stays the key for cache/config lookups.)
+    let dest_its = args.destination_axelar_id.as_str();
     let write_provider = ProviderBuilder::new()
         .wallet(evm_source.signer.clone())
         .connect_http(evm_rpc_url.parse()?);
@@ -375,7 +381,7 @@ async fn resolve_or_deploy_token(
                     &write_provider,
                     its.its_factory_addr,
                     evm_source.deployer_address,
-                    dest,
+                    dest_its,
                     sizing.total_supply,
                     src,
                     gas_value,
@@ -387,7 +393,7 @@ async fn resolve_or_deploy_token(
                 &write_provider,
                 its.its_factory_addr,
                 evm_source.deployer_address,
-                dest,
+                dest_its,
                 sizing.total_supply,
                 src,
                 gas_value,
@@ -480,7 +486,9 @@ async fn run_sustained_pipeline(
     let _ = spinner_tx.send(spinner.clone());
 
     let test_start = Instant::now();
-    let dest_chain_s = dest.to_string();
+    // ITS routes by axelarId (see resolve_or_deploy_token) — key != axelarId for
+    // consensus chains, so use the axelarId for the on-chain interchainTransfer.
+    let dest_chain_s = args.destination_axelar_id.clone();
     let derived_owned: Vec<PrivateKeySigner> = derived.to_vec();
     let amount_per_tx = sizing.amount_per_tx;
     let its_proxy_addr = targets.its_proxy_addr;
@@ -582,7 +590,8 @@ async fn run_burst_pipeline(
     let test_start = Instant::now();
 
     let mut tasks = Vec::with_capacity(num_txs);
-    let dest_chain = dest.to_string();
+    // ITS routes by axelarId (key != axelarId for consensus chains).
+    let dest_chain = args.destination_axelar_id.clone();
 
     for derived_signer in derived {
         let metrics_clone = Arc::clone(&metrics_list);
