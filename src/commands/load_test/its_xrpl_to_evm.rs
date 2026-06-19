@@ -100,7 +100,10 @@ struct RunSizing {
 /// AxelarnetGateway). Bails with the existing error strings if either is
 /// missing.
 fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> Result<()> {
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // A legacy (consensus) destination has no Cosmos Gateway and is verified on
+    // its on-chain gateway instead; only amplifier dests need the Cosmos Gateway.
+    let dest_amplifier = cfg.axelar.contract_address("VotingVerifier", dest).is_ok();
+    if dest_amplifier && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
