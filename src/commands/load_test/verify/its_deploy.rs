@@ -96,7 +96,7 @@ pub async fn wait_for_its_remote_deploy(
     ui::kv("deploy message ID", deploy_message_id);
     let spinner = ui::wait_spinner("waiting for remote deploy to propagate through hub...");
     let start = Instant::now();
-    let timeout = Duration::from_secs(300);
+    let timeout = Duration::from_secs(500);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeployPhase {
@@ -330,7 +330,7 @@ pub async fn wait_for_its_remote_deploy_to_stellar(args: StellarRemoteDeployWait
     let spinner =
         ui::wait_spinner("waiting for remote deploy to propagate through hub to Stellar...");
     let start = Instant::now();
-    let timeout = Duration::from_secs(300);
+    let timeout = Duration::from_secs(500);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeployPhase {
@@ -556,7 +556,7 @@ pub async fn wait_for_its_remote_deploy_to_solana(
     let spinner =
         ui::wait_spinner("waiting for remote deploy to propagate through hub to Solana...");
     let start = Instant::now();
-    let timeout = Duration::from_secs(300);
+    let timeout = Duration::from_secs(500);
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum DeployPhase {
