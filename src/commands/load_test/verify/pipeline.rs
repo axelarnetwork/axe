@@ -206,7 +206,9 @@ pub(super) async fn poll_pipeline<P: Provider>(
     // For EVM destinations, derive the contract_addr from destination_address
     // so streaming PendingTx entries (which may have Address::ZERO) get the right value.
     let default_contract_addr = match checker {
-        DestinationChecker::Evm { .. } => Some(destination_address.parse()?),
+        DestinationChecker::Evm { .. } | DestinationChecker::EvmLegacy { .. } => {
+            Some(destination_address.parse()?)
+        }
         _ => None,
     };
 

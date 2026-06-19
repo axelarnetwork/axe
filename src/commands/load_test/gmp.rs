@@ -458,14 +458,6 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         );
     }
 
-    // Streaming/sustained verification for legacy routes is not wired yet.
-    if legacy_route && args.tps.is_some() && args.duration_secs.is_some() {
-        eyre::bail!(
-            "sustained/streaming verification is not yet supported for legacy (consensus) \
-             routes; run in burst mode (omit --tps/--duration-secs)"
-        );
-    }
-
     ui::kv("source", src);
     ui::kv("destination", dest);
 
@@ -595,20 +587,36 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         let vdest_rpc = dest_rpc_url.clone();
         let vdone = std::sync::Arc::clone(&send_done);
         let vgw = dest_gateway_addr;
+        let vlegacy = legacy_route;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
-            verify::verify_onchain_evm_streaming(
-                &vconfig,
-                &vsource,
-                &vdest,
-                &vdest_addr,
-                vgw,
-                &vdest_rpc,
-                verify_rx,
-                vdone,
-                spinner,
-            )
-            .await
+            if vlegacy {
+                verify::verify_onchain_evm_legacy_streaming(
+                    &vconfig,
+                    &vsource,
+                    &vdest,
+                    &vdest_addr,
+                    vgw,
+                    &vdest_rpc,
+                    verify_rx,
+                    vdone,
+                    spinner,
+                )
+                .await
+            } else {
+                verify::verify_onchain_evm_streaming(
+                    &vconfig,
+                    &vsource,
+                    &vdest,
+                    &vdest_addr,
+                    vgw,
+                    &vdest_rpc,
+                    verify_rx,
+                    vdone,
+                    spinner,
+                )
+                .await
+            }
         });
 
         let mut report = evm_sender::run_sustained_load_test_with_metrics(

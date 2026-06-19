@@ -61,17 +61,6 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     let cfg = ChainsConfig::load(&args.config)?;
     verify_axelar_prerequisites(&cfg, &args.destination_axelar_id)?;
 
-    // Legacy (consensus) routes are burst-only for now — the streaming verifier
-    // is not wired for the legacy destination path.
-    let (src_legacy, dst_legacy) =
-        super::verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
-    if (src_legacy || dst_legacy) && args.tps.is_some() && args.duration_secs.is_some() {
-        eyre::bail!(
-            "sustained/streaming ITS verification is not yet supported for legacy (consensus) \
-             routes; run in burst mode (omit --tps/--duration-secs)"
-        );
-    }
-
     ui::kv("source", src);
     ui::kv("destination", dest);
     ui::kv("protocol", "ITS (interchainTransfer via hub)");

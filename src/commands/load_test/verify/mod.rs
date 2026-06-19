@@ -741,6 +741,82 @@ pub async fn verify_onchain_evm_streaming(
     Ok(streaming_report_and_timings(&txs, peaks))
 }
 
+/// Streaming variant of `verify_onchain_evm_legacy` (sustained mode). Same
+/// legacy phase model and dest checker, but receives confirmed txs over the
+/// channel. `from_block` is captured here, before the first tx arrives, so the
+/// `ContractCallApproved` scan has a sound lower bound.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_onchain_evm_legacy_streaming(
+    config: &Path,
+    source_chain: &str,
+    destination_chain: &str,
+    destination_address: &str,
+    gateway_addr: Address,
+    evm_rpc_url: &str,
+    rx: mpsc::UnboundedReceiver<PendingTx>,
+    send_done: Arc<AtomicBool>,
+    spinner: indicatif::ProgressBar,
+) -> Result<(VerificationReport, Vec<(String, AmplifierTiming)>)> {
+    let cfg = ChainsConfig::load(config)?;
+    let voting_verifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", source_chain)
+        .ok()
+        .map(String::from);
+    let dest_legacy = cfg
+        .axelar
+        .contract_address("VotingVerifier", destination_chain)
+        .is_err();
+    let lcd = if voting_verifier.is_some() {
+        cfg.axelar.cosmos_tx_params()?.0
+    } else {
+        String::new()
+    };
+
+    let provider = alloy::providers::ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
+    let gw_contract = AxelarAmplifierGateway::new(gateway_addr, &provider);
+    let from_block = provider
+        .get_block_number()
+        .await?
+        .saturating_sub(LEGACY_LOG_LOOKBACK_BLOCKS);
+
+    let checker = if dest_legacy {
+        DestinationChecker::EvmLegacy {
+            gw_contract: &gw_contract,
+            from_block,
+        }
+    } else {
+        DestinationChecker::Evm {
+            gw_contract: &gw_contract,
+            require_observed_approval: true,
+        }
+    };
+
+    let mut txs: Vec<PendingTx> = Vec::new();
+    let mut rx = rx;
+
+    let peaks = poll_pipeline(
+        &mut txs,
+        Some(&mut rx),
+        Some(&send_done),
+        &checker,
+        Some(spinner),
+        PollPipelineArgs {
+            lcd,
+            voting_verifier,
+            cosm_gateway: None,
+            source_chain: source_chain.to_string(),
+            destination_chain: destination_chain.to_string(),
+            destination_address: destination_address.to_string(),
+            axelarnet_gateway: None,
+            display_chain: None,
+        },
+    )
+    .await?;
+
+    Ok(streaming_report_and_timings(&txs, peaks))
+}
+
 /// GMP verification with a Stellar destination — uses Stellar's
 /// `is_message_approved` / `is_message_executed` Soroban view calls
 /// instead of an EVM gateway or Solana PDA.
@@ -882,6 +958,7 @@ pub(super) fn tx_to_pending_solana(
     has_voting_verifier: bool,
     source_type: SourceChainType,
     network: Network,
+    legacy_route: bool,
 ) -> Result<PendingTx> {
     let payload_hash = parse_first_leg_payload_hash(tx, true)?;
     let message_id = message_id_for_source(tx, source_type, network);
@@ -900,10 +977,13 @@ pub(super) fn tx_to_pending_solana(
         timing: AmplifierTiming::default(),
         failed: false,
         fail_reason: None,
-        phase: if has_voting_verifier {
-            Phase::Voted
-        } else {
-            Phase::Routed
+        // Amplifier source ⇒ Voted. A legacy (consensus) source has no
+        // VotingVerifier/router, so it skips straight to Approved (the dest
+        // checker drives it); a no-VV amplifier path keeps the Routed start.
+        phase: match (has_voting_verifier, legacy_route) {
+            (true, _) => Phase::Voted,
+            (false, true) => Phase::Approved,
+            (false, false) => Phase::Routed,
         },
         second_leg_message_id: None,
         second_leg_payload_hash: None,

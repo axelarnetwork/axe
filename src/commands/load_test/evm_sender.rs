@@ -510,6 +510,9 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         .is_ok();
     let source_chain = args.source_axelar_id.clone();
     let network = args.network;
+    let (src_legacy, dst_legacy) =
+        super::verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    let legacy_route = src_legacy || dst_legacy;
 
     let make_task: super::sustained::MakeTask =
         Box::new(move |key_idx: usize, nonce: Option<u64>| {
@@ -526,6 +529,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
             let vtx = verify_tx.clone();
             let sc = source_chain.clone();
             let has_vv = has_voting_verifier;
+            let legacy = legacy_route;
 
             let provider = ProviderBuilder::new()
                 .wallet(derived[key_idx].clone())
@@ -547,6 +551,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                         has_vv,
                         super::verify::SourceChainType::Evm,
                         network,
+                        legacy,
                     ) {
                         Ok(pending) => {
                             if tx_sender.send(pending).is_err() {
