@@ -242,18 +242,23 @@ pub async fn run(args: LoadTestArgs) -> Result<()> {
         .axelar
         .contract_address("XrplVotingVerifier", &args.source_axelar_id)
         .is_ok();
-    // Legacy (consensus) source chains are supported for GMP and ITS
-    // evm-to-evm; the destination-side verification handles both legacy and
-    // Amplifier destinations on-chain. Other protocols/route shapes from a
-    // legacy source are not yet wired.
+    // A legacy (consensus) chain is always EVM, so a legacy *source* only
+    // appears on an `Evm -> X` route. Allow those (destination-side verification
+    // handles legacy or Amplifier dests on-chain); bail on anything else, which
+    // would mean a non-EVM source with no voting verifier (unsupported).
     if !has_standard_vv && !has_xrpl_vv {
-        let legacy_evm_to_evm = matches!(args.protocol, Protocol::Gmp | Protocol::Its)
-            && args.test_type == TestType::EvmToEvm;
-        if !legacy_evm_to_evm {
+        let legacy_evm_source = matches!(
+            args.test_type,
+            TestType::EvmToEvm
+                | TestType::EvmToSol
+                | TestType::EvmToSui
+                | TestType::EvmToStellar
+                | TestType::EvmToXrpl
+        );
+        if !legacy_evm_source {
             eyre::bail!(
                 "source chain '{src}' is a legacy (consensus) chain with no VotingVerifier. \
-                 Legacy support currently covers GMP/ITS evm-to-evm only — the {}/{} route is \
-                 not yet supported.",
+                 Legacy support requires an EVM source — the {}/{} route is not supported.",
                 args.protocol,
                 args.test_type
             );
