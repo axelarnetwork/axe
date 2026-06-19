@@ -272,9 +272,13 @@ pub(super) async fn deploy_its_token<P: Provider>(
 
     ui::info(&format!("deploying remote token to {dest_chain}..."));
 
-    // ITS routes via the hub, so two commands are created (source→hub and
-    // hub→destination). Pay 2× gas_value so both legs are covered.
-    let hub_gas = gas_value * U256::from(2);
+    // A remote deploy creates a fresh token contract on the destination, which
+    // costs far more destination-side gas than a transfer — and a consensus
+    // source has no Axelarscan quote, so `gas_value` falls back to a low
+    // constant. Pay 10× to cover the destination deploy execution (e.g. Stellar
+    // token creation needed ~10×); the relayer refunds the unused remainder.
+    // Mirrors `DEPLOY_GAS_MULTIPLIER` in the Solana-source ITS module.
+    let hub_gas = gas_value * U256::from(10);
     let remote_call = factory
         .deployRemoteInterchainToken(salt, dest_chain.to_string(), hub_gas)
         .value(hub_gas);
