@@ -22,6 +22,12 @@ use eyre::{Result, eyre};
 
 use crate::evm::ContractCallApproved;
 
+/// Max blocks per `eth_getLogs` window. Public RPCs cap the range (polygon Amoy
+/// rejects > ~128 blocks); we scan newest→oldest in windows of this size so a
+/// fresh approval is found in the first request and we never submit a range an
+/// RPC will reject. Kept well under common caps.
+const LOG_WINDOW_BLOCKS: u64 = 100;
+
 /// Extract the source transaction hash from an EVM source message id
 /// (`{0x-tx-hash}-{event_index}`). This is the `message_id` stored on a
 /// `PendingTx` for an EVM source (`SourceChainType::Evm`); the `-{index}`
@@ -101,21 +107,31 @@ async fn find_approval<P: Provider>(
     source_tx_hash: Option<FixedBytes<32>>,
     from_block: u64,
 ) -> Result<Option<[u8; 32]>> {
-    let filter = Filter::new()
-        .address(gateway)
-        .event_signature(ContractCallApproved::SIGNATURE_HASH)
-        .topic3(payload_hash)
-        .from_block(from_block);
-    let logs = provider.get_logs(&filter).await?;
-    for log in logs {
-        let Ok(decoded) = ContractCallApproved::decode_log(&log.inner) else {
-            continue;
-        };
-        if decoded.data.contractAddress == contract_addr
-            && source_tx_hash.is_none_or(|h| decoded.data.sourceTxHash == h)
-        {
-            return Ok(Some(decoded.data.commandId.into()));
+    let latest = provider.get_block_number().await?;
+    let mut to = latest;
+    while to >= from_block {
+        let from = to.saturating_sub(LOG_WINDOW_BLOCKS - 1).max(from_block);
+        let filter = Filter::new()
+            .address(gateway)
+            .event_signature(ContractCallApproved::SIGNATURE_HASH)
+            .topic3(payload_hash)
+            .from_block(from)
+            .to_block(to);
+        let logs = provider.get_logs(&filter).await?;
+        for log in logs {
+            let Ok(decoded) = ContractCallApproved::decode_log(&log.inner) else {
+                continue;
+            };
+            if decoded.data.contractAddress == contract_addr
+                && source_tx_hash.is_none_or(|h| decoded.data.sourceTxHash == h)
+            {
+                return Ok(Some(decoded.data.commandId.into()));
+            }
         }
+        if from == from_block {
+            break;
+        }
+        to = from - 1;
     }
     Ok(None)
 }
