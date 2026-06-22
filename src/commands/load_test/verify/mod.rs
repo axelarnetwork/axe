@@ -495,6 +495,29 @@ pub async fn verify_onchain<P: Provider>(
         return Ok(VerificationReport::default());
     }
 
+    // A legacy (consensus) EVM destination has no Cosmos Gateway and is verified
+    // on its on-chain gateway; delegate to the legacy verifier. This covers every
+    // GMP-with-EVM-dest source (EVM, Solana, Sui, Stellar).
+    let cfg = ChainsConfig::load(config)?;
+    if cfg
+        .axelar
+        .contract_address("VotingVerifier", destination_chain)
+        .is_err()
+    {
+        return verify_onchain_evm_legacy(
+            config,
+            source_chain,
+            destination_chain,
+            destination_address,
+            gateway_addr,
+            provider,
+            metrics,
+            network,
+            source_type,
+        )
+        .await;
+    }
+
     let GmpAxelarConfig {
         lcd,
         voting_verifier,
@@ -592,12 +615,16 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
     provider: &P,
     metrics: &mut [TxMetrics],
     network: Network,
+    source_type: SourceChainType,
 ) -> Result<VerificationReport> {
     let confirmed = confirmed_indices(metrics);
     if confirmed.is_empty() {
         ui::warn("no confirmed transactions to verify");
         return Ok(VerificationReport::default());
     }
+    // EVM source ⇒ match the dest approval by the exact sourceTxHash; a non-EVM
+    // source has no EVM tx hash, so match by the unique payloadHash.
+    let match_by_payload = !matches!(source_type, SourceChainType::Evm);
 
     let cfg = ChainsConfig::load(config)?;
     // Amplifier source ⇒ observe the VotingVerifier `voted` phase; otherwise
@@ -638,7 +665,7 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
             pending_tx_for_gmp_batch(
                 tx,
                 idx,
-                message_id_for_source(tx, SourceChainType::Evm, network),
+                message_id_for_source(tx, source_type, network),
                 contract_addr,
                 None,
                 String::new(),
@@ -652,6 +679,7 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
         DestinationChecker::EvmLegacy {
             gw_contract: &gw_contract,
             from_block,
+            match_by_payload,
         }
     } else {
         // Amplifier destination reached from a consensus source: there is no
@@ -784,6 +812,8 @@ pub async fn verify_onchain_evm_legacy_streaming(
         DestinationChecker::EvmLegacy {
             gw_contract: &gw_contract,
             from_block,
+            // Streaming legacy verification is only wired for an EVM source today.
+            match_by_payload: false,
         }
     } else {
         DestinationChecker::Evm {

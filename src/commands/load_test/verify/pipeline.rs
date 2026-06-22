@@ -108,9 +108,13 @@ pub(super) enum DestinationChecker<'a, P: Provider> {
     /// `AxelarGateway`: locate the emitted `ContractCallApproved` (authoritative
     /// `commandId`) then confirm `isCommandExecuted`. `from_block` bounds the
     /// approval-event scan to blocks produced since verification started.
+    /// `match_by_payload` selects how the approval log is matched: an EVM source
+    /// pins it with the exact `sourceTxHash` (precise); a non-EVM source has no
+    /// EVM tx hash, so it matches on the (unique) `payloadHash` + dest address.
     EvmLegacy {
         gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
         from_block: u64,
+        match_by_payload: bool,
     },
     Solana {
         rpc_client: Arc<solana_client::rpc_client::RpcClient>,
@@ -545,24 +549,39 @@ pub(super) async fn poll_pipeline<P: Provider>(
                 DestinationChecker::EvmLegacy {
                     gw_contract,
                     from_block,
+                    match_by_payload,
                 } => {
                     // Sequential per-tx (one eth_getLogs each); fine for the
                     // burst sizes legacy GMP runs at today.
                     for &i in &dest_indices {
                         match txs[i].phase {
                             Phase::Approved => {
-                                let src_tx_hash =
-                                    legacy::source_tx_hash_from_message_id(&txs[i].message_id)?;
                                 let payload_hash = required_payload_hash(&txs[i])?;
-                                let found = legacy::find_contract_call_approved(
-                                    gw_contract.provider(),
-                                    *gw_contract.address(),
-                                    txs[i].contract_addr,
-                                    payload_hash,
-                                    src_tx_hash,
-                                    *from_block,
-                                )
-                                .await?;
+                                // EVM source: pin the approval log with the exact
+                                // sourceTxHash. Non-EVM source: no EVM tx hash, so
+                                // match on the (unique) payloadHash + dest address.
+                                let found = if *match_by_payload {
+                                    legacy::find_contract_call_approved_by_payload(
+                                        gw_contract.provider(),
+                                        *gw_contract.address(),
+                                        txs[i].contract_addr,
+                                        payload_hash,
+                                        *from_block,
+                                    )
+                                    .await?
+                                } else {
+                                    let src_tx_hash =
+                                        legacy::source_tx_hash_from_message_id(&txs[i].message_id)?;
+                                    legacy::find_contract_call_approved(
+                                        gw_contract.provider(),
+                                        *gw_contract.address(),
+                                        txs[i].contract_addr,
+                                        payload_hash,
+                                        src_tx_hash,
+                                        *from_block,
+                                    )
+                                    .await?
+                                };
                                 let Some(cmd_id) = found else { continue };
                                 txs[i].command_id = Some(cmd_id);
                                 txs[i].timing.approved_secs =
