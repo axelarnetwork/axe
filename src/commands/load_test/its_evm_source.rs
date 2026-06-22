@@ -317,6 +317,39 @@ pub(super) async fn deploy_its_token<P: Provider>(
     Ok((token_id, token_addr, deploy_message_id))
 }
 
+/// Remote-deploy an *already-deployed* interchain token (identified by its
+/// `salt`) to a new destination chain, without minting a fresh token. Lets an
+/// existing AXE be registered on a chain it isn't on yet (e.g. a legacy chain),
+/// reusing the same `tokenId`. Returns the remote-deploy message id for the
+/// hub-propagation wait. `dest_chain` is the destination axelarId.
+pub(super) async fn remote_deploy_existing_token<P: Provider>(
+    provider: &P,
+    factory_addr: Address,
+    salt: FixedBytes<32>,
+    dest_chain: &str,
+    gas_value: U256,
+) -> eyre::Result<String> {
+    let factory = InterchainTokenFactory::new(factory_addr, provider);
+    // Same 10× headroom as a fresh remote deploy — the destination still
+    // CREATE2s the token contract; the relayer refunds the remainder.
+    let hub_gas = gas_value * U256::from(10);
+    ui::info(&format!("registering existing token on {dest_chain}..."));
+    let remote_call = factory
+        .deployRemoteInterchainToken(salt, dest_chain.to_string(), hub_gas)
+        .value(hub_gas);
+    let pending = remote_call.send().await?;
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash("remote deploy tx", &format!("{tx_hash}"));
+    let receipt = tokio::time::timeout(Duration::from_secs(120), pending.get_receipt())
+        .await
+        .map_err(|_| eyre!("remote deploy tx timed out after 120s"))??;
+    let (event_index, _, _, _, _) = extract_contract_call_event(&receipt)
+        .map_err(|e| eyre!("remote deploy emitted no ContractCall event: {e}"))?;
+    let msg_id = format!("{tx_hash:#x}-{event_index}");
+    ui::kv("remote deploy message ID", &msg_id);
+    Ok(msg_id)
+}
+
 /// Pre-approve the ITS token manager on each derived key's balance so
 /// `interchainTransfer` doesn't revert with `TakeTokenFailed` when the
 /// underlying token manager is lock/unlock (e.g. canonical XRP wrapped on

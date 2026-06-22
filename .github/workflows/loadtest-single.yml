@@ -27,6 +27,8 @@ on:
           - Ethereum
           - Flow
           - Hyperliquid
+          - Immutable
+          - Linea
           - Optimism
           - Solana
           - Stellar
@@ -44,6 +46,8 @@ on:
           - Ethereum
           - Flow
           - Hyperliquid
+          - Immutable
+          - Linea
           - Optimism
           - Solana
           - Stellar

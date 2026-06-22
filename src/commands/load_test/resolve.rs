@@ -599,6 +599,42 @@ pub(crate) fn save_its_cache(src: &str, dst: &str, cache: &serde_json::Value) ->
     Ok(())
 }
 
+/// Find the interchain-token deploy `salt` for a given `tokenId` by scanning the
+/// local ITS caches (`its-load-test-*.json`). axe records `{tokenId, salt}` for
+/// every token it deploys, so an existing AXE can be remote-deployed to a new
+/// chain without re-minting. Matches `tokenId` case-insensitively, with or
+/// without the `0x` prefix. Returns the salt hex (as stored).
+pub(crate) fn find_cached_salt(token_id: &str) -> Option<String> {
+    let want = token_id.trim_start_matches("0x").to_lowercase();
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("axe");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("its-load-test-") && name.ends_with(".json")) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let tid = v
+            .get("tokenId")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        if tid.trim_start_matches("0x").to_lowercase() == want
+            && let Some(salt) = v.get("salt").and_then(|s| s.as_str())
+        {
+            return Some(salt.to_string());
+        }
+    }
+    None
+}
+
 /// Try to detect the target network from the config file path.
 /// Looks for known network names in the filename (e.g. "stagenet.json", "devnet-amplifier.json").
 pub(crate) fn detect_network_from_config(

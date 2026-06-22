@@ -80,6 +80,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &evm_source,
         &its,
         &source_rpc_url,
+        &dest_rpc_url,
         &sizing,
         gas_value,
     )
@@ -289,6 +290,7 @@ async fn resolve_or_deploy_token(
     evm_source: &EvmSource,
     its: &ItsContracts,
     evm_rpc_url: &str,
+    dest_rpc_url: &str,
     sizing: &RunSizing,
     gas_value: U256,
 ) -> eyre::Result<TokenIdentity> {
@@ -332,7 +334,34 @@ async fn resolve_or_deploy_token(
             .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
-        (token_id, addr, None)
+        // Reuse an existing token on a chain it isn't on yet: if the destination
+        // lacks this token, remote-deploy it there using the salt axe recorded
+        // when it first deployed the token (its local cache) — no fresh mint.
+        let dest_provider = ProviderBuilder::new().connect_http(dest_rpc_url.parse()?);
+        let dest_has_token = !dest_provider.get_code_at(addr).await?.is_empty();
+        let deploy_message_id = if dest_has_token {
+            None
+        } else {
+            let salt_hex = super::find_cached_salt(tid).ok_or_else(|| {
+                eyre!(
+                    "token {tid} is not registered on '{dest}' and no deploy salt is cached; \
+                     run an ITS test once from the token's home chain so axe records its salt"
+                )
+            })?;
+            let salt: FixedBytes<32> = salt_hex
+                .parse()
+                .map_err(|e| eyre!("cached salt for {tid} is invalid: {e}"))?;
+            let msg_id = super::its_evm_source::remote_deploy_existing_token(
+                &write_provider,
+                its.its_factory_addr,
+                salt,
+                dest_its,
+                gas_value,
+            )
+            .await?;
+            Some(msg_id)
+        };
+        (token_id, addr, deploy_message_id)
     } else if let Some((tid, addr)) = config_axe {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));

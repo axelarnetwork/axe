@@ -50,7 +50,9 @@ pub(super) use helpers::{
     read_stellar_token_address, read_sui_axe_token_id, resolve_sui_axe_token, sui_dest_lookup,
     sui_its_dest_lookup, validate_evm_rpc, validate_solana_rpc,
 };
-pub(super) use resolve::{read_cache, read_its_cache, save_cache, save_its_cache};
+pub(super) use resolve::{
+    find_cached_salt, read_cache, read_its_cache, save_cache, save_its_cache,
+};
 // `pub(crate)` (not `pub(super)`): cli::resolve_network also detects the
 // network from `--config` filenames.
 pub(crate) use resolve::detect_network_from_config;
