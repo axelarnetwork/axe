@@ -30,6 +30,7 @@ on:
           - Immutable
           - Linea
           - Optimism
+          - Scroll
           - Solana
           - Stellar
           - Sui
@@ -49,6 +50,7 @@ on:
           - Immutable
           - Linea
           - Optimism
+          - Scroll
           - Solana
           - Stellar
           - Sui
