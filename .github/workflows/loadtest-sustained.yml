@@ -29,6 +29,7 @@ on:
           - Hyperliquid
           - Immutable
           - Linea
+          - Mantle
           - Optimism
           - Polygon
           - Scroll
@@ -50,6 +51,7 @@ on:
           - Hyperliquid
           - Immutable
           - Linea
+          - Mantle
           - Optimism
           - Polygon
           - Scroll
