@@ -162,8 +162,19 @@ pub async fn run_load_test_with_metrics(
     // pre-existing wallet; we mirror that here. Loses parallelism for
     // num_txs > 1 on Hedera (sequential nonce), acceptable for the smoke
     // fleet which uses num_txs = 1.
-    let derived = if args.source_axelar_id == "hedera" {
-        ui::info("Hedera source: using main wallet directly (no key derivation)");
+    // A single tx needs no parallelism, so skip key derivation and send from
+    // the main wallet directly. This avoids funding a throwaway subwallet
+    // (whose leftover + the gas refund — paid to `msg.sender` — would otherwise
+    // sit parked there), and sidesteps the per-key `MIN_WEI_PER_KEY` funding
+    // gate, so a thin-balance source chain (cheap L2s) works without topping up.
+    // Hedera always uses the main wallet (a tx from a freshly-funded key reverts
+    // with "Sender account not found" while the mirror node lags).
+    let derived = if args.source_axelar_id == "hedera" || num_txs == 1 {
+        if num_txs == 1 {
+            ui::info("single tx: sending from main wallet directly (no subwallet)");
+        } else {
+            ui::info("Hedera source: using main wallet directly (no key derivation)");
+        }
         vec![main_signer.clone(); num_txs]
     } else {
         let d = keypairs::derive_evm_signers(main_key, num_txs)?;
