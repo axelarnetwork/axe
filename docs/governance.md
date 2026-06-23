@@ -2,16 +2,16 @@
 
 ```bash
 # operator fast-path (default), submit + monitor only (no relay)
-axe propose testnet berachain --op pause
+axe propose testnet avalanche --op pause
 
 # full round-trip: submit → vote → relay → execute
-axe propose testnet berachain --op unpause --relay
+axe propose testnet avalanche --op unpause --relay
 
 # time-lock instead of the operator fast-path
-axe propose testnet berachain --op pause --type timelock --relay
+axe propose testnet avalanche --op pause --type timelock --relay
 
 # any other call — pass the target and abi-encoded calldata directly
-axe propose testnet berachain \
+axe propose testnet avalanche \
   --target 0xB5FB4BE02232B1bBA4dC8f81dc24C26980dE9e3C \
   --calldata 0x9f409d77... --relay
 ```
@@ -62,6 +62,6 @@ approved and a `cast` command is printed for the operator to finish).
 Before submitting, `axe propose` verifies the target is a real, correctly-wired
 ASG (code present, `governanceAddress` == the gov module), runs an idempotency
 check, and shows a review block: the target contract is labelled
-(e.g. `berachain gateway`) — or flagged **`Unknown Destination`** in red — the
+(e.g. `avalanche gateway`) — or flagged **`Unknown Destination`** in red — the
 raw calldata is decoded with the same engine as `axe decode` (or flagged
 **`Unknown Calldata`** in red), and the deposit is shown in AXL.

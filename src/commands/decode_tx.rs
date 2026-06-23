@@ -213,7 +213,6 @@ fn alchemy_slug(chain_id: u64) -> Option<&'static str> {
         252 => "frax-mainnet",
         2522 => "frax-sepolia",
         1284 => "moonbeam-mainnet",
-        250 => "fantom-mainnet",
         42220 => "celo-mainnet",
         5000 => "mantle-mainnet",
         _ => return None,

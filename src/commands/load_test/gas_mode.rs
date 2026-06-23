@@ -10,7 +10,7 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
-use eyre::{Result, eyre};
+use eyre::Result;
 
 /// How to price EVM transactions on a given chain.
 #[derive(Clone, Copy, Debug)]
@@ -24,12 +24,20 @@ pub(crate) enum EvmFeeMode {
 impl EvmFeeMode {
     /// Probe the chain: a latest block with no `baseFeePerGas` means the chain
     /// has no EIP-1559, so fetch the legacy `gas_price` to use instead.
+    ///
+    /// Reads the block as raw JSON rather than alloy's typed `Block` — some
+    /// chains (e.g. Moonbeam) return blocks missing fields alloy requires
+    /// (`mixHash`), which would fail typed deserialization even though all we
+    /// need is the optional `baseFeePerGas`.
     pub(crate) async fn detect<P: Provider>(provider: &P) -> Result<Self> {
-        let block = provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| eyre!("no latest block while detecting EVM fee mode"))?;
-        if block.header.base_fee_per_gas.is_some() {
+        let block: serde_json::Value = provider
+            .raw_request(
+                "eth_getBlockByNumber".into(),
+                (BlockNumberOrTag::Latest, false),
+            )
+            .await?;
+        let has_base_fee = block.get("baseFeePerGas").is_some_and(|v| !v.is_null());
+        if has_base_fee {
             Ok(Self::Eip1559)
         } else {
             Ok(Self::Legacy {

@@ -28,7 +28,6 @@ on:
           - Blast
           - Ethereum
           - Filecoin
-          - Flow
           - Hyperliquid
           - Immutable
           - Kava
@@ -55,7 +54,6 @@ on:
           - Blast
           - Ethereum
           - Filecoin
-          - Flow
           - Hyperliquid
           - Immutable
           - Kava
@@ -137,10 +135,6 @@ jobs:
       ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
       FILECOIN_MAINNET_RPC:        ${{ secrets.FILECOIN_MAINNET_RPC }}
       FILECOIN_TESTNET_RPC:        ${{ secrets.FILECOIN_TESTNET_RPC }}
-      FLOW_MAINNET_RPC:            ${{ secrets.FLOW_MAINNET_RPC }}
-      FLOW_TESTNET_RPC:            ${{ secrets.FLOW_TESTNET_RPC }}
-      FLOW_STAGENET_RPC:           ${{ secrets.FLOW_STAGENET_RPC }}
-      FLOW_DEVNET_AMPLIFIER_RPC:   ${{ secrets.FLOW_DEVNET_AMPLIFIER_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
       HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
