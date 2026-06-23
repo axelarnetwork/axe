@@ -31,6 +31,7 @@ on:
           - Flow
           - Hyperliquid
           - Immutable
+          - Kava
           - Linea
           - Mantle
           - Moonbeam
@@ -57,6 +58,7 @@ on:
           - Flow
           - Hyperliquid
           - Immutable
+          - Kava
           - Linea
           - Mantle
           - Moonbeam
@@ -143,6 +145,8 @@ jobs:
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
       HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
+      KAVA_MAINNET_RPC:            ${{ secrets.KAVA_MAINNET_RPC }}
+      KAVA_TESTNET_RPC:            ${{ secrets.KAVA_TESTNET_RPC }}
       MOONBEAM_MAINNET_RPC:        ${{ secrets.MOONBEAM_MAINNET_RPC }}
       MOONBEAM_TESTNET_RPC:        ${{ secrets.MOONBEAM_TESTNET_RPC }}
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}

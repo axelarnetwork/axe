@@ -173,6 +173,10 @@ pub async fn run_load_test_with_metrics(
         d
     };
 
+    // Legacy (pre-1559) source chains need type-0 txs; detect once and apply
+    // to each send. No-op on 1559 chains.
+    let fee_mode = super::gas_mode::EvmFeeMode::detect(&funding_provider).await?;
+
     // Fire txs in parallel, capped to avoid overwhelming the RPC.
     // Each send does multiple RPC calls (estimate gas, nonce, send, receipt),
     // so even 10 concurrent senders means ~40+ RPC calls in flight.
@@ -215,8 +219,19 @@ pub async fn run_load_test_with_metrics(
             // Retry with exponential backoff on rate-limit (429) errors
             let mut m = None;
             for attempt in 0..=MAX_RETRIES {
-                let result =
-                    execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, None).await;
+                let result = execute_and_record_evm(
+                    &provider,
+                    sr,
+                    &dc,
+                    &da,
+                    &tx_payload,
+                    gv,
+                    EvmTxOpts {
+                        nonce: None,
+                        fee_mode,
+                    },
+                )
+                .await;
 
                 if result.success || attempt == MAX_RETRIES {
                     m = Some(result);
@@ -333,6 +348,15 @@ pub async fn run_load_test_with_metrics(
 /// (including QuikNode) do not reliably return pending-mempool txs in
 /// `eth_getTransactionCount(addr, "pending")`, causing nonce collisions when the same
 /// key fires again within 3s before its previous tx confirms.
+/// Per-tx options for an EVM GMP send.
+#[derive(Clone, Copy)]
+struct EvmTxOpts {
+    /// When `Some`, sets the nonce directly (sustained mode — see below).
+    nonce: Option<u64>,
+    /// Legacy vs 1559 fee mode for the source chain.
+    fee_mode: super::gas_mode::EvmFeeMode,
+}
+
 async fn execute_and_record_evm<P: Provider>(
     provider: &P,
     sender_receiver_addr: Address,
@@ -340,21 +364,25 @@ async fn execute_and_record_evm<P: Provider>(
     dest_addr: &str,
     payload: &[u8],
     gas_value_wei: u128,
-    explicit_nonce: Option<u64>,
+    opts: EvmTxOpts,
 ) -> TxMetrics {
     let submit_start = Instant::now();
     let payload_hash = alloy::hex::encode(keccak256(payload));
 
     let sr = SenderReceiver::new(sender_receiver_addr, provider);
     let gas_value = alloy::primitives::U256::from(gas_value_wei);
-    let base_call = sr
+    let mut base_call = sr
         .sendPayload(
             dest_chain.to_string(),
             dest_addr.to_string(),
             Bytes::from(payload.to_vec()),
         )
         .value(gas_value);
-    let call = match explicit_nonce {
+    // Legacy (pre-1559) chains: send a type-0 tx with an explicit gas_price.
+    if let Some(gp) = opts.fee_mode.legacy_gas_price() {
+        base_call = base_call.gas_price(gp);
+    }
+    let call = match opts.nonce {
         Some(n) => base_call.nonce(n),
         None => base_call,
     };
@@ -474,6 +502,10 @@ pub(super) async fn run_sustained_load_test_with_metrics(
     )
     .await?;
 
+    // Legacy (pre-1559) source chains need type-0 txs; detect once and apply to
+    // each streamed send. No-op on 1559 chains.
+    let fee_mode = super::gas_mode::EvmFeeMode::detect(&funding_provider).await?;
+
     // Pre-fetch initial nonces.
     let nonce_provider = ProviderBuilder::new().connect_http(evm_rpc_url.parse()?);
     let mut nonces: Vec<u64> = Vec::with_capacity(pool_size);
@@ -530,14 +562,26 @@ pub(super) async fn run_sustained_load_test_with_metrics(
             let sc = source_chain.clone();
             let has_vv = has_voting_verifier;
             let legacy = legacy_route;
+            let fm = fee_mode;
 
             let provider = ProviderBuilder::new()
                 .wallet(derived[key_idx].clone())
                 .connect_http(url.parse().expect("invalid RPC URL"));
 
             Box::pin(async move {
-                let mut result =
-                    execute_and_record_evm(&provider, sr, &dc, &da, &tx_payload, gv, nonce).await;
+                let mut result = execute_and_record_evm(
+                    &provider,
+                    sr,
+                    &dc,
+                    &da,
+                    &tx_payload,
+                    gv,
+                    EvmTxOpts {
+                        nonce,
+                        fee_mode: fm,
+                    },
+                )
+                .await;
                 // Stream successful txs to the concurrent verification pipeline.
                 if result.success
                     && let Some(ref tx_sender) = vtx

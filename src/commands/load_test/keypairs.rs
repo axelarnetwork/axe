@@ -338,10 +338,17 @@ pub async fn ensure_funded_evm_with_extra<P: Provider>(
             .progress_chars("=> "),
     );
 
+    // Legacy (pre-1559) chains break alloy's default fee estimation; send the
+    // funding txs as type-0 with an explicit gas_price when needed. No-op on
+    // 1559 chains.
+    let fee_mode = super::gas_mode::EvmFeeMode::detect(provider).await?;
+
     for (i, amount) in &to_fund {
-        let tx = TransactionRequest::default()
-            .with_to(derived[*i].address())
-            .with_value(U256::from(*amount));
+        let tx = fee_mode.apply(
+            TransactionRequest::default()
+                .with_to(derived[*i].address())
+                .with_value(U256::from(*amount)),
+        );
         let pending = provider
             .send_transaction(tx)
             .await

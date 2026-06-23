@@ -1,5 +1,6 @@
 mod evm_sender;
 mod gas_estimate;
+mod gas_mode;
 mod gmp;
 mod helpers;
 mod its_evm_source;
