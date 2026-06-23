@@ -35,10 +35,11 @@ Legend: ✅ validated on-chain this pass · 🔆 validated in prior sessions ·
 |---|---|---|
 | **legacy-EVM ↔ legacy-EVM** (GMP) | ✅ | ✅ (extensive — §3) |
 | **legacy-EVM ↔ legacy-EVM** (ITS) | 🔆 (avalanche↔ethereum-sepolia) | ◻️ same delivery path as GMP; needs the ITS token registered per chain |
-| **legacy-EVM ↔ amplifier-EVM** (GMP/ITS) | 🔆 (avalanche↔monad-3) | — (no Amplifier-EVM on mainnet) |
-| **amplifier-EVM ↔ amplifier-EVM** | 🔆 (baseline cron routes) | — (no Amplifier-EVM on mainnet) |
-| **legacy-EVM ↔ non-EVM** (amplifier) | 🔆 (avalanche↔sui GMP, avalanche↔stellar ITS, xrpl-evm→avalanche ITS) | ⚠️ celo→solana GMP **routed** on Axelar but Solana approval/exec not confirmed in window (§3) |
-| **amplifier non-EVM ↔ EVM / non-EVM** | 🔆 (baseline) | ◻️ keys present, not exercised this pass |
+| **legacy-EVM → amplifier-EVM** (GMP) | ✅ avalanche→celo-sepolia (monad-3 reached approved but its executor stalled) | — (no Amplifier-EVM on mainnet) |
+| **amplifier-EVM → legacy-EVM** (GMP) | ✅ xrpl-evm→scroll | — |
+| **amplifier-EVM ↔ amplifier-EVM** (GMP) | ✅ hyperliquid→celo-sepolia | — |
+| **legacy-EVM ↔ non-EVM** (amplifier) | 🔆 (avalanche↔sui GMP, avalanche↔stellar ITS, xrpl-evm→avalanche ITS) | ✅ both ways: avalanche→solana ✅, avalanche→stellar ✅, sui→base ✅, stellar→arbitrum ✅ (§3b) |
+| **amplifier non-EVM ↔ non-EVM** (GMP) | 🔆 (baseline) | ✅ solana→sui (§3b) |
 
 GMP is the cross-chain **delivery** primitive; ITS rides the identical
 verify→approve→execute path and additionally needs its token registered on each
@@ -99,12 +100,36 @@ accounting (Mantle) — pass an explicit `--gas-value`.**
 scroll/blast/fraxtal work fine as **destinations** (cheap one-time deploy); they
 just can't be **sources** until the wallet holds ~0.05 native there.
 
-**Partial — `celo → solana`** (legacy-EVM → amplifier non-EVM): the message was
-verified and **`routed`** through the Axelar router to Solana, but the
-Solana-side `approved`/`executed` steps didn't complete within the inactivity
-window (slow Solana approval relayer and/or gas). The hard part — a legacy-EVM
-source reaching the Axelar router and routing to a non-EVM amplifier chain —
-worked; final Solana execution is unconfirmed this pass.
+---
+
+## 3b. Amplifier route validation (this pass — GMP, on-chain)
+
+**Mainnet — non-EVM amplifier chains** (cross-checked both directions):
+
+| Route | Class | Result |
+|---|---|---|
+| avalanche → solana | legacy-EVM → amplifier (non-EVM) | ✅ executed (routed→approved→executed, 76s) |
+| avalanche → stellar | legacy-EVM → amplifier (non-EVM) | ✅ executed |
+| sui → base | amplifier (non-EVM) → legacy-EVM | ✅ executed |
+| stellar → arbitrum | amplifier (non-EVM) → legacy-EVM | ✅ executed |
+| solana → sui | amplifier ↔ amplifier (non-EVM) | ✅ executed |
+
+Solana, Sui, Stellar are all funded on mainnet and worked as both source and
+destination across these routes. Note: `celo → solana` first **stalled at
+`routed`** — that was cheap-token (CELO) gas underpayment for the Solana side;
+`avalanche → solana` (rich AVAX + `--gas-value 0.02`) executed cleanly, so the
+§3 gas rule applies to non-EVM destinations too. XRPL is ITS-only (no GMP);
+not exercised this pass.
+
+**Testnet — amplifier-EVM chains** (chains with a `VotingVerifier`; full
+voted→routed→approved→executed pipeline):
+
+| Route | Class | Result |
+|---|---|---|
+| hyperliquid → celo-sepolia | amplifier-EVM ↔ amplifier-EVM | ✅ executed (voted+routed+approved+executed) |
+| xrpl-evm → scroll | amplifier-EVM → legacy-EVM | ✅ executed |
+| avalanche → celo-sepolia | legacy-EVM → amplifier-EVM | ✅ executed |
+| avalanche → monad-3 | legacy-EVM → amplifier-EVM | ⚠️ reached `approved` on monad but execution stalled — monad's testnet executor is flaky (known); delivery confirmed |
 
 ---
 
@@ -156,8 +181,9 @@ XRPL EVM.
 - **ITS on mainnet** is not exercised in this pass — it uses the same delivery
   path as GMP (validated) but additionally needs its token registered on each
   endpoint. Validated on testnet (avalanche↔ethereum-sepolia).
-- **Non-EVM (Sui/Stellar/XRPL) on mainnet** — keys are present locally but these
-  routes were not exercised this pass; Solana (legacy↔amplifier) is in validation.
+- **Non-EVM on mainnet** — Solana, Sui, Stellar validated for GMP (§3b). XRPL is
+  ITS-only (no GMP) and was not exercised. The exact reverse directions not run
+  (e.g. EVM→Sui, Solana→EVM) ride the same path as the directions that passed.
 - **Optimism as a *source* on a fresh deploy** fails with "intrinsic gas too
   high" (an op-stack initcode quirk, every RPC) — works as a destination and with
   a cached SenderReceiver. Pre-existing, unrelated to the legacy work.
