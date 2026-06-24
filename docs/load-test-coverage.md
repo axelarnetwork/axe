@@ -37,7 +37,7 @@ XRPL has no contract execution model — it can only carry token payments via IT
 
 ¹ Module `its_stellar_to_sol` exists and the dispatch is wired, but the **Stellar testnet ITS contract** (`CC7L…M5YP`) has not added `solana` to its trusted-chains list. The run reaches Stellar simulation and reverts with `Contract Error #7 (UntrustedChain)`. The fix is upstream: the contract owner runs `ts-node stellar/its.js add-trusted-chains solana` from `axelar-contract-deployments`. Once that's in, this pair starts working with no code changes here.
 
-² `stellar-2026-q1-2 → flow` ITS passed in a one-transaction testnet smoke run. `flow → stellar-2026-q1-2` ITS also passed after the runner verified the remote token deploy executed and the token was registered on Stellar before sending transfers. The Flow→Stellar default gas value is inferred as `1000000000000000000` wei; override it with `--gas-value` only when testing a different funding assumption. The runner fails before transfer if a provided/cached token ID is not registered on Stellar ITS.
+² `EVM → Stellar` ITS is validated end-to-end (`avalanche → stellar-2026-q1-2` on testnet, `hyperliquid → stellar` on mainnet). The runner verifies the remote token deploy executed and the token was registered on Stellar before sending transfers, and fails before transfer if a provided/cached token id is not registered on Stellar ITS. The default EVM→Stellar gas value is `1000000000000000000` wei; override it with `--gas-value` only when testing a different funding assumption.
 
 ## Outstanding Sui implementation work
 
@@ -59,7 +59,7 @@ Until (1)/(2) land, the bail messages from the dispatcher tell the user exactly 
 
 ## Per-environment chain availability
 
-Whether a pair works also depends on whether both chains are deployed on the chosen environment:
+Whether a pair works also depends on whether both chains are deployed on the chosen environment. For the exact per-network roster of all 23 wired chains (the EVM "many" expanded out), see [routes.md §1](routes.md#1-the-23-wired-chains-by-type).
 
 | Env | EVM chains | Solana | Stellar | Sui | XRPL | XRPL-EVM | Notes |
 |---|---|---|---|---|---|---|---|
