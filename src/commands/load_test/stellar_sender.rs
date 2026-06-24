@@ -401,6 +401,13 @@ pub fn mainnet_per_key_balance_stroops(gas_stroops_per_tx: u64, txs_per_key: u64
 /// Uses the same `keccak256(main_seed || index)` pattern as the rest of axe
 /// (Solana/EVM/XRPL) so re-runs recover the same ephemeral accounts.
 pub fn derive_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<StellarWallet>> {
+    // Single sender → main wallet directly (no ephemeral account to fund or to
+    // leave its ~1 XLM base reserve parked in).
+    if count <= 1 {
+        return Ok((0..count)
+            .map(|_| StellarWallet::from_seed(main_seed))
+            .collect());
+    }
     (0..count)
         .map(|i| {
             let mut seed_input = Vec::with_capacity(40);

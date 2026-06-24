@@ -240,6 +240,15 @@ pub fn ensure_funded_for_sustained(
 /// Uses the same `keccak256(main_key || index)` pattern as `derive_keypairs()`.
 /// Each 32-byte hash is a valid secp256k1 private key.
 pub fn derive_evm_signers(main_key: &[u8; 32], count: usize) -> Result<Vec<PrivateKeySigner>> {
+    // A single sender needs no parallelism — use the main wallet itself, so a
+    // one-off run never funds (and never leaves gas + the msg.sender gas refund
+    // parked in) a throwaway subwallet. Parallel runs (count >= 2) still get
+    // distinct derived wallets to avoid nonce contention.
+    if count <= 1 {
+        let main = PrivateKeySigner::from_bytes(&(*main_key).into())
+            .map_err(|e| eyre!("invalid main EVM key: {e}"))?;
+        return Ok(vec![main; count]);
+    }
     (0..count)
         .map(|i| {
             let mut seed_input = Vec::with_capacity(40);
@@ -399,6 +408,13 @@ use crate::xrpl::{XrplClient, XrplWallet};
 /// derivation, so re-runs always get the same ephemeral wallets and we can
 /// reuse their on-chain reserves.
 pub fn derive_xrpl_wallets(main_seed: &[u8; 32], count: usize) -> Result<Vec<XrplWallet>> {
+    // Single sender → use the main wallet (no throwaway wallet to fund, and no
+    // ~10 XRP base reserve left parked in an ephemeral account).
+    if count <= 1 {
+        let main =
+            XrplWallet::from_bytes(main_seed).map_err(|e| eyre!("invalid main XRPL seed: {e}"))?;
+        return Ok(vec![main; count]);
+    }
     (0..count)
         .map(|i| {
             let mut seed_input = Vec::with_capacity(40);
