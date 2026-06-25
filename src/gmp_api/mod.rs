@@ -9,7 +9,7 @@
 
 mod types;
 
-pub use types::{ExpressRecord, Phase1, Phase2};
+pub use types::{AmountCheck, ExpressRecord, Phase1, Phase2};
 
 use eyre::{Context, Result};
 use serde::Deserialize;

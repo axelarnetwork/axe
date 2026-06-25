@@ -88,10 +88,16 @@ the canonical GMP proof lands, then is **reimbursed** when the canonical
 execute tx). The command reports two phases per transfer: **Phase 1** —
 express executed (executor EOA / contract + express tx), and **Phase 2** —
 executor reimbursed (canonical execute tx), or PENDING/timeout if the execute
-hasn't landed. Two modes: a chains scan (newest `--recent` express transfers per
-chain) and a single-tx watch (`--source-tx`, polled every 10 s up to
-`--timeout-secs`, default 1800). It needs no wallet keys, RPCs, or chains-config
-— GMP-API reads only. CI: `.github/workflows/test-express-execution.yml`.
+hasn't landed. On reimbursement it also runs an **amount check** (MOU-27): it
+decodes the executor EOA's outbound ERC-20 `Transfer`s in the express tx
+(fronted) and its inbound `Transfer`s in the execute tx (reimbursed), both from
+the GMP-API receipt logs, and asserts the two are equal. A mismatch or a missing
+inbound transfer is surfaced as an error and **fails** the single-tx watch
+(non-zero exit); the fronted/reimbursed base-unit amounts are printed either way.
+Two modes: a chains scan (newest `--recent` express transfers per chain) and a
+single-tx watch (`--source-tx`, polled every 10 s up to `--timeout-secs`, default
+1800). It needs no wallet keys, RPCs, or chains-config — GMP-API reads only. CI:
+`.github/workflows/test-express-execution.yml`.
 
 **v1 is monitor-only.** axe does **not** yet originate a qualifying express
 transfer — producing one requires routing through an express-enabled project
@@ -114,9 +120,10 @@ landed":
 
 Two ethereum-source transfers were also caught mid-flight (`express_executed`,
 execute not yet landed) — the source-finality wait the monitor reports as Phase 2
-PENDING. Known monitor limitation: Phase 2 confirms the canonical execute exists,
-not that the reimbursed amount equals the fronted amount; the amount-equality
-invariant above was checked manually, not by the tool.
+PENDING. The amount-equality invariant above is now asserted **by the tool**
+(MOU-27): Phase 2 decodes the executor EOA's outbound `Transfer` in the express
+tx and inbound `Transfer` in the execute tx from the GMP-API receipt logs and
+fails on mismatch or missing inbound — no longer a manual check.
 
 ---
 

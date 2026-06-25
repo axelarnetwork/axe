@@ -22,9 +22,9 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use eyre::Result;
+use eyre::{Result, eyre};
 
-use crate::gmp_api::{self, ExpressRecord, Phase1, Phase2};
+use crate::gmp_api::{self, AmountCheck, ExpressRecord, Phase1, Phase2};
 use crate::timing::EXPRESS_POLL_INTERVAL;
 use crate::types::Network;
 use crate::ui;
@@ -93,8 +93,13 @@ async fn poll_single_tx(base: &str, tx: &str, timeout_secs: u64) -> Result<()> {
             }
             (Phase1::Executed { .. }, Phase2::Reimbursed { .. }) => {
                 print_phase2(&phase2);
+                let check = record.reimbursement_amount_check();
+                report_amount_check(check.as_ref(), record.symbol.as_deref());
+                if let Some(reason) = amount_check_failure(check.as_ref()) {
+                    return Err(eyre!("express reimbursement amount check failed: {reason}"));
+                }
                 ui::success(&format!(
-                    "express executor reimbursed ({})",
+                    "express executor reimbursed in full ({})",
                     ui::format_elapsed(start)
                 ));
                 return Ok(());
@@ -169,6 +174,10 @@ fn print_record_report(index: usize, total: usize, record: &ExpressRecord) {
     let (phase1, phase2) = record.phase_status();
     print_phase1(&phase1);
     print_phase2(&phase2);
+    if matches!(phase2, Phase2::Reimbursed { .. }) {
+        let check = record.reimbursement_amount_check();
+        report_amount_check(check.as_ref(), record.symbol.as_deref());
+    }
 }
 
 fn print_phase1(phase1: &Phase1) {
@@ -209,5 +218,56 @@ fn print_phase2(phase2: &Phase2) {
         Phase2::NotApplicable => {
             ui::info("Phase 2: n/a (no express execution to reimburse)");
         }
+    }
+}
+
+/// Print the fronted-vs-reimbursed amount verdict. Amounts are raw token base
+/// units (the GMP API does not surface the token contract).
+fn report_amount_check(check: Option<&AmountCheck>, symbol: Option<&str>) {
+    let unit = symbol.map(|s| format!(" {s}")).unwrap_or_default();
+    match check {
+        Some(AmountCheck::Match { amount }) => {
+            ui::success(&format!(
+                "amount check: fronted == reimbursed = {amount}{unit} (base units)"
+            ));
+        }
+        Some(AmountCheck::Mismatch {
+            fronted,
+            reimbursed,
+        }) => {
+            ui::error(&format!(
+                "amount MISMATCH: fronted {fronted}{unit} != reimbursed {reimbursed}{unit} (base units)"
+            ));
+        }
+        Some(AmountCheck::MissingInbound { fronted }) => {
+            ui::error(&format!(
+                "amount check: executor fronted {fronted}{unit} but received nothing back in the execute tx"
+            ));
+        }
+        Some(AmountCheck::NoFrontedTransfer) => {
+            ui::warn(
+                "amount check: no executor outbound transfer in the express tx — cannot assert (non-EVM / non-ERC-20 leg?)",
+            );
+        }
+        None => {
+            ui::info("amount check: unavailable (execute receipt not yet indexed)");
+        }
+    }
+}
+
+/// The reasons a reimbursement must be treated as a failure rather than a pass:
+/// the amounts disagree, or the executor was never paid back.
+fn amount_check_failure(check: Option<&AmountCheck>) -> Option<String> {
+    match check {
+        Some(AmountCheck::Mismatch {
+            fronted,
+            reimbursed,
+        }) => Some(format!(
+            "fronted {fronted} != reimbursed {reimbursed} (base units)"
+        )),
+        Some(AmountCheck::MissingInbound { fronted }) => Some(format!(
+            "executor fronted {fronted} (base units) but no inbound transfer in the execute tx"
+        )),
+        _ => None,
     }
 }
