@@ -76,6 +76,28 @@ GMP is the cross-chain **delivery** primitive; ITS rides the identical
 verify→route→approve→execute path and additionally needs its token registered on
 each endpoint. Validating GMP validates the delivery path for both.
 
+### `test express-execution` — express-reimbursement monitor (observe-only)
+
+`axe test express-execution <chains…> [--source-tx <hash>] [--network …]
+[--recent N] [--timeout-secs N]` monitors Axelar **express execution
+reimbursement** via the Axelarscan GMP API (`/gmp/searchGMP`; testnet base for
+testnet/stagenet/devnet, mainnet base for mainnet). Express = a relayer fronts
+tokens to the recipient on the destination ITS edge (`expressExecute`) *before*
+the canonical GMP proof lands, then is **reimbursed** when the canonical
+`ITS.execute` lands (`ExpressExecutionFulfilled` fires atomically inside that
+execute tx). The command reports two phases per transfer: **Phase 1** —
+express executed (executor EOA / contract + express tx), and **Phase 2** —
+executor reimbursed (canonical execute tx), or PENDING/timeout if the execute
+hasn't landed. Two modes: a chains scan (newest `--recent` express transfers per
+chain) and a single-tx watch (`--source-tx`, polled every 10 s up to
+`--timeout-secs`, default 1800). It needs no wallet keys, RPCs, or chains-config
+— GMP-API reads only. CI: `.github/workflows/test-express-execution.yml`.
+
+**v1 is monitor-only.** axe does **not** yet originate a qualifying express
+transfer — producing one requires routing through an express-enabled project
+(e.g. the Squid router), which is an open board decision tracked as a follow-up.
+v1 only observes reimbursement on transfers initiated elsewhere.
+
 ---
 
 ## 3. Validated on-chain — executed end-to-end

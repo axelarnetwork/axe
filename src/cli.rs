@@ -231,6 +231,33 @@ pub enum TestCommands {
         fresh_token: bool,
     },
 
+    /// Monitor express-execution reimbursement (observe-only): for each chain
+    /// report recent express transfers' two phases (express-executed →
+    /// executor reimbursed), or watch a single source tx through both phases.
+    ExpressExecution {
+        /// Express-supported chains to monitor (axelar IDs / config keys).
+        /// Ignored when `--source-tx` is given.
+        chains: Vec<String>,
+
+        /// Monitor exactly this source tx through both phases (overrides the
+        /// chains scan).
+        #[arg(long)]
+        source_tx: Option<String>,
+
+        /// Path to chains config JSON (reserved; chain ids are passed directly).
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// How many recent express transfers per chain to report in scan mode.
+        #[arg(long, default_value = "5")]
+        recent: usize,
+
+        /// Seconds to wait for the canonical execute (reimbursement) in
+        /// single-tx mode before reporting PENDING/timeout.
+        #[arg(long, default_value = "1800")]
+        timeout_secs: u64,
+    },
+
     /// Cross-chain load test (auto-detects chains, RPCs, and test type from config)
     LoadTest {
         /// Path to chains config JSON (e.g. devnet-amplifier.json,

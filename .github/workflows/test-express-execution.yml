@@ -1,0 +1,78 @@
+name: Test Express Execution
+
+# Observe-only monitor for Axelar express-execution reimbursement. For each
+# requested express-supported chain it queries the Axelarscan GMP API and
+# reports, per recent express transfer, the two phases:
+#   Phase 1 — express executed (a relayer fronted funds to the recipient)
+#   Phase 2 — executor reimbursed (canonical ITS.execute landed, firing
+#             ExpressExecutionFulfilled atomically)
+#
+# This is a MONITOR, not an executor: axe never originates an express transfer
+# and never relays. The command reads the public GMP API only — no wallet keys,
+# RPC overrides, or chains-config are needed, so this workflow defines no
+# secrets and no per-chain RPC env block.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chains:
+        description: Express-supported chains to monitor (space- or comma-separated axelar ids, e.g. "avalanche linea")
+        type: string
+        required: true
+      network:
+        description: Axelar network (testnet + mainnet have express data)
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - testnet
+          - mainnet
+
+jobs:
+  express-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build-or-download strategy mirrors test-amplifier-routes.yml so a code
+      # change automatically invalidates a stale prebuilt artifact.
+      - name: Download pre-built axe (${{ github.sha }})
+        id: download_axe
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build-axe.yml
+          name: axe-${{ github.sha }}
+          commit: ${{ github.sha }}
+          path: target/release
+          if_no_artifact_found: warn
+
+      - name: Mark pre-built axe executable
+        if: steps.download_axe.outputs.found_artifact == 'true'
+        shell: bash
+        run: chmod +x target/release/axe
+
+      - name: Set up Rust toolchain (fallback)
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache (fallback)
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build axe (fallback)
+        if: steps.download_axe.outputs.found_artifact != 'true'
+        shell: bash
+        run: cargo build --release --locked
+
+      - name: Monitor express execution
+        shell: bash
+        env:
+          CHAINS: ${{ inputs.chains }}
+          NETWORK: ${{ inputs.network }}
+        run: |
+          set -euo pipefail
+          # Inputs are space- or comma-separated; normalise commas to spaces and
+          # forward each chain as a positional arg.
+          read -ra CHAIN_ARGS <<< "${CHAINS//,/ }"
+          ./target/release/axe test express-execution "${CHAIN_ARGS[@]}" --network "$NETWORK"

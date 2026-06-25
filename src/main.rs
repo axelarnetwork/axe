@@ -170,6 +170,24 @@ async fn main() -> Result<()> {
                     commands::test_its::run(axelar_id).await
                 }
             }
+            cli::TestCommands::ExpressExecution {
+                chains,
+                source_tx,
+                config,
+                recent,
+                timeout_secs,
+            } => {
+                let network = cli::resolve_network(cli.network, config.as_deref())?;
+                commands::test_express::run_config(
+                    config,
+                    network,
+                    chains,
+                    source_tx,
+                    recent,
+                    timeout_secs,
+                )
+                .await
+            }
             cli::TestCommands::LoadTest {
                 config,
                 test_type,
