@@ -98,6 +98,26 @@ transfer — producing one requires routing through an express-enabled project
 (e.g. the Squid router), which is an open board decision tracked as a follow-up.
 v1 only observes reimbursement on transfers initiated elsewhere.
 
+**On-chain reimbursement verified (MOU-26, mainnet, 2026-06-25).** The monitor's
+API-derived "reimbursed" flag was cross-checked against the destination-chain
+receipts for three real express transfers spanning the finality spectrum. In
+every case the express executor EOA `0xe743…cea84` pays out token amount X in the
+express tx and receives the **exact same X** back (mint → executor) inside the
+canonical execute tx — full, exact-amount reimbursement, not just "execute
+landed":
+
+| source (finality) | route | express→execute gap | amount fronted = reimbursed |
+| --- | --- | --- | --- |
+| avalanche (~instant) | → moonbeam | 78 s | `0xbe4488` |
+| base (moderate) | → avalanche | 1527 s | `0x119db3af5` |
+| ethereum (~13–16 min) | → polygon | 1079 s | `0x49292` |
+
+Two ethereum-source transfers were also caught mid-flight (`express_executed`,
+execute not yet landed) — the source-finality wait the monitor reports as Phase 2
+PENDING. Known monitor limitation: Phase 2 confirms the canonical execute exists,
+not that the reimbursed amount equals the fronted amount; the amount-equality
+invariant above was checked manually, not by the tool.
+
 ---
 
 ## 3. Validated on-chain — executed end-to-end
