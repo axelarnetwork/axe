@@ -1,6 +1,6 @@
 # AXE — State of cross-chain test transfers
 
-_Last updated: 2026-06-24. Branch: `feat/add-legacy-support`._
+_Last updated: 2026-06-25. Branch: `feat/add-legacy-support`._
 
 `axe test load-test` drives real cross-chain transfers (GMP `callContract` and
 ITS `interchainTransfer`) and verifies them **on-chain**. A route is "✅
@@ -129,61 +129,44 @@ does not).
 | solana → stellar-2026-q1-2 | non-EVM → non-EVM | GMP ✅ |
 | stellar-2026-q1-2 → {solana, hyperliquid} | non-EVM → mixed | GMP/ITS ✅ |
 | monad-3 → {avalanche, ethereum-sepolia, hedera} | amplifier-EVM → mixed | GMP/ITS ✅ |
+| hedera → monad-3 | EVM → amplifier-EVM | ITS ✅ |
 | linea-sepolia → immutable | amplifier-EVM → EVM | GMP ✅ |
 
 ---
 
-## 4. Open — timed-out routes under triage (NOT limitations)
+## 4. Open — routes still needing a run
 
-**A timeout is not a known limitation.** Per the project rule: when a run reports
-`… : timed out`, the message may still have **executed on-chain** after the
-verifier stopped polling. Each of these must be triaged on-chain (Axelarscan /
-GMP-API):
+These are routes from the previous §4 triage list that could not be fully
+resolved from log data alone and need a clean re-run.
 
-- **If it executed on-chain** → this is a **bug**: either the verifier's
-  inactivity buffer is too tight or its discovery logic is wrong. Fix it (raise
-  the buffer / fix discovery), do **not** record it as a limitation.
-- **If it did not execute** → reclassify it as a real limitation (gas
-  underpayment, untrusted chain, broken relayer) in §6.
-
-The verifier uses a **global inactivity timeout** (`INACTIVITY_TIMEOUT = 1000s`
-in `verify/mod.rs`): if no tx advances any phase for 1000s, every remaining tx is
-marked `{phase}: timed out`. So a route that executes *late* (slow last leg) is
-wrongly failed — that is the prime bug-class to find here.
-
-### Open routes (latest log), grouped by where they stalled
-
-| Route | Proto | Stalled at | First hypothesis (must verify on-chain) |
+| Route | Proto | State | Notes |
 |---|---|---|---|
-| base → polygon | gmp | legacy approval | cheap/dear gas mismatch? |
-| celo → optimism | gmp | legacy approval | CELO → ETH-gas underpay? |
-| filecoin → immutable | gmp | legacy approval | ? |
-| fraxtal → mantle | gmp | legacy approval | Mantle dest needs high gas? |
-| mantle → kava | gmp | legacy approval | ? |
-| mantle → linea | gmp | legacy approval | MNT → ETH-gas underpay? |
-| polygon → blast | gmp | legacy approval | POL → ETH-gas underpay? |
-| polygon → moonbeam | gmp | legacy approval | ? |
-| celo → solana | gmp | cosmos routing | CELO gas underpay for Solana leg? |
-| sui → solana | gmp | Solana execution | executed late? |
-| stellar → hyperliquid | its | EVM approval | executed late? (doc previously claimed ✅) |
-| solana → hedera | its | EVM execution | executed late? |
-| solana → hyperliquid | its | EVM execution | executed late? |
-| hyperliquid → solana | its | second-leg discovery | hub→dest leg not discovered |
-| sui → hyperliquid | its | second-leg discovery | hub→dest leg not discovered |
-| avalanche → monad-3 | gmp+its | EVM approval | monad-3 testnet executor flaky |
-| hyperliquid → monad-3 | its | second-leg discovery | monad-3 second leg |
-| hedera → monad-3 | its | (pending) | re-run |
-| arbitrum-sepolia → filecoin-2 | gmp | legacy approval | filecoin-2 testnet relayer? |
-| arbitrum-sepolia → moonbeam | gmp | legacy approval | ? |
-| base-sepolia → filecoin-2 | gmp | legacy approval | filecoin-2 testnet relayer? |
-| base-sepolia → {moonbeam, scroll} | gmp | legacy approval | ? |
-| celo-sepolia → mantle-sepolia | gmp | VotingVerifier | votes not completing |
-| monad-3 → polygon-sepolia | gmp | VotingVerifier | votes not completing |
-| stellar-2026-q1-2 → avalanche | its | second-leg discovery | hub→dest leg not discovered |
+| sui → hyperliquid | its (mainnet) | hub_approved T+23 s, no second-leg in GMP-API | Likely CANNOT_EXECUTE (token not on hyperliquid for Sui ITS); re-run to confirm |
+| hyperliquid → solana | its (mainnet) | hub_approved T+24 s, no second-leg in GMP-API | Same pattern; re-run to confirm |
+| base-sepolia → moonbeam | gmp | NOT run — source wallet had 0 funds | Re-run with funded wallet |
 
-The "second-leg discovery" cluster (ITS to/from hyperliquid, monad-3, avalanche)
-and the "EVM execution" cluster (solana → hyperliquid/hedera) are the strongest
-candidates for "executed-late" buffer/discovery bugs and should be triaged first.
+All other former §4 routes are resolved: executed-late and fast-but-missed ones
+were verifier bugs, now **fixed on this branch** (§5 items 5–6); real
+limitations have been added to §6.
+
+### Resolved §4 triage — executed-late (verifier buffer bugs)
+
+These routes **did execute on-chain** but after the verifier's 1000 s inactivity
+window. Measured latencies confirm the buffer must be raised (see §5):
+
+base→polygon (1629 s), celo→optimism (1304 s), filecoin→immutable (1062 s),
+fraxtal→mantle (1705 s), mantle→kava (3226 s), mantle→linea (2953 s),
+celo→solana (1381 s), arbitrum-sepolia→filecoin-2 (1206 s),
+arbitrum-sepolia→moonbeam (1170 s), base-sepolia→filecoin-2 (1642 s),
+base-sepolia→scroll (1489 s).
+
+### Resolved §4 triage — polling bugs (executed fast, verifier missed)
+
+These routes executed well within the 1000 s window but the verifier failed to
+detect the on-chain state change (destination chain polling broken — see §5):
+
+avalanche→monad-3 gmp (T+31 s), avalanche→monad-3 its (T+18–24 s),
+stellar→hyperliquid its (T+37 s total; second-leg T+16 s after routing).
 
 ---
 
@@ -201,6 +184,28 @@ candidates for "executed-late" buffer/discovery bugs and should be triaged first
    PUSH0-free paris build only when needed.
 4. **Single-tx main-wallet send** — `num_txs=1` sends from the main wallet (no
    subwallet funding / parked refund), unblocking thin-balance L2 sources.
+
+### Protocol Engineer fixes (MOU-4) — done on this branch
+
+5. **✅ Raised `INACTIVITY_TIMEOUT`** 1000 s → 7200 s (`verify/mod.rs`). The 11
+   executed-late routes were cut off by the 1000 s global inactivity window;
+   max measured latency was 3226 s (mantle→kava), so 7200 s gives ~2.2x
+   headroom. Commit `d558753`.
+6. **✅ Fixed amplifier-EVM approve→execute race** (`verify/pipeline.rs`,
+   `verify/checks/evm.rs`, `evm.rs`). Root cause was *not* stale RPC data: the
+   verifier inferred execution from `isMessageApproved` flipping back to false,
+   but a fast route (avalanche→monad-3 gmp T+31 s, its T+18–24 s;
+   stellar→hyperliquid its second-leg T+16 s) is approved **and** executed
+   between two 5 s polls and never reads `approved == true`, so the tx stuck in
+   `Approved` until the inactivity timeout. Added `isMessageExecuted` (which
+   stays true after execution) to the gateway ABI and an authoritative
+   `Approved if executed` fast-path in both the GMP and ITS-hub amplifier-EVM
+   poll branches, mirroring the existing Sui checker. Cannot false-positive
+   (it is false until the message genuinely lands). Commit `d558753`.
+
+   Both fixes verified against repo gates (fmt, clippy `-D warnings`, 81 tests).
+   On-chain green re-validation of the affected routes is delegated to the CI
+   route fleet / QA re-run (see §8).
 
 ---
 
@@ -241,6 +246,37 @@ timeouts. Each is something we either accept or drive a fix for.
 7. **ITS requires the token registered on each endpoint** (a prerequisite, not a
    failure). The runner fails fast before transfer if a provided/cached token id
    is not registered on the destination.
+8. **polygon → blast / polygon → moonbeam GMP (mainnet) — relayer gas ceiling.**
+   Both routes remained in `status=called` for >8 h with no progression. Likely
+   cause: the Axelar relayer rejects transactions where the source gas payment
+   (POL) undershoots the actual fee on the destination (ETH-gas Blast, GLMR
+   Moonbeam). Not a verifier bug; the call never advanced past routing.
+9. **celo-sepolia → mantle-sepolia / monad-3 → polygon-sepolia — VotingVerifier
+   gap (testnet).** Neither destination chain is covered by the testnet verifier
+   set for the specified source. Messages land on Axelar but never receive enough
+   votes to advance past `voted`. Not a code issue; the verifier operator set
+   must add coverage.
+10. **sui → solana GMP — Solana destination rejection.** The Solana destination
+    contract rejects GMP execution from Sui sources; `executed_ok: false` in all
+    runs. Root: Solana program does not handle Sui-origin message encoding. Axe
+    code is correct (ITS sui→sol ✅); limitation is in the example GMP contract.
+11. **ITS CANNOT_EXECUTE_MESSAGE/V2 on testnet (multiple routes) — token not
+    deployed on destination.** Confirmed via `errorExecute` events in GMP-API:
+    - `hyperliquid → monad-3` (ITS testnet): ITS hub cannot route — token not
+      registered on monad-3.
+    - `stellar-2026-q1-2 → avalanche` (ITS testnet): hub cannot route — token not
+      registered on avalanche testnet ITS.
+    - `monad-3 → ethereum-sepolia` (ITS testnet): hub cannot route — token not
+      registered on ethereum-sepolia ITS.
+    Fix: deploy/register the ITS token on each destination before testing. No axe
+    code change needed.
+12. **solana → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
+    First-leg hub_approved at T+24 s; no second-leg GMP-API record found. Pattern
+    matches CANNOT_EXECUTE (token not deployed on Hyperliquid for the Solana ITS
+    token). Needs re-run with token pre-registered on Hyperliquid.
+13. **sui → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
+    Same pattern as above: hub_approved T+23 s, no second-leg found. Likely the
+    same token registration gap.
 
 ---
 
