@@ -213,12 +213,23 @@ backstop).
 - Fast non-EVM routes (stellar, sui, solana) typically execute in < 60 s; axe's
   5 s poll interval + live verifier may miss execution before a short per-run cap,
   but the `recovered_via_api` GMP-API backstop correctly catches them.
-- EVM destination view-call retry fixed (`8e1f972`) — transient RPC errors no
-  longer fail the verifier loop prematurely.
+- EVM destination view-call retry fixed (`8e1f972`) — transient RPC errors on
+  `isMessageApproved` / `isMessageExecuted` / `isCommandExecuted` no longer fail
+  the verifier loop prematurely.
+- **Stellar destination view-call retry fixed (`55e3dbe`)** — same bug class as
+  the EVM fix, surfaced empirically by this batch: the hyperliquid→stellar route
+  (08) **executed on-chain at T+13–31 s**, but axe's verifier crashed (exit 1) on
+  a transient Stellar RPC *connection reset* at `stellar/rpc.rs:746`
+  (`simulate_view` → `simulate_transaction_envelope`, no retry). Wrapped the
+  read-only simulation in `retry_all`, mirroring the EVM + XRPL patterns.
 - `INACTIVITY_TIMEOUT=7200 s` and `POLL_INTERVAL=5 s` are correctly sized for the
   observed latency distribution (max seen: 3226 s for mantle→kava).
-- Routes 08/10 needed re-runs due to source-side setup cap / RPC flake, not
-  protocol failures. Route 14 sent and executed in its original run.
+- Re-run notes: route 10 (avalanche→stellar) was a source-side setup cap on the
+  first pass (SenderReceiver deploy still confirming when the batch cap fired);
+  it passes cleanly with a longer cap. Route 14 (avalanche→base) executed on-chain
+  at T+2 s; an axe-side verify error only appeared when a token-gated public Base
+  RPC rejected the archive `getLogs` scan — an RPC-selection issue, not an axe
+  bug (use a private/full Base RPC for the legacy `ContractCallApproved` scan).
 
 ---
 
