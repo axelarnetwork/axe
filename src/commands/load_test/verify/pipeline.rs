@@ -23,7 +23,8 @@ use tokio::sync::mpsc;
 
 use super::PendingTx;
 use super::checks::{
-    batch_check_solana_incoming_messages, check_evm_command_executed, check_evm_is_message_approved,
+    batch_check_solana_incoming_messages, check_evm_command_executed,
+    check_evm_is_message_approved, check_evm_is_message_executed,
 };
 use super::legacy;
 use super::report::compute_peak_throughput;
@@ -503,7 +504,15 @@ pub(super) async fn poll_pipeline<P: Provider>(
                                 p_hash,
                             )
                             .await?;
-                            Ok((i, phase, approved))
+                            // `isMessageApproved` flips back to false the moment
+                            // the message executes, so a fast route can be
+                            // approved+executed between two polls and never show
+                            // `approved == true`. `isMessageExecuted` stays true,
+                            // so it catches that race regardless of source type.
+                            let executed =
+                                check_evm_is_message_executed(gw_contract, source_chain, &msg_id)
+                                    .await?;
+                            Ok((i, phase, approved, executed))
                         });
                     }
                     let results: Vec<Result<_>> = futures::stream::iter(futs)
@@ -511,8 +520,26 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         .collect()
                         .await;
                     for result in results {
-                        let (i, phase, approved) = result?;
+                        let (i, phase, approved, executed) = result?;
                         match phase {
+                            // Authoritative fast-path: the message is already
+                            // executed on the destination gateway. Catches the
+                            // approve→execute-between-polls race that left fast
+                            // amplifier routes (monad-3, hyperliquid) stuck in
+                            // Approved until the inactivity timeout. Safe for the
+                            // consensus-source case too: `isMessageExecuted` is
+                            // false until the message genuinely lands, so it
+                            // cannot conclude success prematurely.
+                            Phase::Approved if executed => {
+                                let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                if txs[i].timing.approved_secs.is_none() {
+                                    txs[i].timing.approved_secs = Some(elapsed);
+                                }
+                                txs[i].timing.executed_secs = Some(elapsed);
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
                             Phase::Approved if approved => {
                                 txs[i].timing.approved_secs =
                                     Some(txs[i].send_instant.elapsed().as_secs_f64());
@@ -1779,7 +1806,15 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                         ph,
                     )
                     .await?;
-                    Ok((i, phase, approved))
+                    // `isMessageApproved` flips back to false on execution, so a
+                    // fast second leg (hyperliquid, monad-3 executed in <40s) can
+                    // be approved+executed between two polls and never read
+                    // `approved == true`, leaving the tx stuck in Approved until
+                    // the inactivity timeout. `isMessageExecuted` stays true and
+                    // catches that race.
+                    let executed =
+                        check_evm_is_message_executed(gw_contract, "axelar", &sl_id).await?;
+                    Ok((i, phase, approved, executed))
                 });
             }
             let evm_results: Vec<Result<_>> = futures::stream::iter(evm_futs)
@@ -1787,16 +1822,27 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                 .collect()
                 .await;
             for result in evm_results {
-                let (i, phase, approved) = result?;
+                let (i, phase, approved, executed) = result?;
                 match phase {
+                    // Authoritative fast-path: already executed on the
+                    // destination gateway (catches the approve→execute race).
+                    Phase::Approved if executed => {
+                        let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                        if txs[i].timing.approved_secs.is_none() {
+                            txs[i].timing.approved_secs = Some(elapsed);
+                        }
+                        txs[i].timing.executed_secs = Some(elapsed);
+                        txs[i].timing.executed_ok = Some(true);
+                        txs[i].phase = Phase::Done;
+                        last_progress = Instant::now();
+                    }
                     Phase::Approved if approved => {
                         txs[i].timing.approved_secs =
                             Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].phase = Phase::Executed;
                         last_progress = Instant::now();
                     }
-                    Phase::Executed if !approved => {
-                        // false = approval consumed = executed
+                    Phase::Executed if executed => {
                         txs[i].timing.executed_secs =
                             Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].timing.executed_ok = Some(true);

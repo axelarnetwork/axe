@@ -82,6 +82,15 @@ sol! {
             address contractAddress,
             bytes32 payloadHash
         ) external view returns (bool);
+        /// Amplifier gateway: true once the approved message has been consumed
+        /// by the destination contract (`validateMessage`). Unlike
+        /// `isMessageApproved` (which flips back to false on execution), this
+        /// stays true, so it detects an approve→execute that happened between
+        /// two polls.
+        function isMessageExecuted(
+            string calldata sourceChain,
+            string calldata messageId
+        ) external view returns (bool);
         /// Legacy consensus gateway: true once the approval command has been
         /// executed (i.e. the destination contract consumed it). Returns false
         /// before approval and after the approval is otherwise spent.

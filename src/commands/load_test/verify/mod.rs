@@ -18,12 +18,15 @@ use crate::ui;
 
 /// If no transaction completes a phase for this long, we stop waiting.
 /// Resets every time a tx makes progress, so large batches naturally get more time.
-// Mainnet Amplifier voters can sit behind a queue of other messages for 5+ min
-// before they confirm a new vote, especially on cold routes (first message of
-// the day for a given source). 1000s of stalled-progress patience covers what
-// we've observed on Sui-mainnet ITS without making slow-failures egregiously
-// long to surface.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(1000);
+// Legacy/consensus relayers batch the destination approval and can lag far
+// behind the source send: on-chain triage of timed-out routes measured real
+// approve→execute latencies up to 3226s (mantle → kava GMP), with several
+// other legacy GMP routes in the 1200–2950s band. The previous 1000s buffer
+// fired before those genuinely-executing routes landed and wrongly marked them
+// `timed out`. 7200s gives ~2.2x headroom over the worst observed latency
+// while still surfacing a truly stuck route within a couple of hours. Resets on
+// any per-phase progress, so large batches naturally get more time.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(7200);
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 

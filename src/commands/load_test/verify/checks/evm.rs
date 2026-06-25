@@ -26,6 +26,25 @@ pub(in super::super) async fn check_evm_is_message_approved<P: Provider>(
     Ok(approved)
 }
 
+/// Check `isMessageExecuted` on the EVM amplifier gateway (single attempt).
+/// True once the approved message has been consumed by the destination
+/// contract. Unlike `isMessageApproved` — which flips back to false the instant
+/// the message executes — this stays true, so it catches an approval that was
+/// approved *and* executed between two polls (the fast-route race that left
+/// monad-3 / hyperliquid stuck in the Approved phase until the inactivity
+/// timeout).
+pub(in super::super) async fn check_evm_is_message_executed<P: Provider>(
+    gw_contract: &AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&P>,
+    source_chain: &str,
+    message_id: &str,
+) -> Result<bool> {
+    let executed = gw_contract
+        .isMessageExecuted(source_chain.to_string(), message_id.to_string())
+        .call()
+        .await?;
+    Ok(executed)
+}
+
 /// Check `isCommandExecuted` on a legacy consensus gateway (single attempt).
 /// True once the destination contract has consumed the approval command.
 pub(in super::super) async fn check_evm_command_executed<P: Provider>(
