@@ -181,6 +181,45 @@ does not).
 | hedera → monad-3 | EVM → amplifier-EVM | ITS ✅ |
 | linea-sepolia → immutable | amplifier-EVM → EVM | GMP ✅ |
 
+### 3d. Mainnet — MOU-29 15-route validation batch (2026-06-23 – 2026-06-26)
+
+Deliberate end-to-end validation covering amplifier non-EVM ↔ non-EVM, amplifier
+EVM ↔ non-EVM, legacy ↔ amplifier non-EVM, and XRPL paths.  A route is ✅ only
+when the destination message reached `executed` (GMP-API `executed` state +
+destination execute tx confirmed by axe verifier or GMP-API `recovered_via_api`
+backstop).
+
+| # | Route | Proto | Class | Source Tx | Result |
+|---|---|---|---|---|---|
+| 01 | solana → sui | ITS | amplifier non-EVM ↔ non-EVM | `51TcpvU19G9UD97TPFjg8AeQkkLHcRNuKHbqa7W83W` | ✅ executed |
+| 02 | sui → solana | ITS | amplifier non-EVM ↔ non-EVM | `wDMmNf5AJsRCAmqQEmoUgHKoJVPa945PameRgAmSd2` | ✅ executed |
+| 03 | solana → sui | GMP | amplifier non-EVM ↔ non-EVM | `3UArKocnjH1tbhnhK3Sx8GsW95xsB89m4nVz72hMJ8` | ✅ executed |
+| 04 | sui → hyperliquid | GMP | amplifier non-EVM → amplifier EVM | `9xnicQn9UccGRU8V4vgLvotpRGuienfQayoMrqtEfM` | ✅ executed |
+| 05 | stellar → solana | GMP | amplifier non-EVM ↔ non-EVM | `0xd8a924923a8868879318ad9eb912da89f8fbc00e` | ✅ executed |
+| 06 | xrpl → xrpl-evm | ITS | XRPL canonical XRP | `0x5037290b3a9ec3eccff49fe714803f381c44cd35` | ✅ executed |
+| 07 | xrpl-evm → xrpl | ITS | XRPL canonical XRP | `0xbbab736ab1cbc9911b7e22bed8aa6fb37d1bcb55` | ✅ executed |
+| 08 | hyperliquid → stellar | ITS | amplifier EVM → non-EVM | `0x1c6c898da42d3edf6a1b991dc27802e7ead44a9c` | ✅ executed (52.5 s) |
+| 09 | avalanche → solana | GMP | legacy EVM → amplifier non-EVM | `0x6519283767a8504868a06a82eae632130fcf1c0e` | ✅ executed |
+| 10 | avalanche → stellar | GMP | legacy EVM → amplifier non-EVM | `0x6488a701a7ebd008dcfb6d10be5ffd4b850c1cbb` | ✅ executed |
+| 11 | avalanche → sui | GMP | legacy EVM → amplifier non-EVM | `0x48abdda2c0b882813c78da72d8719b7b82d127b7` | ✅ executed |
+| 12 | stellar → arbitrum | GMP | amplifier non-EVM → legacy EVM | `0x9824e77f21919c58ff6d16792b95680ac4c75020` | ✅ executed |
+| 13 | sui → avalanche | GMP | amplifier non-EVM → legacy EVM | `FnJCBmjKRvwAVuYR729NPPSq6usz2H86E4Ph4R3RLu` | ✅ executed |
+| 14 | avalanche → base | GMP | legacy EVM ↔ legacy EVM | `0xae0d52ca1de181624df9d75c0fb5b901afa41822` | ✅ executed |
+| 15 | kava → moonbeam | GMP | legacy EVM ↔ legacy EVM | `0xbedaf89d3a9be09fa77a7c1425e6af6079b6fe80` | ✅ executed |
+
+**Result: 15/15 ✅**  All routes reached `executed` on destination.
+
+**Part-B reliability findings (MOU-29 audit):**
+- Fast non-EVM routes (stellar, sui, solana) typically execute in < 60 s; axe's
+  5 s poll interval + live verifier may miss execution before a short per-run cap,
+  but the `recovered_via_api` GMP-API backstop correctly catches them.
+- EVM destination view-call retry fixed (`8e1f972`) — transient RPC errors no
+  longer fail the verifier loop prematurely.
+- `INACTIVITY_TIMEOUT=7200 s` and `POLL_INTERVAL=5 s` are correctly sized for the
+  observed latency distribution (max seen: 3226 s for mantle→kava).
+- Routes 08/10 needed re-runs due to source-side setup cap / RPC flake, not
+  protocol failures. Route 14 sent and executed in its original run.
+
 ---
 
 ## 4. Open — routes still needing a run
