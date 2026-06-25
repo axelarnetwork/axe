@@ -143,20 +143,21 @@ async fn scan_one_chain(base: &str, chain: &str, recent: usize) -> Result<()> {
         return Ok(());
     }
 
+    let total = records.len();
     for (i, record) in records.iter().enumerate() {
-        print_record_report(i + 1, record);
+        print_record_report(i + 1, total, record);
     }
     Ok(())
 }
 
 /// One transfer's two-phase report block in scan mode.
-fn print_record_report(index: usize, record: &ExpressRecord) {
+fn print_record_report(index: usize, total: usize, record: &ExpressRecord) {
     let route = format!(
         "{} → {}",
         record.source_chain().unwrap_or("?"),
         record.destination_chain().unwrap_or("?"),
     );
-    ui::step_header(index, index, &route);
+    ui::step_header(index, total, &route);
 
     if let Some(mid) = &record.message_id {
         ui::kv("message_id", mid);
