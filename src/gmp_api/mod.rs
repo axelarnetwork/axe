@@ -1,14 +1,19 @@
 //! Thin reqwest client over the Axelarscan GMP API (`/gmp/searchGMP`).
 //!
-//! Two queries are used by the express monitor:
+//! Shared across commands: the express-reimbursement monitor (`test_express`)
+//! and the load-test verifier's final executed-state recheck (`load_test`).
+//! Queries used:
 //! - list recent express transfers (optionally filtered by destination chain),
-//! - fetch a single message by source tx hash.
+//! - fetch a single message by source tx hash,
+//! - fetch a single message by its canonical `message_id`.
+
+mod types;
+
+pub use types::{ExpressRecord, Phase1, Phase2};
 
 use eyre::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
-
-use super::types::ExpressRecord;
 
 /// GMP API base URL for the given network. Testnet/stagenet/devnet share the
 /// testnet Axelarscan deployment; mainnet has its own.
@@ -63,5 +68,13 @@ pub async fn search_recent_express(
 /// Fetch a single message by its source transaction hash, if indexed.
 pub async fn search_by_tx(base: &str, tx: &str) -> Result<Option<ExpressRecord>> {
     let records = post_search(base, json!({ "txHash": tx })).await?;
+    Ok(records.into_iter().next())
+}
+
+/// Fetch a single message by its canonical `message_id` (source tx id plus
+/// the event-index suffix, e.g. `0x…-20`), if indexed. This is the exact key
+/// Axelarscan stores per GMP message, so it is the preferred lookup.
+pub async fn search_by_message_id(base: &str, message_id: &str) -> Result<Option<ExpressRecord>> {
+    let records = post_search(base, json!({ "messageId": message_id })).await?;
     Ok(records.into_iter().next())
 }

@@ -640,12 +640,14 @@ async fn run_sustained_pipeline(
     let vstellar_gw = stellar.gateway_addr.clone();
     let vsigner_pk = stellar.signer_pk;
     let vdone = Arc::clone(&send_done);
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_stellar_its_streaming(
             &vconfig,
             &vsource,
             &vdest,
+            vnetwork,
             &vstellar_rpc,
             &vstellar_net,
             &vstellar_gw,
@@ -877,6 +879,7 @@ async fn run_burst_pipeline(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
+        args.network,
         stellar_recipient_addr,
         &stellar.rpc,
         &stellar.network_type,

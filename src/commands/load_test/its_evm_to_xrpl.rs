@@ -582,12 +582,14 @@ async fn run_sustained_pipeline(
     let vxrpl_rpc = xrpl.xrpl_rpc.clone();
     let vrecipient = xrpl.recipient_addr.clone();
     let vdone = std::sync::Arc::clone(&send_done);
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_xrpl_its_streaming(
             &vconfig,
             &vsource,
             &vdest,
+            vnetwork,
             &vxrpl_rpc,
             &vrecipient,
             verify_rx,
@@ -814,6 +816,7 @@ async fn run_burst_pipeline(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
+        args.network,
         &xrpl.xrpl_rpc,
         &xrpl.recipient_addr,
         &mut report.transactions,

@@ -1,7 +1,8 @@
-//! Typed view over the Axelarscan GMP API records this monitor reads.
+//! Typed view over the Axelarscan GMP API records this crate reads.
 //!
 //! The live `/gmp/searchGMP` record carries ~50 fields; we model only the
-//! subset the two-phase express-reimbursement check needs. Everything is
+//! subset our callers need (the express-reimbursement monitor and the
+//! load-test verifier's final executed-state recheck). Everything is
 //! `Option` / `#[serde(default)]` so a partial record never fails to parse.
 
 use serde::Deserialize;
@@ -118,6 +119,19 @@ pub enum Phase2 {
 }
 
 impl ExpressRecord {
+    /// Whether the GMP API considers this message terminally executed on the
+    /// destination (the final leg landed). This is the authoritative signal
+    /// the load-test verifier uses before labeling a timed-out transfer as
+    /// failed: Axelarscan sets `status` to `"executed"` once the destination
+    /// `execute` is observed, and the `executed` sub-object is populated in
+    /// the same step.
+    pub fn is_executed(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case("executed"))
+            || self.executed.is_some()
+    }
+
     /// Classify this record into its two express-reimbursement phases.
     pub fn phase_status(&self) -> (Phase1, Phase2) {
         let Some(ee) = &self.express_executed else {
@@ -169,5 +183,43 @@ impl ExpressRecord {
                     .and_then(|c| c.return_values.as_ref())
                     .and_then(|r| r.destination_chain.as_deref())
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExpressRecord;
+
+    fn record(status: Option<&str>, executed: bool) -> ExpressRecord {
+        let executed_json = if executed {
+            r#""executed": { "transactionHash": "0xabc" },"#
+        } else {
+            ""
+        };
+        let status_json = status
+            .map(|s| format!(r#""status": "{s}","#))
+            .unwrap_or_default();
+        serde_json::from_str(&format!(
+            "{{ {status_json} {executed_json} \"message_id\": \"m\" }}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn is_executed_true_when_status_executed() {
+        assert!(record(Some("executed"), false).is_executed());
+        // Case-insensitive, per defensive parsing of the live API.
+        assert!(record(Some("Executed"), false).is_executed());
+    }
+
+    #[test]
+    fn is_executed_true_when_executed_object_present() {
+        assert!(record(Some("approved"), true).is_executed());
+    }
+
+    #[test]
+    fn is_executed_false_for_unexecuted_message() {
+        assert!(!record(Some("error"), false).is_executed());
+        assert!(!record(None, false).is_executed());
     }
 }

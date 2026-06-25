@@ -15,22 +15,19 @@
 //! - else: for each requested chain, list the `--recent` newest express
 //!   transfers and print their two-phase status.
 //!
-//! Submodules:
-//! - [`gmp_api`]: the `searchGMP` reqwest client + per-network base URL.
-//! - [`types`]: the `ExpressRecord` view and the `Phase1`/`Phase2` classifier.
-
-mod gmp_api;
-mod types;
+//! The `searchGMP` reqwest client and the `ExpressRecord` view (with the
+//! `Phase1`/`Phase2` classifier) live in the shared [`crate::gmp_api`] module,
+//! so the load-test verifier can reuse them for its final executed-state check.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use eyre::Result;
 
+use crate::gmp_api::{self, ExpressRecord, Phase1, Phase2};
 use crate::timing::EXPRESS_POLL_INTERVAL;
 use crate::types::Network;
 use crate::ui;
-use types::{ExpressRecord, Phase1, Phase2};
 
 /// Default number of recent express transfers to report per chain in scan mode.
 const DEFAULT_RECENT: usize = 5;

@@ -86,10 +86,14 @@ pub(super) fn compute_verification_report(
         std::collections::HashMap::new();
     let mut stuck_count = 0u64;
     let mut stuck_phases: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut recovered_via_api = 0u64;
 
     for tx in txs {
         if tx.idx < metrics.len() {
             metrics[tx.idx].amplifier_timing = Some(tx.timing.clone());
+        }
+        if tx.recovered_via_api {
+            recovered_via_api += 1;
         }
         if tx.failed {
             failed += 1;
@@ -168,6 +172,7 @@ pub(super) fn compute_verification_report(
         peak_throughput,
         stuck: stuck_count,
         stuck_at,
+        recovered_via_api,
     }
 }
 

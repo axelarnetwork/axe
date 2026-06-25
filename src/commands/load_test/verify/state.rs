@@ -54,6 +54,11 @@ pub(in crate::commands::load_test) struct PendingTx {
     pub(super) second_leg_source_address: Option<String>,
     /// Second-leg destination_address (e.g. ITS proxy on destination chain).
     pub(super) second_leg_destination_address: Option<String>,
+    /// Set when a tx that timed out in the polling loop was reclassified as
+    /// successful by the final Axelarscan GMP-API check (the message actually
+    /// executed on-chain). Surfaced as a distinct "recovered" count so the
+    /// reliability save is visible in CI/cron logs.
+    pub(super) recovered_via_api: bool,
 }
 
 /// Real-time stats (throughput + latency) for spinner display.

@@ -201,6 +201,7 @@ struct RunGmpArgs {
     source_chain: String,
     destination_chain: String,
     destination_address: String,
+    network: Network,
 }
 
 /// Drive the GMP polling pipeline (both batch and streaming modes).
@@ -217,6 +218,7 @@ async fn run_gmp_pipeline<P: Provider>(
         source_chain,
         destination_chain,
         destination_address,
+        network,
     } = args;
     let (rx, send_done, spinner) = mode.parts();
     poll_pipeline(
@@ -234,6 +236,7 @@ async fn run_gmp_pipeline<P: Provider>(
             destination_address,
             axelarnet_gateway: None,
             display_chain: None,
+            network,
         },
     )
     .await
@@ -248,6 +251,7 @@ struct RunItsHubArgs {
     rpc: String,
     cosm_gateway_dest: String,
     dest: ItsHubDest,
+    network: Network,
 }
 
 /// Drive the ITS-via-hub polling pipeline (both batch and streaming modes).
@@ -264,6 +268,7 @@ async fn run_its_hub_pipeline(
         rpc,
         cosm_gateway_dest,
         dest,
+        network,
     } = args;
     let (rx, send_done, spinner) = mode.parts();
     poll_pipeline_its_hub(
@@ -279,6 +284,7 @@ async fn run_its_hub_pipeline(
             rpc,
             cosm_gateway_dest,
             dest,
+            network,
         },
     )
     .await
@@ -294,6 +300,7 @@ struct RunItsHubEvmArgs {
     cosm_gateway_dest: String,
     destination_chain: String,
     dest: ItsEvmDest,
+    network: Network,
 }
 
 /// Drive the ITS-via-hub polling pipeline with an EVM destination
@@ -313,6 +320,7 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
         cosm_gateway_dest,
         destination_chain,
         dest,
+        network,
     } = args;
     let (rx, send_done, spinner) = mode.parts();
     poll_pipeline_its_hub_evm(
@@ -330,6 +338,7 @@ async fn run_its_hub_evm_pipeline<P: Provider>(
             cosm_gateway_dest,
             _destination_chain: destination_chain,
             dest,
+            network,
         },
     )
     .await
@@ -391,6 +400,7 @@ fn pending_tx_for_its_batch(tx: &TxMetrics, idx: usize, initial_phase: Phase) ->
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -453,6 +463,7 @@ fn pending_tx_for_gmp_batch(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -571,6 +582,7 @@ pub async fn verify_onchain<P: Provider>(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            network,
         },
     )
     .await?;
@@ -710,6 +722,7 @@ pub async fn verify_onchain_evm_legacy<P: Provider>(
             destination_address: destination_address.to_string(),
             axelarnet_gateway: None,
             display_chain: None,
+            network,
         },
     )
     .await?;
@@ -724,6 +737,7 @@ pub async fn verify_onchain_evm_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     destination_address: &str,
     gateway_addr: Address,
     evm_rpc_url: &str,
@@ -765,6 +779,7 @@ pub async fn verify_onchain_evm_streaming(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            network,
         },
     )
     .await?;
@@ -781,6 +796,7 @@ pub async fn verify_onchain_evm_legacy_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     destination_address: &str,
     gateway_addr: Address,
     evm_rpc_url: &str,
@@ -843,6 +859,7 @@ pub async fn verify_onchain_evm_legacy_streaming(
             destination_address: destination_address.to_string(),
             axelarnet_gateway: None,
             display_chain: None,
+            network,
         },
     )
     .await?;
@@ -920,6 +937,7 @@ pub async fn verify_onchain_stellar_gmp(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_contract.to_string(),
+            network,
         },
     )
     .await?;
@@ -935,6 +953,7 @@ pub async fn verify_onchain_stellar_gmp_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     destination_contract: &str,
     stellar_rpc: &str,
     stellar_network_type: &str,
@@ -976,6 +995,7 @@ pub async fn verify_onchain_stellar_gmp_streaming(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_contract.to_string(),
+            network,
         },
     )
     .await?;
@@ -1022,6 +1042,7 @@ pub(super) fn tx_to_pending_solana(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -1058,6 +1079,7 @@ pub(super) fn tx_to_pending_stellar(
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -1090,6 +1112,7 @@ pub(super) fn tx_to_pending_xrpl(tx: &TxMetrics, has_voting_verifier: bool) -> R
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -1121,6 +1144,7 @@ pub(super) fn tx_to_pending_its(tx: &TxMetrics, has_voting_verifier: bool) -> Re
         second_leg_payload_hash: None,
         second_leg_source_address: None,
         second_leg_destination_address: None,
+        recovered_via_api: false,
     })
 }
 
@@ -1205,6 +1229,7 @@ pub async fn verify_onchain_sui_gmp(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            network,
         },
     )
     .await?;
@@ -1263,6 +1288,7 @@ pub async fn verify_onchain_solana_streaming(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            network,
         },
     )
     .await?;
@@ -1356,6 +1382,7 @@ pub async fn verify_onchain_solana(
             source_chain: source_chain.to_string(),
             destination_chain: destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            network,
         },
     )
     .await?;
@@ -1424,6 +1451,7 @@ pub async fn verify_onchain_solana_its(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Solana {
                 rpc_url: solana_rpc.to_string(),
                 network,
@@ -1450,6 +1478,7 @@ pub async fn verify_onchain_sui_its(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     sui_rpc: &str,
     metrics: &mut [TxMetrics],
 ) -> Result<VerificationReport> {
@@ -1491,6 +1520,7 @@ pub async fn verify_onchain_sui_its(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Sui {
                 rpc_url: sui_rpc.to_string(),
                 gateway_pkg,
@@ -1541,6 +1571,7 @@ pub async fn verify_onchain_solana_its_streaming(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Solana {
                 rpc_url: solana_rpc.to_string(),
                 network,
@@ -1562,6 +1593,7 @@ pub async fn verify_onchain_stellar_its(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     _destination_address: &str,
     stellar_rpc: &str,
     stellar_network_type: &str,
@@ -1606,6 +1638,7 @@ pub async fn verify_onchain_stellar_its(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Stellar {
                 rpc_url: stellar_rpc.to_string(),
                 network_type: stellar_network_type.to_string(),
@@ -1625,6 +1658,7 @@ pub async fn verify_onchain_stellar_its_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     stellar_rpc: &str,
     stellar_network_type: &str,
     stellar_gateway_contract: &str,
@@ -1659,6 +1693,7 @@ pub async fn verify_onchain_stellar_its_streaming(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Stellar {
                 rpc_url: stellar_rpc.to_string(),
                 network_type: stellar_network_type.to_string(),
@@ -1679,6 +1714,7 @@ pub async fn verify_onchain_xrpl_its(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     xrpl_rpc: &str,
     xrpl_recipient: &str,
     metrics: &mut [TxMetrics],
@@ -1723,6 +1759,7 @@ pub async fn verify_onchain_xrpl_its(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Xrpl {
                 rpc_url: xrpl_rpc.to_string(),
                 recipient_address: xrpl_recipient.to_string(),
@@ -1740,6 +1777,7 @@ pub async fn verify_onchain_xrpl_its_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     xrpl_rpc: &str,
     xrpl_recipient: &str,
     rx: mpsc::UnboundedReceiver<PendingTx>,
@@ -1772,6 +1810,7 @@ pub async fn verify_onchain_xrpl_its_streaming(
             axelarnet_gateway,
             rpc,
             cosm_gateway_dest,
+            network,
             dest: ItsHubDest::Xrpl {
                 rpc_url: xrpl_rpc.to_string(),
                 recipient_address: xrpl_recipient.to_string(),
@@ -1795,10 +1834,12 @@ pub async fn verify_onchain_xrpl_its_streaming(
 /// 4. **Routed** — Cosmos Gateway outgoing_messages (second-leg, dest EVM chain)
 /// 5. **Approved** — EVM gateway isMessageApproved (second-leg)
 /// 6. **Executed** — EVM approval consumed
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_onchain_evm_its(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     _destination_address: &str,
     evm_gateway_addr: Address,
     evm_rpc_url: &str,
@@ -1849,6 +1890,7 @@ pub async fn verify_onchain_evm_its(
             cosm_gateway_dest,
             destination_chain: destination_chain.to_string(),
             dest,
+            network,
         },
     )
     .await?;
@@ -1889,6 +1931,7 @@ pub async fn verify_onchain_evm_its_streaming(
     config: &Path,
     source_chain: &str,
     destination_chain: &str,
+    network: Network,
     evm_gateway_addr: Address,
     evm_rpc_url: &str,
     rx: mpsc::UnboundedReceiver<PendingTx>,
@@ -1930,6 +1973,7 @@ pub async fn verify_onchain_evm_its_streaming(
             cosm_gateway_dest,
             destination_chain: destination_chain.to_string(),
             dest,
+            network,
         },
     )
     .await?;
