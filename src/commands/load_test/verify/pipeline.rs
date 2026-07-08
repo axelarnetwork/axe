@@ -22,7 +22,11 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::PendingTx;
-use super::checks::{batch_check_solana_incoming_messages, check_evm_is_message_approved};
+use super::checks::{
+    batch_check_solana_incoming_messages, check_evm_command_executed,
+    check_evm_is_message_approved, check_evm_is_message_executed,
+};
+use super::legacy;
 use super::report::compute_peak_throughput;
 use super::state::{Phase, RealTimeStats, phase_counts};
 use super::{INACTIVITY_TIMEOUT, POLL_INTERVAL};
@@ -91,6 +95,27 @@ fn is_message_not_yet_routed_error(error: &eyre::Report) -> bool {
 pub(super) enum DestinationChecker<'a, P: Provider> {
     Evm {
         gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+        /// When true, only conclude execution after the approval has actually
+        /// been observed (`isMessageApproved == true`) at least once. The
+        /// amplifier fast-path otherwise reads an unapproved result as
+        /// "approved+executed between polls" — valid only once the message is
+        /// known to be en route (it passed the `routed` phase). A
+        /// consensus→amplifier route enters the Approved phase immediately, so
+        /// it must observe the real approval or it would false-positive on the
+        /// first poll.
+        require_observed_approval: bool,
+    },
+    /// Legacy (consensus) EVM destination — verified via the old
+    /// `AxelarGateway`: locate the emitted `ContractCallApproved` (authoritative
+    /// `commandId`) then confirm `isCommandExecuted`. `from_block` bounds the
+    /// approval-event scan to blocks produced since verification started.
+    /// `match_by_payload` selects how the approval log is matched: an EVM source
+    /// pins it with the exact `sourceTxHash` (precise); a non-EVM source has no
+    /// EVM tx hash, so it matches on the (unique) `payloadHash` + dest address.
+    EvmLegacy {
+        gw_contract: &'a AxelarAmplifierGateway::AxelarAmplifierGatewayInstance<&'a P>,
+        from_block: u64,
+        match_by_payload: bool,
     },
     Solana {
         rpc_client: Arc<solana_client::rpc_client::RpcClient>,
@@ -117,6 +142,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
     fn approval_label(&self) -> &str {
         match self {
             Self::Evm { .. } => "EVM approval",
+            Self::EvmLegacy { .. } => "EVM(legacy) approval",
             Self::Solana { .. } => "Solana approval",
             Self::Stellar { .. } => "Stellar approval",
             Self::Sui { .. } => "Sui approval",
@@ -126,6 +152,7 @@ impl<P: Provider> DestinationChecker<'_, P> {
     fn execution_label(&self) -> &str {
         match self {
             Self::Evm { .. } => "EVM execution",
+            Self::EvmLegacy { .. } => "EVM(legacy) execution",
             Self::Solana { .. } => "Solana execution",
             Self::Stellar { .. } => "Stellar execution",
             Self::Sui { .. } => "Sui execution",
@@ -184,7 +211,9 @@ pub(super) async fn poll_pipeline<P: Provider>(
     // For EVM destinations, derive the contract_addr from destination_address
     // so streaming PendingTx entries (which may have Address::ZERO) get the right value.
     let default_contract_addr = match checker {
-        DestinationChecker::Evm { .. } => Some(destination_address.parse()?),
+        DestinationChecker::Evm { .. } | DestinationChecker::EvmLegacy { .. } => {
+            Some(destination_address.parse()?)
+        }
         _ => None,
     };
 
@@ -367,7 +396,14 @@ pub(super) async fn poll_pipeline<P: Provider>(
         for (i, ok) in voted_results {
             if ok {
                 txs[i].timing.voted_secs = Some(txs[i].send_instant.elapsed().as_secs_f64());
-                txs[i].phase = Phase::Routed;
+                // No destination Cosmos Gateway (legacy/consensus destination)
+                // means there is no `routed` phase to observe — skip straight to
+                // the destination approval check so timings stay honest.
+                txs[i].phase = if cosm_gateway.is_some() {
+                    Phase::Routed
+                } else {
+                    Phase::Approved
+                };
                 last_progress = Instant::now();
             }
         }
@@ -447,7 +483,10 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         }
                     }
                 }
-                DestinationChecker::Evm { gw_contract } => {
+                DestinationChecker::Evm {
+                    gw_contract,
+                    require_observed_approval,
+                } => {
                     let mut futs = Vec::with_capacity(dest_indices.len());
                     for &i in &dest_indices {
                         let phase = txs[i].phase;
@@ -465,7 +504,15 @@ pub(super) async fn poll_pipeline<P: Provider>(
                                 p_hash,
                             )
                             .await?;
-                            Ok((i, phase, approved))
+                            // `isMessageApproved` flips back to false the moment
+                            // the message executes, so a fast route can be
+                            // approved+executed between two polls and never show
+                            // `approved == true`. `isMessageExecuted` stays true,
+                            // so it catches that race regardless of source type.
+                            let executed =
+                                check_evm_is_message_executed(gw_contract, source_chain, &msg_id)
+                                    .await?;
+                            Ok((i, phase, approved, executed))
                         });
                     }
                     let results: Vec<Result<_>> = futures::stream::iter(futs)
@@ -473,15 +520,39 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         .collect()
                         .await;
                     for result in results {
-                        let (i, phase, approved) = result?;
+                        let (i, phase, approved, executed) = result?;
                         match phase {
+                            // Authoritative fast-path: the message is already
+                            // executed on the destination gateway. Catches the
+                            // approve→execute-between-polls race that left fast
+                            // amplifier routes (monad-3, hyperliquid) stuck in
+                            // Approved until the inactivity timeout. Safe for the
+                            // consensus-source case too: `isMessageExecuted` is
+                            // false until the message genuinely lands, so it
+                            // cannot conclude success prematurely.
+                            Phase::Approved if executed => {
+                                let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                                if txs[i].timing.approved_secs.is_none() {
+                                    txs[i].timing.approved_secs = Some(elapsed);
+                                }
+                                txs[i].timing.executed_secs = Some(elapsed);
+                                txs[i].timing.executed_ok = Some(true);
+                                txs[i].phase = Phase::Done;
+                                last_progress = Instant::now();
+                            }
                             Phase::Approved if approved => {
                                 txs[i].timing.approved_secs =
                                     Some(txs[i].send_instant.elapsed().as_secs_f64());
                                 txs[i].phase = Phase::Executed;
                                 last_progress = Instant::now();
                             }
-                            Phase::Approved => {
+                            // Unapproved while in the Approved phase. The
+                            // amplifier fast-path treats this as
+                            // approved+executed-between-polls; a route that has
+                            // not yet observed a real approval (consensus
+                            // source) must keep waiting instead, or it would
+                            // conclude success before the message even lands.
+                            Phase::Approved if !require_observed_approval => {
                                 let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
                                 if txs[i].timing.approved_secs.is_none() {
                                     txs[i].timing.approved_secs = Some(elapsed);
@@ -497,6 +568,79 @@ pub(super) async fn poll_pipeline<P: Provider>(
                                 txs[i].timing.executed_ok = Some(true);
                                 txs[i].phase = Phase::Done;
                                 last_progress = Instant::now();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                DestinationChecker::EvmLegacy {
+                    gw_contract,
+                    from_block,
+                    match_by_payload,
+                } => {
+                    // Sequential per-tx (one eth_getLogs each); fine for the
+                    // burst sizes legacy GMP runs at today.
+                    for &i in &dest_indices {
+                        match txs[i].phase {
+                            Phase::Approved => {
+                                let payload_hash = required_payload_hash(&txs[i])?;
+                                // EVM source: pin the approval log with the exact
+                                // sourceTxHash. Non-EVM source: no EVM tx hash, so
+                                // match on the (unique) payloadHash + dest address.
+                                let found = if *match_by_payload {
+                                    legacy::find_contract_call_approved_by_payload(
+                                        gw_contract.provider(),
+                                        *gw_contract.address(),
+                                        txs[i].contract_addr,
+                                        payload_hash,
+                                        *from_block,
+                                    )
+                                    .await?
+                                } else {
+                                    let src_tx_hash =
+                                        legacy::source_tx_hash_from_message_id(&txs[i].message_id)?;
+                                    legacy::find_contract_call_approved(
+                                        gw_contract.provider(),
+                                        *gw_contract.address(),
+                                        txs[i].contract_addr,
+                                        payload_hash,
+                                        src_tx_hash,
+                                        *from_block,
+                                    )
+                                    .await?
+                                };
+                                let Some(cmd_id) = found else { continue };
+                                txs[i].command_id = Some(cmd_id);
+                                txs[i].timing.approved_secs =
+                                    Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                // Execution may already have landed in the same
+                                // window — check now to avoid a spurious extra poll.
+                                let executed =
+                                    check_evm_command_executed(gw_contract, cmd_id.into()).await?;
+                                if executed {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                } else {
+                                    txs[i].phase = Phase::Executed;
+                                }
+                                last_progress = Instant::now();
+                            }
+                            Phase::Executed => {
+                                let cmd_id = txs[i].command_id.ok_or_else(|| {
+                                    eyre::eyre!(
+                                        "legacy tx {} in Executed phase without a commandId",
+                                        txs[i].message_id
+                                    )
+                                })?;
+                                if check_evm_command_executed(gw_contract, cmd_id.into()).await? {
+                                    txs[i].timing.executed_secs =
+                                        Some(txs[i].send_instant.elapsed().as_secs_f64());
+                                    txs[i].timing.executed_ok = Some(true);
+                                    txs[i].phase = Phase::Done;
+                                    last_progress = Instant::now();
+                                }
                             }
                             _ => {}
                         }
@@ -630,6 +774,7 @@ pub(super) async fn poll_pipeline<P: Provider>(
                     total,
                     error_msg.as_deref(),
                     voting_verifier.is_some(),
+                    cosm_gateway.is_some(),
                 )
             };
             spinner.set_message(msg);
@@ -1341,6 +1486,16 @@ pub(super) async fn poll_pipeline_its_hub(
     Ok(compute_peak_throughput(txs))
 }
 
+/// EVM destination kind for the ITS-via-hub pipeline. Amplifier destinations
+/// have a Cosmos Gateway (the `routed` phase) and verify the second leg via
+/// `isMessageApproved`. Legacy (consensus) destinations have neither — the
+/// second leg lands as a `ContractCallApproved` event on the legacy gateway
+/// (read for its `commandId`, then confirmed via `isCommandExecuted`).
+pub(super) enum ItsEvmDest {
+    Amplifier,
+    Legacy { from_block: u64 },
+}
+
 pub(super) struct PollItsHubEvmArgs {
     pub lcd: String,
     pub voting_verifier: Option<String>,
@@ -1349,6 +1504,7 @@ pub(super) struct PollItsHubEvmArgs {
     pub rpc: String,
     pub cosm_gateway_dest: String,
     pub _destination_chain: String,
+    pub dest: ItsEvmDest,
 }
 
 /// Full ITS polling pipeline with EVM destination (batch + streaming):
@@ -1370,7 +1526,12 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
         rpc,
         cosm_gateway_dest,
         _destination_chain,
+        dest,
     } = args;
+    let (dest_legacy, dest_from_block) = match dest {
+        ItsEvmDest::Legacy { from_block } => (true, from_block),
+        ItsEvmDest::Amplifier => (false, 0),
+    };
     let lcd = lcd.as_str();
     let voting_verifier = voting_verifier.as_deref();
     let source_chain = source_chain.as_str();
@@ -1592,7 +1753,14 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                     txs[i].second_leg_payload_hash = Some(info.payload_hash);
                     txs[i].second_leg_source_address = Some(info.source_address);
                     txs[i].second_leg_destination_address = Some(info.destination_address);
-                    txs[i].phase = Phase::Routed;
+                    // A legacy destination has no Cosmos Gateway, so there is no
+                    // `routed` phase to observe — go straight to the on-chain
+                    // approval check on the legacy gateway.
+                    txs[i].phase = if dest_legacy {
+                        Phase::Approved
+                    } else {
+                        Phase::Routed
+                    };
                     last_progress = Instant::now();
                 }
             }
@@ -1604,7 +1772,8 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
             .chain(executed_indices.iter())
             .copied()
             .collect();
-        if !evm_check_indices.is_empty() {
+        if !evm_check_indices.is_empty() && !dest_legacy {
+            // Amplifier destination: verify the second leg via `isMessageApproved`.
             let mut evm_futs = Vec::with_capacity(evm_check_indices.len());
             for &i in &evm_check_indices {
                 let phase = txs[i].phase;
@@ -1637,7 +1806,15 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                         ph,
                     )
                     .await?;
-                    Ok((i, phase, approved))
+                    // `isMessageApproved` flips back to false on execution, so a
+                    // fast second leg (hyperliquid, monad-3 executed in <40s) can
+                    // be approved+executed between two polls and never read
+                    // `approved == true`, leaving the tx stuck in Approved until
+                    // the inactivity timeout. `isMessageExecuted` stays true and
+                    // catches that race.
+                    let executed =
+                        check_evm_is_message_executed(gw_contract, "axelar", &sl_id).await?;
+                    Ok((i, phase, approved, executed))
                 });
             }
             let evm_results: Vec<Result<_>> = futures::stream::iter(evm_futs)
@@ -1645,21 +1822,92 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
                 .collect()
                 .await;
             for result in evm_results {
-                let (i, phase, approved) = result?;
+                let (i, phase, approved, executed) = result?;
                 match phase {
+                    // Authoritative fast-path: already executed on the
+                    // destination gateway (catches the approve→execute race).
+                    Phase::Approved if executed => {
+                        let elapsed = txs[i].send_instant.elapsed().as_secs_f64();
+                        if txs[i].timing.approved_secs.is_none() {
+                            txs[i].timing.approved_secs = Some(elapsed);
+                        }
+                        txs[i].timing.executed_secs = Some(elapsed);
+                        txs[i].timing.executed_ok = Some(true);
+                        txs[i].phase = Phase::Done;
+                        last_progress = Instant::now();
+                    }
                     Phase::Approved if approved => {
                         txs[i].timing.approved_secs =
                             Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].phase = Phase::Executed;
                         last_progress = Instant::now();
                     }
-                    Phase::Executed if !approved => {
-                        // false = approval consumed = executed
+                    Phase::Executed if executed => {
                         txs[i].timing.executed_secs =
                             Some(txs[i].send_instant.elapsed().as_secs_f64());
                         txs[i].timing.executed_ok = Some(true);
                         txs[i].phase = Phase::Done;
                         last_progress = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        } else if !evm_check_indices.is_empty() {
+            // Legacy (consensus) destination: the second leg lands as a
+            // `ContractCallApproved` event on the legacy gateway, matched by its
+            // (unique) second-leg payload hash + dest ITS address; execution is
+            // then confirmed directly via `isCommandExecuted` (no approve→execute
+            // race). Sequential per-tx — fine for legacy burst sizes.
+            for &i in &evm_check_indices {
+                let sl_dst = required_second_leg_field(
+                    &txs[i],
+                    "destination_address",
+                    txs[i].second_leg_destination_address.as_ref(),
+                )?;
+                let dst_addr: Address = sl_dst.parse().wrap_err_with(|| {
+                    format!("invalid second-leg EVM destination address {sl_dst}")
+                })?;
+                let ph = required_second_leg_payload_hash(&txs[i])?;
+                match txs[i].phase {
+                    Phase::Approved => {
+                        let found = legacy::find_contract_call_approved_by_payload(
+                            gw_contract.provider(),
+                            *gw_contract.address(),
+                            dst_addr,
+                            ph,
+                            dest_from_block,
+                        )
+                        .await?;
+                        let Some(cmd_id) = found else { continue };
+                        txs[i].command_id = Some(cmd_id);
+                        txs[i].timing.approved_secs =
+                            Some(txs[i].send_instant.elapsed().as_secs_f64());
+                        let executed =
+                            check_evm_command_executed(gw_contract, cmd_id.into()).await?;
+                        if executed {
+                            txs[i].timing.executed_secs =
+                                Some(txs[i].send_instant.elapsed().as_secs_f64());
+                            txs[i].timing.executed_ok = Some(true);
+                            txs[i].phase = Phase::Done;
+                        } else {
+                            txs[i].phase = Phase::Executed;
+                        }
+                        last_progress = Instant::now();
+                    }
+                    Phase::Executed => {
+                        let cmd_id = txs[i].command_id.ok_or_else(|| {
+                            eyre::eyre!(
+                                "legacy ITS tx {} in Executed phase without a commandId",
+                                txs[i].message_id
+                            )
+                        })?;
+                        if check_evm_command_executed(gw_contract, cmd_id.into()).await? {
+                            txs[i].timing.executed_secs =
+                                Some(txs[i].send_instant.elapsed().as_secs_f64());
+                            txs[i].timing.executed_ok = Some(true);
+                            txs[i].phase = Phase::Done;
+                            last_progress = Instant::now();
+                        }
                     }
                     _ => {}
                 }

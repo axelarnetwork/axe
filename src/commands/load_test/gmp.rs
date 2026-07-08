@@ -50,8 +50,12 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     validate_solana_rpc(&args.source_rpc).await?;
     validate_evm_rpc(rpc_url).await?;
 
-    // Check that verification contracts exist for this chain pair before doing any work
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // Check that verification contracts exist for this chain pair before doing any work.
+    // A legacy (consensus) EVM destination has no Cosmos Gateway and is verified
+    // on its on-chain gateway instead, so it's exempt.
+    let (_, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
@@ -434,6 +438,13 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
 
     let cfg = ChainsConfig::load(&args.config)?;
 
+    // Classify each end as legacy (consensus) or Amplifier. A legacy-touching
+    // route is verified entirely on the destination gateway, so it does not
+    // need the Amplifier Cosmos contracts the standard path requires.
+    let (src_legacy, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    let legacy_route = src_legacy || dst_legacy;
+
     let source_rpc_url = args.source_rpc.clone();
     let dest_rpc_url = args.destination_rpc.clone();
 
@@ -441,8 +452,9 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     validate_evm_rpc(&source_rpc_url).await?;
     validate_evm_rpc(&dest_rpc_url).await?;
 
-    // Check that verification contracts exist
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // Amplifier destinations need a Cosmos Gateway for verification; legacy
+    // (consensus) destinations are verified directly on their on-chain gateway.
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — \
              verification would fail. Pick a chain that has a Gateway entry, e.g.:\n  {}",
@@ -579,20 +591,36 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         let vdest_rpc = dest_rpc_url.clone();
         let vdone = std::sync::Arc::clone(&send_done);
         let vgw = dest_gateway_addr;
+        let vlegacy = legacy_route;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
-            verify::verify_onchain_evm_streaming(
-                &vconfig,
-                &vsource,
-                &vdest,
-                &vdest_addr,
-                vgw,
-                &vdest_rpc,
-                verify_rx,
-                vdone,
-                spinner,
-            )
-            .await
+            if vlegacy {
+                verify::verify_onchain_evm_legacy_streaming(
+                    &vconfig,
+                    &vsource,
+                    &vdest,
+                    &vdest_addr,
+                    vgw,
+                    &vdest_rpc,
+                    verify_rx,
+                    vdone,
+                    spinner,
+                )
+                .await
+            } else {
+                verify::verify_onchain_evm_streaming(
+                    &vconfig,
+                    &vsource,
+                    &vdest,
+                    &vdest_addr,
+                    vgw,
+                    &vdest_rpc,
+                    verify_rx,
+                    vdone,
+                    spinner,
+                )
+                .await
+            }
         });
 
         let mut report = evm_sender::run_sustained_load_test_with_metrics(
@@ -631,18 +659,33 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         )
         .await?;
 
-        let verification = verify::verify_onchain(
-            &args.config,
-            &args.source_axelar_id,
-            &args.destination_axelar_id,
-            &destination_address,
-            dest_gateway_addr,
-            &dest_read_provider,
-            &mut report.transactions,
-            verify::SourceChainType::Evm,
-            args.network,
-        )
-        .await?;
+        let verification = if legacy_route {
+            verify::verify_onchain_evm_legacy(
+                &args.config,
+                &args.source_axelar_id,
+                &args.destination_axelar_id,
+                &destination_address,
+                dest_gateway_addr,
+                &dest_read_provider,
+                &mut report.transactions,
+                args.network,
+                verify::SourceChainType::Evm,
+            )
+            .await?
+        } else {
+            verify::verify_onchain(
+                &args.config,
+                &args.source_axelar_id,
+                &args.destination_axelar_id,
+                &destination_address,
+                dest_gateway_addr,
+                &dest_read_provider,
+                &mut report.transactions,
+                verify::SourceChainType::Evm,
+                args.network,
+            )
+            .await?
+        };
         report.verification = Some(verification);
         report
     };
@@ -770,7 +813,11 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // A legacy (consensus) EVM destination has no Cosmos Gateway and is verified
+    // on its on-chain gateway instead, so it's exempt from this check.
+    let (_, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
@@ -1289,7 +1336,11 @@ pub(super) async fn run_sui_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // A legacy (consensus) EVM destination has no Cosmos Gateway and is verified
+    // on its on-chain gateway instead, so it's exempt from this check.
+    let (_, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );
@@ -1566,7 +1617,11 @@ pub(super) async fn run_sui_to_sol(args: LoadTestArgs, _run_start: Instant) -> R
     let solana_rpc = args.destination_rpc.clone();
     validate_solana_rpc(&solana_rpc).await?;
 
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // A legacy (consensus) EVM destination has no Cosmos Gateway and is verified
+    // on its on-chain gateway instead, so it's exempt from this check.
+    let (_, dst_legacy) =
+        verify::classify_route(&cfg, &args.source_axelar_id, &args.destination_axelar_id);
+    if !dst_legacy && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );

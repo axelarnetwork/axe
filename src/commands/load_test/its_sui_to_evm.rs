@@ -43,7 +43,10 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
     let evm_rpc_url = args.destination_rpc.clone();
     validate_evm_rpc(&evm_rpc_url).await?;
 
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+    // A legacy (consensus) destination has no Cosmos Gateway and is verified on
+    // its on-chain gateway instead; only amplifier dests need the Cosmos Gateway.
+    let dest_amplifier = cfg.axelar.contract_address("VotingVerifier", dest).is_ok();
+    if dest_amplifier && cfg.axelar.contract_address("Gateway", dest).is_err() {
         eyre::bail!(
             "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
         );

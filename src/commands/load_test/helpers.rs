@@ -21,7 +21,7 @@ use owo_colors::OwoColorize;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::metrics::LoadTestReport;
+use super::metrics::{AmplifierTiming, LoadTestReport};
 use super::verify;
 use super::{LoadTestArgs, read_cache, save_cache};
 use crate::config::ChainsConfig;
@@ -355,8 +355,58 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
     gateway: alloy::primitives::Address,
     gas_service: alloy::primitives::Address,
 ) -> Result<alloy::primitives::Address> {
-    let bytecode = read_artifact_bytecode("artifacts/SenderReceiver.json")?;
-    let mut deploy_code = bytecode;
+    // Legacy (pre-1559) chains break alloy's default fee estimation; detect and
+    // send a type-0 tx with an explicit gas_price instead.
+    let fee_mode = super::gas_mode::EvmFeeMode::detect(provider).await?;
+
+    // Pre-Shanghai chains (e.g. Kava) reject the default bytecode's PUSH0
+    // opcode. Probe with eth_call (no nonce consumed) so we send exactly one
+    // deploy tx with the bytecode the chain accepts.
+    let artifact = choose_deploy_artifact(provider, gateway, gas_service).await?;
+    deploy_with_artifact(provider, artifact, gateway, gas_service, fee_mode).await
+}
+
+/// Pick the SenderReceiver bytecode the chain accepts. Simulates the default
+/// (Shanghai) deploy with `eth_call`; if the chain rejects an opcode (`PUSH0`
+/// on a pre-Shanghai EVM) it returns the paris-build path instead. Any other
+/// simulation outcome keeps the default — the real deploy surfaces real errors.
+async fn choose_deploy_artifact<P: alloy::providers::Provider>(
+    provider: &P,
+    gateway: alloy::primitives::Address,
+    gas_service: alloy::primitives::Address,
+) -> Result<&'static str> {
+    const DEFAULT: &str = "artifacts/SenderReceiver.json";
+    const PARIS: &str = "artifacts/SenderReceiver.paris.json";
+    let mut code = read_artifact_bytecode(DEFAULT)?;
+    code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
+    let probe = TransactionRequest::default().with_deploy_code(Bytes::from(code));
+    match provider.call(probe).await {
+        Err(e) if is_unsupported_opcode(&e.to_string()) => {
+            ui::info("destination rejects PUSH0 (pre-Shanghai EVM); using paris bytecode...");
+            Ok(PARIS)
+        }
+        _ => Ok(DEFAULT),
+    }
+}
+
+/// True if an error is a chain rejecting an opcode the bytecode uses (e.g.
+/// `PUSH0` on a pre-Shanghai EVM) — the signal to use the paris build.
+fn is_unsupported_opcode(err: &str) -> bool {
+    let s = err.to_lowercase();
+    s.contains("push0") || s.contains("invalid opcode")
+}
+
+/// Deploy the SenderReceiver from a specific bytecode artifact and return its
+/// address. Split out so `deploy_sender_receiver` can retry with an alternate
+/// (paris) artifact when the chain rejects the default bytecode's opcodes.
+async fn deploy_with_artifact<P: alloy::providers::Provider>(
+    provider: &P,
+    artifact_path: &str,
+    gateway: alloy::primitives::Address,
+    gas_service: alloy::primitives::Address,
+    fee_mode: super::gas_mode::EvmFeeMode,
+) -> Result<alloy::primitives::Address> {
+    let mut deploy_code = read_artifact_bytecode(artifact_path)?;
     deploy_code.extend_from_slice(&(gateway, gas_service).abi_encode_params());
 
     // Wrap `send_transaction` with retry on transient transport / 5xx /
@@ -368,8 +418,9 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
         crate::retry::DEFAULT_ATTEMPTS,
         crate::retry::is_transient_default,
         || {
-            let tx =
-                TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code.clone()));
+            let tx = fee_mode.apply(
+                TransactionRequest::default().with_deploy_code(Bytes::from(deploy_code.clone())),
+            );
             async { provider.send_transaction(tx).await }
         },
     )
@@ -395,6 +446,37 @@ pub(crate) async fn deploy_sender_receiver<P: alloy::providers::Provider>(
         receipt.block_number.unwrap_or(0)
     ));
     Ok(addr)
+}
+
+/// Print the per-stage Amplifier pipeline progress line. Phases that don't
+/// apply to the route stay 0 and are omitted — a legacy (consensus) source has
+/// no `voted`, a legacy destination has no `routed` — so a legacy run reads
+/// cleanly as approved/executed. The "stuck at X" line elsewhere still reports
+/// where a stalled message sits.
+fn print_pipeline_counts(report: &LoadTestReport) {
+    let total = report.total_confirmed;
+    let count = |sel: fn(&AmplifierTiming) -> bool| -> u64 {
+        report
+            .transactions
+            .iter()
+            .filter(|t| t.amplifier_timing.as_ref().is_some_and(sel))
+            .count() as u64
+    };
+    let voted = count(|a| a.voted_secs.is_some());
+    let routed = count(|a| a.routed_secs.is_some());
+    let approved = count(|a| a.approved_secs.is_some());
+    let executed = count(|a| a.executed_secs.is_some());
+
+    let mut parts = Vec::new();
+    if voted > 0 {
+        parts.push(format!("voted {voted}/{total}"));
+    }
+    if routed > 0 {
+        parts.push(format!("routed {routed}/{total}"));
+    }
+    parts.push(format!("approved {approved}/{total}"));
+    parts.push(format!("executed {executed}/{total}"));
+    println!("  pipeline         {}", parts.join("  "));
 }
 
 pub(crate) fn print_final_report(report: &LoadTestReport) {
@@ -428,54 +510,7 @@ pub(crate) fn print_final_report(report: &LoadTestReport) {
 
         // Per-stage pipeline counts (computed from transaction records).
         // Shown even when verification times out so partial progress is visible.
-        let total = report.total_confirmed;
-        let voted = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.voted_secs.is_some())
-            })
-            .count() as u64;
-        let routed = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.routed_secs.is_some())
-            })
-            .count() as u64;
-        let approved = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.approved_secs.is_some())
-            })
-            .count() as u64;
-        let executed = report
-            .transactions
-            .iter()
-            .filter(|t| {
-                t.amplifier_timing
-                    .as_ref()
-                    .is_some_and(|a| a.executed_secs.is_some())
-            })
-            .count() as u64;
-        {
-            let mut parts = Vec::new();
-            // Skip voted for consensus chains (no VotingVerifier → always 0).
-            if voted > 0 {
-                parts.push(format!("voted {voted}/{total}"));
-            }
-            parts.push(format!("routed {routed}/{total}"));
-            parts.push(format!("approved {approved}/{total}"));
-            parts.push(format!("executed {executed}/{total}"));
-            println!("  pipeline         {}", parts.join("  "));
-        }
+        print_pipeline_counts(report);
 
         // End-to-end line
         match (

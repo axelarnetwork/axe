@@ -145,6 +145,7 @@ impl RealTimeStats {
         total: usize,
         err: Option<&str>,
         has_voting_verifier: bool,
+        has_routed_phase: bool,
     ) -> String {
         let [voted, routed, _, approved, executed] = counts;
         let [tv, tr, _, ta, te] = self.throughputs;
@@ -152,7 +153,9 @@ impl RealTimeStats {
         if has_voting_verifier {
             parts.push(format!("voted: {}", Self::fmt_phase(voted, total, tv)));
         }
-        parts.push(format!("routed: {}", Self::fmt_phase(routed, total, tr)));
+        if has_routed_phase {
+            parts.push(format!("routed: {}", Self::fmt_phase(routed, total, tr)));
+        }
         parts.push(format!(
             "approved: {}",
             Self::fmt_phase(approved, total, ta)

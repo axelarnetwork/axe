@@ -412,6 +412,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
                     has_vv,
                     super::verify::SourceChainType::Svm,
                     network,
+                    false, // Solana source → EVM dest legacy support lands in a later phase
                 ) {
                     Ok(pending) => {
                         if tx_sender.send(pending).is_err() {

@@ -38,7 +38,7 @@ axe verifiers mainnet solana
 axe verifier-votes mainnet solana axelar1s2cf963rm0u6kxgker95dh5urmq0utqq3rezdn
 
 # Submit (and relay) a governance proposal to an edge chain
-axe propose testnet berachain --op pause --relay
+axe propose testnet avalanche --op pause --relay
 ```
 
 ## Commands

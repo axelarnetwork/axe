@@ -94,13 +94,27 @@ async fn quote_route_gas(args: &LoadTestArgs) -> Option<u128> {
     .await
 }
 
-/// Verify Axelar-side prerequisites (cosmos Gateway for `dest`, global
-/// AxelarnetGateway). Bails with the original error strings if either is
-/// missing.
-pub(super) fn verify_axelar_prerequisites(cfg: &ChainsConfig, dest: &str) -> eyre::Result<()> {
-    if cfg.axelar.contract_address("Gateway", dest).is_err() {
+/// Verify Axelar-side prerequisites: an Amplifier destination needs a Cosmos
+/// Gateway (the `routed` phase); a legacy (consensus) destination has none and
+/// is verified on its on-chain gateway instead. The global AxelarnetGateway
+/// (the ITS Hub) is always required. `dest_axelar_id` is the destination's
+/// axelarId (not the config key — they differ for consensus chains).
+pub(super) fn verify_axelar_prerequisites(
+    cfg: &ChainsConfig,
+    dest_axelar_id: &str,
+) -> eyre::Result<()> {
+    let dest_amplifier = cfg
+        .axelar
+        .contract_address("VotingVerifier", dest_axelar_id)
+        .is_ok();
+    if dest_amplifier
+        && cfg
+            .axelar
+            .contract_address("Gateway", dest_axelar_id)
+            .is_err()
+    {
         eyre::bail!(
-            "destination chain '{dest}' has no Cosmos Gateway in the config — verification would fail."
+            "destination chain '{dest_axelar_id}' has no Cosmos Gateway in the config — verification would fail."
         );
     }
     if cfg
@@ -258,9 +272,13 @@ pub(super) async fn deploy_its_token<P: Provider>(
 
     ui::info(&format!("deploying remote token to {dest_chain}..."));
 
-    // ITS routes via the hub, so two commands are created (source→hub and
-    // hub→destination). Pay 2× gas_value so both legs are covered.
-    let hub_gas = gas_value * U256::from(2);
+    // A remote deploy creates a fresh token contract on the destination, which
+    // costs far more destination-side gas than a transfer — and a consensus
+    // source has no Axelarscan quote, so `gas_value` falls back to a low
+    // constant. Pay 10× to cover the destination deploy execution (e.g. Stellar
+    // token creation needed ~10×); the relayer refunds the unused remainder.
+    // Mirrors `DEPLOY_GAS_MULTIPLIER` in the Solana-source ITS module.
+    let hub_gas = gas_value * U256::from(10);
     let remote_call = factory
         .deployRemoteInterchainToken(salt, dest_chain.to_string(), hub_gas)
         .value(hub_gas);
@@ -297,6 +315,39 @@ pub(super) async fn deploy_its_token<P: Provider>(
     super::helpers::hint_persist_axe_token(source_chain, &token_id);
 
     Ok((token_id, token_addr, deploy_message_id))
+}
+
+/// Remote-deploy an *already-deployed* interchain token (identified by its
+/// `salt`) to a new destination chain, without minting a fresh token. Lets an
+/// existing AXE be registered on a chain it isn't on yet (e.g. a legacy chain),
+/// reusing the same `tokenId`. Returns the remote-deploy message id for the
+/// hub-propagation wait. `dest_chain` is the destination axelarId.
+pub(super) async fn remote_deploy_existing_token<P: Provider>(
+    provider: &P,
+    factory_addr: Address,
+    salt: FixedBytes<32>,
+    dest_chain: &str,
+    gas_value: U256,
+) -> eyre::Result<String> {
+    let factory = InterchainTokenFactory::new(factory_addr, provider);
+    // Same 10× headroom as a fresh remote deploy — the destination still
+    // CREATE2s the token contract; the relayer refunds the remainder.
+    let hub_gas = gas_value * U256::from(10);
+    ui::info(&format!("registering existing token on {dest_chain}..."));
+    let remote_call = factory
+        .deployRemoteInterchainToken(salt, dest_chain.to_string(), hub_gas)
+        .value(hub_gas);
+    let pending = remote_call.send().await?;
+    let tx_hash = *pending.tx_hash();
+    ui::tx_hash("remote deploy tx", &format!("{tx_hash}"));
+    let receipt = tokio::time::timeout(Duration::from_secs(120), pending.get_receipt())
+        .await
+        .map_err(|_| eyre!("remote deploy tx timed out after 120s"))??;
+    let (event_index, _, _, _, _) = extract_contract_call_event(&receipt)
+        .map_err(|e| eyre!("remote deploy emitted no ContractCall event: {e}"))?;
+    let msg_id = format!("{tx_hash:#x}-{event_index}");
+    ui::kv("remote deploy message ID", &msg_id);
+    Ok(msg_id)
 }
 
 /// Pre-approve the ITS token manager on each derived key's balance so

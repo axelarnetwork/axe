@@ -59,7 +59,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     validate_evm_rpc(&dest_rpc_url).await?;
 
     let cfg = ChainsConfig::load(&args.config)?;
-    verify_axelar_prerequisites(&cfg, dest)?;
+    verify_axelar_prerequisites(&cfg, &args.destination_axelar_id)?;
 
     ui::kv("source", src);
     ui::kv("destination", dest);
@@ -80,6 +80,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
         &evm_source,
         &its,
         &source_rpc_url,
+        &dest_rpc_url,
         &sizing,
         gas_value,
     )
@@ -102,10 +103,14 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> eyre::Result<()> {
     }
 
     if let Some(ref deploy_msg_id) = token.deploy_message_id {
+        // Use axelar IDs (not the config keys) — the ITS Hub records messages
+        // under the chain's axelarId, which differs from the key for consensus
+        // chains (e.g. key "avalanche" vs axelarId "Avalanche"). Passing the key
+        // makes the hub `executable_messages` query never match.
         super::verify::wait_for_its_remote_deploy(
             &args.config,
-            src,
-            dest,
+            &args.source_axelar_id,
+            &args.destination_axelar_id,
             deploy_msg_id,
             dest_gateway_addr,
             &dest_rpc_url,
@@ -285,11 +290,18 @@ async fn resolve_or_deploy_token(
     evm_source: &EvmSource,
     its: &ItsContracts,
     evm_rpc_url: &str,
+    dest_rpc_url: &str,
     sizing: &RunSizing,
     gas_value: U256,
 ) -> eyre::Result<TokenIdentity> {
     let src = &args.source_chain;
     let dest = &args.destination_chain;
+    // The ITS edge / hub identify the destination by its axelarId, which differs
+    // from the config key for consensus chains ("avalanche" key vs "Avalanche"
+    // axelarId). Passing the key to deployRemoteInterchainToken makes the source
+    // revert with `UntrustedChain()`, so the on-chain destination name must be
+    // the axelarId. (`dest` stays the key for cache/config lookups.)
+    let dest_its = args.destination_axelar_id.as_str();
     let write_provider = ProviderBuilder::new()
         .wallet(evm_source.signer.clone())
         .connect_http(evm_rpc_url.parse()?);
@@ -322,7 +334,34 @@ async fn resolve_or_deploy_token(
             .map_err(|e| eyre!("failed to look up token address for {token_id}: {e}"))?;
         ui::kv("token ID (provided)", &format!("{token_id}"));
         ui::address("token address", &format!("{addr}"));
-        (token_id, addr, None)
+        // Reuse an existing token on a chain it isn't on yet: if the destination
+        // lacks this token, remote-deploy it there using the salt axe recorded
+        // when it first deployed the token (its local cache) — no fresh mint.
+        let dest_provider = ProviderBuilder::new().connect_http(dest_rpc_url.parse()?);
+        let dest_has_token = !dest_provider.get_code_at(addr).await?.is_empty();
+        let deploy_message_id = if dest_has_token {
+            None
+        } else {
+            let salt_hex = super::find_cached_salt(tid).ok_or_else(|| {
+                eyre!(
+                    "token {tid} is not registered on '{dest}' and no deploy salt is cached; \
+                     run an ITS test once from the token's home chain so axe records its salt"
+                )
+            })?;
+            let salt: FixedBytes<32> = salt_hex
+                .parse()
+                .map_err(|e| eyre!("cached salt for {tid} is invalid: {e}"))?;
+            let msg_id = super::its_evm_source::remote_deploy_existing_token(
+                &write_provider,
+                its.its_factory_addr,
+                salt,
+                dest_its,
+                gas_value,
+            )
+            .await?;
+            Some(msg_id)
+        };
+        (token_id, addr, deploy_message_id)
     } else if let Some((tid, addr)) = config_axe {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));
@@ -360,7 +399,7 @@ async fn resolve_or_deploy_token(
                     &write_provider,
                     its.its_factory_addr,
                     evm_source.deployer_address,
-                    dest,
+                    dest_its,
                     sizing.total_supply,
                     src,
                     gas_value,
@@ -372,7 +411,7 @@ async fn resolve_or_deploy_token(
                 &write_provider,
                 its.its_factory_addr,
                 evm_source.deployer_address,
-                dest,
+                dest_its,
                 sizing.total_supply,
                 src,
                 gas_value,
@@ -465,7 +504,9 @@ async fn run_sustained_pipeline(
     let _ = spinner_tx.send(spinner.clone());
 
     let test_start = Instant::now();
-    let dest_chain_s = dest.to_string();
+    // ITS routes by axelarId (see resolve_or_deploy_token) — key != axelarId for
+    // consensus chains, so use the axelarId for the on-chain interchainTransfer.
+    let dest_chain_s = args.destination_axelar_id.clone();
     let derived_owned: Vec<PrivateKeySigner> = derived.to_vec();
     let amount_per_tx = sizing.amount_per_tx;
     let its_proxy_addr = targets.its_proxy_addr;
@@ -567,7 +608,8 @@ async fn run_burst_pipeline(
     let test_start = Instant::now();
 
     let mut tasks = Vec::with_capacity(num_txs);
-    let dest_chain = dest.to_string();
+    // ITS routes by axelarId (key != axelarId for consensus chains).
+    let dest_chain = args.destination_axelar_id.clone();
 
     for derived_signer in derived {
         let metrics_clone = Arc::clone(&metrics_list);
