@@ -377,10 +377,11 @@ async fn run_sustained_pipeline(
     let vdest_rpc = evm_rpc_url.clone();
     let vdone = Arc::clone(&send_done);
     let vgw = evm.evm_gateway_addr;
+    let vnetwork = args.network;
     let verify_handle = tokio::spawn(async move {
         let spinner = spinner_rx.await.expect("spinner channel dropped");
         super::verify::verify_onchain_evm_its_streaming(
-            &vconfig, &vsource, &vdest, vgw, &vdest_rpc, verify_rx, vdone, spinner,
+            &vconfig, &vsource, &vdest, vnetwork, vgw, &vdest_rpc, verify_rx, vdone, spinner,
         )
         .await
     });
@@ -717,6 +718,7 @@ async fn run_burst_pipeline(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
+        args.network,
         &format!("{}", evm.its_proxy_addr),
         evm.evm_gateway_addr,
         evm_rpc_url,

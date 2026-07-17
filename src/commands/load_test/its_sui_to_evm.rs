@@ -317,6 +317,7 @@ pub async fn run(args: LoadTestArgs, _run_start: Instant) -> Result<()> {
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
+        args.network,
         &destination_address,
         evm_gateway_addr,
         &evm_rpc_url,

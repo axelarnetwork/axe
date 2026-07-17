@@ -13,6 +13,7 @@ pub mod load_test;
 pub mod propose;
 pub mod reset;
 pub mod status;
+pub mod test_express;
 pub mod test_gmp;
 pub mod test_helpers;
 pub mod test_its;

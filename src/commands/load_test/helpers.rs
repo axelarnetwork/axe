@@ -630,6 +630,16 @@ pub(crate) fn print_final_report(report: &LoadTestReport) {
             prev = Some(*total);
         }
 
+        // Recovered via the final GMP-API check (executed on-chain despite a
+        // polling-loop timeout — counted as successful, surfaced distinctly).
+        if v.recovered_via_api > 0 {
+            println!();
+            println!(
+                "  recovered via GMP-API final check: {}",
+                v.recovered_via_api
+            );
+        }
+
         // Stuck
         if v.stuck > 0 {
             let stuck_detail: Vec<String> = v
@@ -1192,6 +1202,7 @@ pub(crate) async fn finalize_sui_dest_run_its(
         &args.config,
         &args.source_axelar_id,
         &args.destination_axelar_id,
+        args.network,
         sui_rpc,
         &mut report.transactions,
     )

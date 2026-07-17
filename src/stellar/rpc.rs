@@ -739,11 +739,20 @@ impl StellarClient {
             tx,
             signatures: VecM::default(),
         });
-        let sim = self
-            .rpc
-            .simulate_transaction_envelope(&envelope, None)
-            .await
-            .map_err(|e| eyre!("simulate_transaction_envelope: {e}"))?;
+        // Read-only simulation: wrap in `retry_all` so a transient Stellar RPC
+        // hiccup (connection reset, 5xx) doesn't abort the caller. The load-test
+        // verifier polls `is_message_approved`/`is_message_executed` through here;
+        // without the retry a single blip aborted the whole run — observed on a
+        // mainnet hyperliquid→stellar route that had already executed on-chain
+        // (connection reset surfaced here as a hard error). Mirrors the EVM
+        // destination view-call retry and the existing XRPL `account_info` retry.
+        let sim = crate::retry::retry_all("stellar.simulate_view", || async {
+            self.rpc
+                .simulate_transaction_envelope(&envelope, None)
+                .await
+        })
+        .await
+        .map_err(|e| eyre!("simulate_transaction_envelope: {e}"))?;
         if let Some(err) = sim.error {
             return Err(eyre!("Stellar simulate failed: {err}"));
         }

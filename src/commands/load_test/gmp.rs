@@ -192,12 +192,14 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         let vdest_rpc = args.destination_rpc.clone();
         let vdone = std::sync::Arc::clone(&send_done);
         let vgw = gateway_addr;
+        let vnetwork = args.network;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_evm_streaming(
                 &vconfig,
                 &vsource,
                 &vdest,
+                vnetwork,
                 &vdest_addr,
                 vgw,
                 &vdest_rpc,
@@ -592,6 +594,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
         let vdone = std::sync::Arc::clone(&send_done);
         let vgw = dest_gateway_addr;
         let vlegacy = legacy_route;
+        let vnetwork = args.network;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             if vlegacy {
@@ -599,6 +602,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
                     &vconfig,
                     &vsource,
                     &vdest,
+                    vnetwork,
                     &vdest_addr,
                     vgw,
                     &vdest_rpc,
@@ -612,6 +616,7 @@ pub(super) async fn run_evm_to_evm(args: LoadTestArgs, _run_start: Instant) -> R
                     &vconfig,
                     &vsource,
                     &vdest,
+                    vnetwork,
                     &vdest_addr,
                     vgw,
                     &vdest_rpc,
@@ -952,12 +957,14 @@ pub(super) async fn run_stellar_to_evm(args: LoadTestArgs, _run_start: Instant) 
         let vdest_rpc = evm_rpc_url.clone();
         let vdone = std::sync::Arc::clone(&send_done);
         let vgw = gateway_addr;
+        let vnetwork = args.network;
         let verify_handle = tokio::spawn(async move {
             let spinner = spinner_rx.await.expect("spinner channel dropped");
             verify::verify_onchain_evm_streaming(
                 &vconfig,
                 &vsource,
                 &vdest,
+                vnetwork,
                 &vdest_addr,
                 vgw,
                 &vdest_rpc,

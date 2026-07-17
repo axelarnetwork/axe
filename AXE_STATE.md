@@ -76,6 +76,55 @@ GMP is the cross-chain **delivery** primitive; ITS rides the identical
 verify→route→approve→execute path and additionally needs its token registered on
 each endpoint. Validating GMP validates the delivery path for both.
 
+### `test express-execution` — express-reimbursement monitor (observe-only)
+
+`axe test express-execution <chains…> [--source-tx <hash>] [--network …]
+[--recent N] [--timeout-secs N]` monitors Axelar **express execution
+reimbursement** via the Axelarscan GMP API (`/gmp/searchGMP`; testnet base for
+testnet/stagenet/devnet, mainnet base for mainnet). Express = a relayer fronts
+tokens to the recipient on the destination ITS edge (`expressExecute`) *before*
+the canonical GMP proof lands, then is **reimbursed** when the canonical
+`ITS.execute` lands (`ExpressExecutionFulfilled` fires atomically inside that
+execute tx). The command reports two phases per transfer: **Phase 1** —
+express executed (executor EOA / contract + express tx), and **Phase 2** —
+executor reimbursed (canonical execute tx), or PENDING/timeout if the execute
+hasn't landed. On reimbursement it also runs an **amount check** (MOU-27): it
+decodes the executor EOA's outbound ERC-20 `Transfer`s in the express tx
+(fronted) and its inbound `Transfer`s in the execute tx (reimbursed), both from
+the GMP-API receipt logs, and asserts the two are equal. A mismatch or a missing
+inbound transfer is surfaced as an error and **fails** the single-tx watch
+(non-zero exit); the fronted/reimbursed base-unit amounts are printed either way.
+Two modes: a chains scan (newest `--recent` express transfers per chain) and a
+single-tx watch (`--source-tx`, polled every 10 s up to `--timeout-secs`, default
+1800). It needs no wallet keys, RPCs, or chains-config — GMP-API reads only. CI:
+`.github/workflows/test-express-execution.yml`.
+
+**v1 is monitor-only.** axe does **not** yet originate a qualifying express
+transfer — producing one requires routing through an express-enabled project
+(e.g. the Squid router), which is an open board decision tracked as a follow-up.
+v1 only observes reimbursement on transfers initiated elsewhere.
+
+**On-chain reimbursement verified (MOU-26, mainnet, 2026-06-25).** The monitor's
+API-derived "reimbursed" flag was cross-checked against the destination-chain
+receipts for three real express transfers spanning the finality spectrum. In
+every case the express executor EOA `0xe743…cea84` pays out token amount X in the
+express tx and receives the **exact same X** back (mint → executor) inside the
+canonical execute tx — full, exact-amount reimbursement, not just "execute
+landed":
+
+| source (finality) | route | express→execute gap | amount fronted = reimbursed |
+| --- | --- | --- | --- |
+| avalanche (~instant) | → moonbeam | 78 s | `0xbe4488` |
+| base (moderate) | → avalanche | 1527 s | `0x119db3af5` |
+| ethereum (~13–16 min) | → polygon | 1079 s | `0x49292` |
+
+Two ethereum-source transfers were also caught mid-flight (`express_executed`,
+execute not yet landed) — the source-finality wait the monitor reports as Phase 2
+PENDING. The amount-equality invariant above is now asserted **by the tool**
+(MOU-27): Phase 2 decodes the executor EOA's outbound `Transfer` in the express
+tx and inbound `Transfer` in the execute tx from the GMP-API receipt logs and
+fails on mismatch or missing inbound — no longer a manual check.
+
 ---
 
 ## 3. Validated on-chain — executed end-to-end
@@ -131,6 +180,56 @@ does not).
 | monad-3 → {avalanche, ethereum-sepolia, hedera} | amplifier-EVM → mixed | GMP/ITS ✅ |
 | hedera → monad-3 | EVM → amplifier-EVM | ITS ✅ |
 | linea-sepolia → immutable | amplifier-EVM → EVM | GMP ✅ |
+
+### 3d. Mainnet — MOU-29 15-route validation batch (2026-06-23 – 2026-06-26)
+
+Deliberate end-to-end validation covering amplifier non-EVM ↔ non-EVM, amplifier
+EVM ↔ non-EVM, legacy ↔ amplifier non-EVM, and XRPL paths.  A route is ✅ only
+when the destination message reached `executed` (GMP-API `executed` state +
+destination execute tx confirmed by axe verifier or GMP-API `recovered_via_api`
+backstop).
+
+| # | Route | Proto | Class | Source Tx | Result |
+|---|---|---|---|---|---|
+| 01 | solana → sui | ITS | amplifier non-EVM ↔ non-EVM | `51TcpvU19G9UD97TPFjg8AeQkkLHcRNuKHbqa7W83W` | ✅ executed |
+| 02 | sui → solana | ITS | amplifier non-EVM ↔ non-EVM | `wDMmNf5AJsRCAmqQEmoUgHKoJVPa945PameRgAmSd2` | ✅ executed |
+| 03 | solana → sui | GMP | amplifier non-EVM ↔ non-EVM | `3UArKocnjH1tbhnhK3Sx8GsW95xsB89m4nVz72hMJ8` | ✅ executed |
+| 04 | sui → hyperliquid | GMP | amplifier non-EVM → amplifier EVM | `9xnicQn9UccGRU8V4vgLvotpRGuienfQayoMrqtEfM` | ✅ executed |
+| 05 | stellar → solana | GMP | amplifier non-EVM ↔ non-EVM | `0xd8a924923a8868879318ad9eb912da89f8fbc00e` | ✅ executed |
+| 06 | xrpl → xrpl-evm | ITS | XRPL canonical XRP | `0x5037290b3a9ec3eccff49fe714803f381c44cd35` | ✅ executed |
+| 07 | xrpl-evm → xrpl | ITS | XRPL canonical XRP | `0xbbab736ab1cbc9911b7e22bed8aa6fb37d1bcb55` | ✅ executed |
+| 08 | hyperliquid → stellar | ITS | amplifier EVM → non-EVM | `0x1c6c898da42d3edf6a1b991dc27802e7ead44a9c` | ✅ executed (52.5 s) |
+| 09 | avalanche → solana | GMP | legacy EVM → amplifier non-EVM | `0x6519283767a8504868a06a82eae632130fcf1c0e` | ✅ executed |
+| 10 | avalanche → stellar | GMP | legacy EVM → amplifier non-EVM | `0x6488a701a7ebd008dcfb6d10be5ffd4b850c1cbb` | ✅ executed |
+| 11 | avalanche → sui | GMP | legacy EVM → amplifier non-EVM | `0x48abdda2c0b882813c78da72d8719b7b82d127b7` | ✅ executed |
+| 12 | stellar → arbitrum | GMP | amplifier non-EVM → legacy EVM | `0x9824e77f21919c58ff6d16792b95680ac4c75020` | ✅ executed |
+| 13 | sui → avalanche | GMP | amplifier non-EVM → legacy EVM | `FnJCBmjKRvwAVuYR729NPPSq6usz2H86E4Ph4R3RLu` | ✅ executed |
+| 14 | avalanche → base | GMP | legacy EVM ↔ legacy EVM | `0xae0d52ca1de181624df9d75c0fb5b901afa41822` | ✅ executed |
+| 15 | kava → moonbeam | GMP | legacy EVM ↔ legacy EVM | `0xbedaf89d3a9be09fa77a7c1425e6af6079b6fe80` | ✅ executed |
+
+**Result: 15/15 ✅**  All routes reached `executed` on destination.
+
+**Part-B reliability findings (MOU-29 audit):**
+- Fast non-EVM routes (stellar, sui, solana) typically execute in < 60 s; axe's
+  5 s poll interval + live verifier may miss execution before a short per-run cap,
+  but the `recovered_via_api` GMP-API backstop correctly catches them.
+- EVM destination view-call retry fixed (`8e1f972`) — transient RPC errors on
+  `isMessageApproved` / `isMessageExecuted` / `isCommandExecuted` no longer fail
+  the verifier loop prematurely.
+- **Stellar destination view-call retry fixed (`55e3dbe`)** — same bug class as
+  the EVM fix, surfaced empirically by this batch: the hyperliquid→stellar route
+  (08) **executed on-chain at T+13–31 s**, but axe's verifier crashed (exit 1) on
+  a transient Stellar RPC *connection reset* at `stellar/rpc.rs:746`
+  (`simulate_view` → `simulate_transaction_envelope`, no retry). Wrapped the
+  read-only simulation in `retry_all`, mirroring the EVM + XRPL patterns.
+- `INACTIVITY_TIMEOUT=7200 s` and `POLL_INTERVAL=5 s` are correctly sized for the
+  observed latency distribution (max seen: 3226 s for mantle→kava).
+- Re-run notes: route 10 (avalanche→stellar) was a source-side setup cap on the
+  first pass (SenderReceiver deploy still confirming when the batch cap fired);
+  it passes cleanly with a longer cap. Route 14 (avalanche→base) executed on-chain
+  at T+2 s; an axe-side verify error only appeared when a token-gated public Base
+  RPC rejected the archive `getLogs` scan — an RPC-selection issue, not an axe
+  bug (use a private/full Base RPC for the legacy `ContractCallApproved` scan).
 
 ---
 

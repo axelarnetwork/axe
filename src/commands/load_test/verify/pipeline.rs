@@ -161,6 +161,97 @@ impl<P: Provider> DestinationChecker<'_, P> {
 }
 
 // ---------------------------------------------------------------------------
+// Final GMP-API recheck for timed-out txs
+// ---------------------------------------------------------------------------
+
+/// Bound the final GMP-API recheck so a slow or unreachable API can never hang
+/// the end of a verification run.
+const GMP_API_RECHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Best-effort, non-fatal final check: ask the Axelarscan GMP API whether this
+/// message actually executed on-chain. A slow final leg or a missed poll can
+/// leave an executed transfer looking failed at the inactivity timeout (the
+/// MOU-3/MOU-4 failure mode); this is the safety net layered on top of those
+/// fixes. Any error or timeout falls back to `false` (keep the failed verdict).
+async fn gmp_api_reports_executed(network: crate::types::Network, message_id: &str) -> bool {
+    let base = crate::gmp_api::base_url(network);
+    let lookup = async {
+        // Prefer the exact `message_id` Axelarscan keys on. If it isn't indexed
+        // in that form for this source chain, fall back to the source tx id
+        // (the portion before the event-index suffix).
+        if let Some(rec) = crate::gmp_api::search_by_message_id(base, message_id).await? {
+            return Ok::<bool, eyre::Report>(rec.is_executed());
+        }
+        if let Some((source_tx, _)) = message_id.rsplit_once('-')
+            && let Some(rec) = crate::gmp_api::search_by_tx(base, source_tx).await?
+        {
+            return Ok(rec.is_executed());
+        }
+        Ok(false)
+    };
+    match tokio::time::timeout(GMP_API_RECHECK_TIMEOUT, lookup).await {
+        Ok(Ok(executed)) => executed,
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
+/// Apply the final verdict to a tx that didn't reach [`Phase::Done`] before the
+/// inactivity timeout. `executed` is the authoritative GMP-API answer: when
+/// true the tx is recovered as successful (its slow final leg actually landed);
+/// otherwise it keeps the original `"{label}: timed out"` failed verdict.
+fn mark_timed_out_tx(
+    tx: &mut PendingTx,
+    executed: bool,
+    approval_label: &str,
+    execution_label: &str,
+) {
+    if executed {
+        tx.phase = Phase::Done;
+        if tx.timing.executed_secs.is_none() {
+            tx.timing.executed_secs = Some(tx.send_instant.elapsed().as_secs_f64());
+        }
+        tx.timing.executed_ok = Some(true);
+        tx.failed = false;
+        tx.recovered_via_api = true;
+        return;
+    }
+    tx.failed = true;
+    let label = match tx.phase {
+        Phase::Voted => "VotingVerifier",
+        Phase::Routed => "cosmos routing",
+        Phase::HubApproved => "hub approval",
+        Phase::DiscoverSecondLeg => "second-leg discovery",
+        Phase::Approved => approval_label,
+        Phase::Executed => execution_label,
+        Phase::Done => unreachable!(),
+    };
+    if tx.phase == Phase::Executed {
+        tx.timing.executed_ok = Some(false);
+    }
+    tx.fail_reason = Some(format!("{label}: timed out"));
+}
+
+/// Finalize the polling loop: for every tx that didn't reach `Done`, do a
+/// best-effort GMP-API recheck and either recover it (executed on-chain) or
+/// mark it timed-out failed. Sequential by design — this runs once at the end
+/// of a run (single-test CI has `num_txs=1`), so concurrency is naturally
+/// bounded to one in-flight recheck.
+async fn finalize_timed_out_txs(
+    txs: &mut [PendingTx],
+    network: crate::types::Network,
+    approval_label: &str,
+    execution_label: &str,
+) {
+    for tx in txs.iter_mut() {
+        if tx.failed || tx.phase == Phase::Done {
+            continue;
+        }
+        let executed = gmp_api_reports_executed(network, &tx.message_id).await;
+        mark_timed_out_tx(tx, executed, approval_label, execution_label);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified polling pipeline
 // ---------------------------------------------------------------------------
 
@@ -173,6 +264,8 @@ pub(super) struct PollPipelineArgs {
     pub destination_address: String,
     pub axelarnet_gateway: Option<String>,
     pub display_chain: Option<String>,
+    /// Network for the final Axelarscan GMP-API recheck on timed-out txs.
+    pub network: crate::types::Network,
 }
 
 #[allow(clippy::cognitive_complexity)]
@@ -193,6 +286,7 @@ pub(super) async fn poll_pipeline<P: Provider>(
         destination_address,
         axelarnet_gateway,
         display_chain,
+        network,
     } = args;
     let lcd = lcd.as_str();
     let voting_verifier = voting_verifier.as_deref();
@@ -794,26 +888,16 @@ pub(super) async fn poll_pipeline<P: Provider>(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    // Mark remaining non-done txs as failed
-    for tx in txs.iter_mut() {
-        if tx.failed || tx.phase == Phase::Done {
-            continue;
-        }
-        tx.failed = true;
-        let label = match tx.phase {
-            Phase::Voted => "VotingVerifier",
-            Phase::Routed => "cosmos routing",
-            Phase::HubApproved => "hub approval",
-            Phase::DiscoverSecondLeg => "second-leg discovery",
-            Phase::Approved => checker.approval_label(),
-            Phase::Executed => checker.execution_label(),
-            Phase::Done => unreachable!(),
-        };
-        if tx.phase == Phase::Executed {
-            tx.timing.executed_ok = Some(false);
-        }
-        tx.fail_reason = Some(format!("{label}: timed out"));
-    }
+    // Mark remaining non-done txs as failed — but first do an authoritative
+    // GMP-API recheck so a slow final leg that executed on-chain is recovered
+    // as successful rather than reported as a false timeout.
+    finalize_timed_out_txs(
+        txs,
+        network,
+        checker.approval_label(),
+        checker.execution_label(),
+    )
+    .await;
 
     let total = txs.len();
     let (voted, routed, hub_approved, approved, executed) = phase_counts(txs);
@@ -899,6 +983,8 @@ pub(super) struct PollItsHubArgs {
     pub rpc: String,
     pub cosm_gateway_dest: String,
     pub dest: ItsHubDest,
+    /// Network for the final Axelarscan GMP-API recheck on timed-out txs.
+    pub network: crate::types::Network,
 }
 
 /// Full ITS polling pipeline: Voted → HubApproved → DiscoverSecondLeg → Routed → Approved → Executed.
@@ -918,6 +1004,7 @@ pub(super) async fn poll_pipeline_its_hub(
         rpc,
         cosm_gateway_dest,
         dest,
+        network,
     } = args;
     let lcd = lcd.as_str();
     let voting_verifier = voting_verifier.as_deref();
@@ -1450,27 +1537,11 @@ pub(super) async fn poll_pipeline_its_hub(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    // Mark remaining non-done txs as failed
+    // Mark remaining non-done txs as failed — but first do an authoritative
+    // GMP-API recheck so a slow final leg that executed on-chain is recovered
+    // as successful rather than reported as a false timeout.
     let total = txs.len();
-    for tx in txs.iter_mut() {
-        if tx.failed || tx.phase == Phase::Done {
-            continue;
-        }
-        tx.failed = true;
-        let label = match tx.phase {
-            Phase::Voted => "VotingVerifier",
-            Phase::HubApproved => "hub approval",
-            Phase::DiscoverSecondLeg => "second-leg discovery",
-            Phase::Routed => "cosmos routing",
-            Phase::Approved => dest.approval_label(),
-            Phase::Executed => dest.execution_label(),
-            Phase::Done => unreachable!(),
-        };
-        if tx.phase == Phase::Executed {
-            tx.timing.executed_ok = Some(false);
-        }
-        tx.fail_reason = Some(format!("{label}: timed out"));
-    }
+    finalize_timed_out_txs(txs, network, dest.approval_label(), dest.execution_label()).await;
 
     let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
     let routed = txs
@@ -1505,6 +1576,8 @@ pub(super) struct PollItsHubEvmArgs {
     pub cosm_gateway_dest: String,
     pub _destination_chain: String,
     pub dest: ItsEvmDest,
+    /// Network for the final Axelarscan GMP-API recheck on timed-out txs.
+    pub network: crate::types::Network,
 }
 
 /// Full ITS polling pipeline with EVM destination (batch + streaming):
@@ -1527,6 +1600,7 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
         cosm_gateway_dest,
         _destination_chain,
         dest,
+        network,
     } = args;
     let (dest_legacy, dest_from_block) = match dest {
         ItsEvmDest::Legacy { from_block } => (true, from_block),
@@ -1937,27 +2011,11 @@ pub(super) async fn poll_pipeline_its_hub_evm<P: Provider>(
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    // Mark remaining non-done txs as failed
+    // Mark remaining non-done txs as failed — but first do an authoritative
+    // GMP-API recheck so a slow final leg that executed on-chain is recovered
+    // as successful rather than reported as a false timeout.
     let total = txs.len();
-    for tx in txs.iter_mut() {
-        if tx.failed || tx.phase == Phase::Done {
-            continue;
-        }
-        tx.failed = true;
-        let label = match tx.phase {
-            Phase::Voted => "VotingVerifier",
-            Phase::HubApproved => "hub approval",
-            Phase::DiscoverSecondLeg => "second-leg discovery",
-            Phase::Routed => "cosmos routing",
-            Phase::Approved => "EVM approval",
-            Phase::Executed => "EVM execution",
-            Phase::Done => unreachable!(),
-        };
-        if tx.phase == Phase::Executed {
-            tx.timing.executed_ok = Some(false);
-        }
-        tx.fail_reason = Some(format!("{label}: timed out"));
-    }
+    finalize_timed_out_txs(txs, network, "EVM approval", "EVM execution").await;
 
     let (voted, _, hub_approved, approved, executed) = phase_counts(txs);
     let routed = txs
@@ -2234,7 +2292,63 @@ async fn batch_check_hub_approved_owned(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_payload_hash;
+    use std::time::Instant;
+
+    use alloy::primitives::Address;
+
+    use super::{PendingTx, Phase, mark_timed_out_tx, parse_payload_hash};
+    use crate::commands::load_test::metrics::AmplifierTiming;
+
+    fn pending_at(phase: Phase) -> PendingTx {
+        PendingTx {
+            idx: 0,
+            message_id: "0xdeadbeef-0".into(),
+            send_instant: Instant::now(),
+            source_address: String::new(),
+            contract_addr: Address::ZERO,
+            payload_hash: None,
+            payload_hash_hex: String::new(),
+            command_id: None,
+            gmp_destination_chain: String::new(),
+            gmp_destination_address: String::new(),
+            timing: AmplifierTiming::default(),
+            failed: false,
+            fail_reason: None,
+            phase,
+            second_leg_message_id: None,
+            second_leg_payload_hash: None,
+            second_leg_source_address: None,
+            second_leg_destination_address: None,
+            recovered_via_api: false,
+        }
+    }
+
+    #[test]
+    fn timed_out_tx_reported_executed_is_recovered() {
+        // A tx stuck at the timeout that the GMP API confirms executed is
+        // reclassified as a successful, recovered tx — never marked failed.
+        let mut tx = pending_at(Phase::Executed);
+        mark_timed_out_tx(&mut tx, true, "EVM approval", "EVM execution");
+
+        assert!(!tx.failed);
+        assert!(tx.recovered_via_api);
+        assert_eq!(tx.phase, Phase::Done);
+        assert_eq!(tx.timing.executed_ok, Some(true));
+        assert!(tx.timing.executed_secs.is_some());
+        assert!(tx.fail_reason.is_none());
+    }
+
+    #[test]
+    fn timed_out_tx_not_executed_stays_failed() {
+        // A genuinely-unexecuted message keeps the original timed-out verdict.
+        let mut tx = pending_at(Phase::Approved);
+        mark_timed_out_tx(&mut tx, false, "EVM approval", "EVM execution");
+
+        assert!(tx.failed);
+        assert!(!tx.recovered_via_api);
+        assert_eq!(tx.timing.executed_ok, None);
+        assert_eq!(tx.fail_reason.as_deref(), Some("EVM approval: timed out"));
+    }
 
     #[test]
     fn parse_payload_hash_accepts_prefixed_and_unprefixed_hashes() {

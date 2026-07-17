@@ -113,6 +113,11 @@ pub struct VerificationReport {
     pub stuck: u64,
     /// Which phase each stuck tx got stuck at.
     pub stuck_at: Vec<FailureCategory>,
+    /// Number of txs that timed out in the polling loop but were reclassified
+    /// as successful by the final Axelarscan GMP-API check (the message
+    /// actually executed on-chain — a slow final leg, not a real failure).
+    #[serde(default)]
+    pub recovered_via_api: u64,
 }
 
 /// Peak throughput per pipeline step, measured in 5-second sliding windows.

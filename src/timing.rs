@@ -54,6 +54,15 @@ pub const DEST_CHAIN_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub const DEST_CHAIN_POLL_ATTEMPTS: usize = 30;
 
 // ---------------------------------------------------------------------------
+// Express-execution reimbursement monitor
+// ---------------------------------------------------------------------------
+
+/// Cadence for polling the GMP API while waiting on a single express tx to move
+/// from express-executed → reimbursed (canonical execute). Reuses the 10s
+/// destination-chain cadence; the per-call `--timeout-secs` budget bounds it.
+pub const EXPRESS_POLL_INTERVAL: Duration = DEST_CHAIN_POLL_INTERVAL;
+
+// ---------------------------------------------------------------------------
 // Verifier-set rotation
 // ---------------------------------------------------------------------------
 
