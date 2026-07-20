@@ -1,5 +1,7 @@
 name: Single Test
 
+run-name: "Single: ${{ inputs.protocol }} ${{ inputs.source_chain }} → ${{ inputs.destination_chain }} on ${{ inputs.network }}"
+
 # Runs a single cross-chain transaction end-to-end. Triggerable only by users
 # with write access on the repo (workflow_dispatch is the only entry point).
 
