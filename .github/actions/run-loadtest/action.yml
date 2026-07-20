@@ -386,12 +386,7 @@ runs:
         name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}${{ inputs.artifact_suffix }}
         path: axe-load-test-logs/*.json
 
-    # Render the run config + results to the GitHub job summary page, styled
-    # after axelarnetwork/infrastructure's sync workflow: a `###` heading, an
-    # emoji **Status:** badge, bold key/value lines, and a collapsible <details>
-    # block for the verbose metrics. Runs even on failure so a failed run still
-    # shows what it was asked to do. RPC values are never printed (they can be
-    # private repo secrets) — only whether an override was supplied.
+    # Render the run config + results to the GitHub job summary page.
     - name: Job summary
       if: always()
       shell: bash
@@ -452,7 +447,7 @@ runs:
           echo "- **Network:** \`${NETWORK}\`"
           [ -n "$RESOLVED" ] && echo "- **Route:** ${RESOLVED}" || true
           if [ -n "$REPORT" ]; then
-            echo "- **Result:** $(jq -r '"\(.total_submitted) submitted · \(.total_confirmed) confirmed · \(.total_failed) failed · \((.landing_rate * 100 | floor / 100))% landing"' "$REPORT")"
+            echo "- **Result:** $(jq -r '"\(.total_submitted) submitted · \(.total_confirmed) confirmed · \(.total_failed) failed · \((.landing_rate * 10000 | floor / 100))% landing"' "$REPORT")"
           fi
         } >> "$GITHUB_STEP_SUMMARY"
 
@@ -474,7 +469,7 @@ runs:
             "| Submitted | \(.total_submitted) |",
             "| Confirmed | \(.total_confirmed) |",
             "| Failed | \(.total_failed) |",
-            "| Landing rate | \((.landing_rate * 100 | floor / 100))% |",
+            "| Landing rate | \((.landing_rate * 10000 | floor / 100))% |",
             "| Test duration (s) | \((.test_duration_secs * 100 | floor / 100)) |",
             "| TPS submitted | \((.tps_submitted * 100 | floor / 100)) |",
             "| TPS confirmed | \((.tps_confirmed * 100 | floor / 100)) |",
