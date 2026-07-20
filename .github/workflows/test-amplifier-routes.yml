@@ -172,8 +172,12 @@ jobs:
       # check-balances reaches the EVM RPCs via the chains-config's `rpc`
       # field by default; per-chain secret overrides apply the same way they
       # do for `test-route` (same naming convention).
+      HEDERA_MAINNET_RPC:          ${{ secrets.HEDERA_MAINNET_RPC }}
+      HEDERA_TESTNET_RPC:          ${{ secrets.HEDERA_TESTNET_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
+      MONAD_MAINNET_RPC:           ${{ secrets.MONAD_MAINNET_RPC }}
+      MONAD_TESTNET_RPC:           ${{ secrets.MONAD_TESTNET_RPC }}
       SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
       SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
       STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
@@ -280,9 +284,13 @@ jobs:
       ETHEREUM_MAINNET_RPC:        ${{ secrets.ETHEREUM_MAINNET_RPC }}
       ETHEREUM_TESTNET_RPC:        ${{ secrets.ETHEREUM_TESTNET_RPC }}
       ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
+      HEDERA_MAINNET_RPC:          ${{ secrets.HEDERA_MAINNET_RPC }}
+      HEDERA_TESTNET_RPC:          ${{ secrets.HEDERA_TESTNET_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
       HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
+      MONAD_MAINNET_RPC:           ${{ secrets.MONAD_MAINNET_RPC }}
+      MONAD_TESTNET_RPC:           ${{ secrets.MONAD_TESTNET_RPC }}
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
       OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
       OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
