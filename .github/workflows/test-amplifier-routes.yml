@@ -190,8 +190,14 @@ jobs:
       # Match `run-loadtest`'s build-or-download strategy so the preflight
       # uses the same binary as the matrix and a code change automatically
       # invalidates a stale prebuilt artifact.
+      # `continue-on-error` so a transient artifact-backend 503 ("No server is
+      # currently available to service your request") during the download falls
+      # through to the build-from-source fallback below instead of failing the
+      # whole preflight. `if_no_artifact_found: warn` only covers a missing
+      # artifact, not a 5xx mid-download.
       - name: Download pre-built axe (${{ github.sha }})
         id: download_axe
+        continue-on-error: true
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: build-axe.yml
