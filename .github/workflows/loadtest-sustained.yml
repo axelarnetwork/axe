@@ -1,5 +1,7 @@
 name: Load test (sustained)
 
+run-name: "Load test (sustained): ${{ inputs.tps }}tps/${{ inputs.duration_secs }}s: ${{ inputs.protocol }} ${{ inputs.source_chain }} → ${{ inputs.destination_chain }} on ${{ inputs.network }}"
+
 # Drives a sustained `tps` rate for `duration_secs` and waits for the pipeline
 # to drain. Triggerable only by users with write access on the repo.
 

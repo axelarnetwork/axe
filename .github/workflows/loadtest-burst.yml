@@ -1,5 +1,7 @@
 name: Load test (burst)
 
+run-name: "Load test (burst): ${{ inputs.num_txs }}×: ${{ inputs.protocol }} ${{ inputs.source_chain }} → ${{ inputs.destination_chain }} on ${{ inputs.network }}"
+
 # Sends `num_txs` transactions as fast as possible and waits for the cross-chain
 # pipeline to drain. Triggerable only by users with write access on the repo.
 

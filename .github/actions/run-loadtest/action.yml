@@ -264,6 +264,7 @@ runs:
         git clone --depth 1 https://github.com/axelarnetwork/axelar-contract-deployments.git "$RUNNER_TEMP/axelar-contract-deployments"
 
     - name: Run load test
+      id: run
       shell: bash
       env:
         NETWORK: ${{ inputs.network }}
@@ -384,3 +385,124 @@ runs:
       with:
         name: loadtest-report-${{ github.run_id }}-${{ github.run_attempt }}${{ inputs.artifact_suffix }}
         path: axe-load-test-logs/*.json
+
+    # Render the run config + results to the GitHub job summary page.
+    - name: Job summary
+      if: always()
+      shell: bash
+      env:
+        NETWORK: ${{ inputs.network }}
+        SOURCE_DISPLAY: ${{ inputs.source_chain }}
+        DEST_DISPLAY: ${{ inputs.destination_chain }}
+        SOURCE_ID: ${{ steps.resolve_chains.outputs.source_axelar_id }}
+        DEST_ID: ${{ steps.resolve_chains.outputs.destination_axelar_id }}
+        PROTOCOL: ${{ inputs.protocol }}
+        SOURCE_RPC: ${{ inputs.source_rpc }}
+        DESTINATION_RPC: ${{ inputs.destination_rpc }}
+        NUM_TXS: ${{ inputs.num_txs }}
+        TPS: ${{ inputs.tps }}
+        DURATION_SECS: ${{ inputs.duration_secs }}
+        KEY_CYCLE: ${{ inputs.key_cycle }}
+        GAS_VALUE: ${{ inputs.gas_value }}
+        TOKEN_ID: ${{ inputs.token_id }}
+        PAYLOAD: ${{ inputs.payload }}
+        COIN_TYPE: ${{ inputs.coin_type }}
+        EXTRA_ACCOUNTS: ${{ inputs.extra_accounts }}
+        REPORT_FOUND: ${{ steps.report_present.outputs.found }}
+        RUN_OUTCOME: ${{ steps.run.outcome }}
+      run: |
+        set -euo pipefail
+
+        # Route line: "`Ethereum` → `Sui`", with resolved axelar IDs when known.
+        ROUTE="\`${SOURCE_DISPLAY}\` → \`${DEST_DISPLAY}\`"
+        RESOLVED=""
+        if [ -n "${SOURCE_ID:-}" ] && [ -n "${DEST_ID:-}" ]; then
+          RESOLVED="\`${SOURCE_ID}\` → \`${DEST_ID}\`"
+        fi
+
+        # Status badge: derived from the axe step outcome + the report's
+        # failure/verification counts. No report ⇒ the run died early.
+        REPORT=""
+        if [ "${REPORT_FOUND}" = "true" ]; then
+          REPORT=$(ls -t axe-load-test-logs/*.json | head -n1)
+        fi
+        if [ -z "$REPORT" ] || [ "${RUN_OUTCOME}" != "success" ]; then
+          STATUS="❌ Failed"
+        else
+          # Clean = zero failures and (no verification, or all verified with none pending).
+          CLEAN=$(jq -r '
+            if (.total_failed == 0)
+               and ((.verification == null)
+                    or (.verification.pending == 0 and .verification.successful == .verification.total_verified))
+            then "yes" else "no" end' "$REPORT")
+          [ "$CLEAN" = "yes" ] && STATUS="✅ Success" || STATUS="⚠️ Partial"
+        fi
+
+        {
+          echo "### Load test: ${ROUTE}"
+          echo
+          echo "**Status:** ${STATUS}"
+          echo
+          echo "- **Protocol:** \`${PROTOCOL}\`"
+          echo "- **Network:** \`${NETWORK}\`"
+          [ -n "$RESOLVED" ] && echo "- **Route:** ${RESOLVED}" || true
+          if [ -n "$REPORT" ]; then
+            echo "- **Result:** $(jq -r '"\(.total_submitted) submitted · \(.total_confirmed) confirmed · \(.total_failed) failed · \((.landing_rate * 10000 | floor / 100))% landing"' "$REPORT")"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ -z "$REPORT" ]; then
+          {
+            echo
+            echo "_No report produced — the run failed before axe wrote metrics._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        {
+          echo
+          echo "<details><summary>Metrics</summary>"
+          echo
+          jq -r '
+            "| Metric | Value |",
+            "| --- | --- |",
+            "| Submitted | \(.total_submitted) |",
+            "| Confirmed | \(.total_confirmed) |",
+            "| Failed | \(.total_failed) |",
+            "| Landing rate | \((.landing_rate * 10000 | floor / 100))% |",
+            "| Test duration (s) | \((.test_duration_secs * 100 | floor / 100)) |",
+            "| TPS submitted | \((.tps_submitted * 100 | floor / 100)) |",
+            "| TPS confirmed | \((.tps_confirmed * 100 | floor / 100)) |",
+            (if .avg_latency_ms  != null then "| Avg latency (ms) | \(.avg_latency_ms | floor) |" else empty end),
+            (if .min_latency_ms  != null then "| Min latency (ms) | \(.min_latency_ms) |" else empty end),
+            (if .max_latency_ms  != null then "| Max latency (ms) | \(.max_latency_ms) |" else empty end),
+            (if .verification != null then "| Verified | \(.verification.successful)/\(.verification.total_verified) (pending \(.verification.pending)) |" else empty end)
+          ' "$REPORT"
+          echo
+          echo "</details>"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Optional inputs that were actually set — folded away by default.
+        INPUTS=""
+        row() { [ -n "${2:-}" ] && INPUTS="${INPUTS}- **$1:** \`$2\`"$'\n' || true; }
+        row "Num txs"        "${NUM_TXS:-}"
+        row "TPS"            "${TPS:-}"
+        row "Duration (s)"   "${DURATION_SECS:-}"
+        row "Key cycle (s)"  "${KEY_CYCLE:-}"
+        row "Gas value"      "${GAS_VALUE:-}"
+        row "Token ID"       "${TOKEN_ID:-}"
+        row "Payload"        "${PAYLOAD:-}"
+        row "Coin type"      "${COIN_TYPE:-}"
+        row "Extra accounts" "${EXTRA_ACCOUNTS:-}"
+        [ -n "${SOURCE_RPC:-}" ]      && INPUTS="${INPUTS}- **Source RPC:** override supplied"$'\n' || true
+        [ -n "${DESTINATION_RPC:-}" ] && INPUTS="${INPUTS}- **Destination RPC:** override supplied"$'\n' || true
+        if [ -n "$INPUTS" ]; then
+          {
+            echo
+            echo "<details><summary>Inputs</summary>"
+            echo
+            printf '%s' "$INPUTS"
+            echo
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
