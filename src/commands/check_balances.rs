@@ -154,6 +154,15 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
             kind: ChainKind::Solana,
             threshold_units: 0.3,
         },
+        ChainTarget {
+            // Avalanche is the legacy (consensus-EVM) ITS *source* in the
+            // cron fleet. Source-side gas is sub-cent, but each run tops up a
+            // derived key (~0.05 AVAX) and pays cross-chain gas (~0.005 AVAX);
+            // 0.5 AVAX keeps a several-run buffer. Same key on both networks.
+            chain_key: "avalanche".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: 0.5,
+        },
     ]
 }
 
