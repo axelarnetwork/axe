@@ -79,7 +79,7 @@ inputs:
     required: false
     default: ""
   artifact_suffix:
-    description: Suffix appended to the load-test report artifact name. Used by the matrix-style amplifier-routes workflow to avoid collisions across parallel jobs in the same run.
+    description: Suffix appended to the load-test report artifact name. Used by the matrix-style routes workflow to avoid collisions across parallel jobs in the same run.
     required: false
     default: ""
 

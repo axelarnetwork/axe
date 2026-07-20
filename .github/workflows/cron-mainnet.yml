@@ -1,7 +1,7 @@
-name: Cron — Mainnet Amplifier Routes (twice daily)
+name: Cron — Mainnet Routes (twice daily)
 
 # Twice-daily mainnet smoke test of the wired ITS route fleet.
-# Calls `test-amplifier-routes.yml` as a reusable workflow. The child run
+# Calls `test-routes.yml` as a reusable workflow. The child run
 # produces a ✓ / ✗ step-summary table and fails red on any failed route;
 # the parent cron run shows the same red status in the Actions tab (no extra
 # Slack/email wiring — matches the notification model used elsewhere in the
@@ -9,7 +9,7 @@ name: Cron — Mainnet Amplifier Routes (twice daily)
 #
 # Cron expressions are UTC. 00:00 + 12:00 UTC = midnight + midday daily.
 #
-# GMP is deliberately NOT included here — the `test-amplifier-routes.yml`
+# GMP is deliberately NOT included here — the `test-routes.yml`
 # workflow still supports `workflow_dispatch` with `protocol: gmp` for
 # manual / ad-hoc runs, but it isn't fired on schedule.
 
@@ -21,7 +21,7 @@ on:
 
 jobs:
   mainnet-its:
-    uses: ./.github/workflows/test-amplifier-routes.yml
+    uses: ./.github/workflows/test-routes.yml
     with:
       network: mainnet
       protocol: its

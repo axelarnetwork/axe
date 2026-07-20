@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Build-or-download strategy mirrors test-amplifier-routes.yml so a code
+      # Build-or-download strategy mirrors test-routes.yml so a code
       # change automatically invalidates a stale prebuilt artifact.
       - name: Download pre-built axe (${{ github.sha }})
         id: download_axe
