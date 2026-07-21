@@ -148,6 +148,16 @@ jobs:
           # amplifier executor outage (~2026-06-04 to ~06-09, messages stuck
           # at "approved" with gas_used 0); restored once the executor came
           # back (inbound-to-Stellar executing again as of 2026-06-11).
+          # Legacy (consensus-EVM) routes mirror testnet: the canonical mainnet
+          # AXE (tokenId 0xbe1d7843, home xrpl-evm, salt axe_AXE_mainnet_v2) is
+          # registered on the Avalanche + Ethereum legacy ITS edges (recorded
+          # in mainnet.json, address 0x54BEdCF8…) and the cron wallet holds AXE
+          # on Avalanche (seeded from xrpl-evm). Avalanche is the legacy
+          # *source* (sub-2s finality); bidirectional Avalanche↔Monad keeps its
+          # source-side AXE topped up. All three verified end-to-end on mainnet
+          # via the config-token path (the exact path CI uses — no local salt
+          # cache): Avalanche→Monad legacy→amp 71.6s, Avalanche→Ethereum
+          # legacy→legacy 82.7s, Monad→Avalanche amp→legacy 37.1s.
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
@@ -156,7 +166,10 @@ jobs:
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
+            {"name":"Monad -> Avalanche","src":"Monad","dst":"Avalanche","notes":"amp->legacy ITS"},
+            {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
