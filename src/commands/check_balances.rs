@@ -66,10 +66,28 @@ impl ChainKind {
     }
 }
 
+/// Which balance to check on a chain: the native gas token, or the AXE ITS
+/// token the daily cron transfers. AXE underfunding is handled more leniently
+/// than gas — see [`BalanceRow::is_fatal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asset {
+    Native,
+    Axe,
+}
+
+/// Minimum AXE a cron ITS *source* wallet must hold to reuse the pre-registered
+/// interchain token instead of silently deploying a throwaway one each run.
+/// Mirrors `WHOLE_TOKENS_PER_KEY` (`WHOLE_TOKENS_PER_TX` × 100) in the load-test
+/// ITS modules — below it, `reusable_config_axe` (and the Stellar/Sol
+/// equivalents) fall through to a fresh deploy, which on Stellar then hits the
+/// `TxBadSeq` sequence race. Whole AXE tokens.
+const AXE_MIN_WHOLE_TOKENS: f64 = 100.0;
+
 #[derive(Clone, Debug)]
 struct BalanceRow {
     chain_key: String,
     kind: ChainKind,
+    asset: Asset,
     address: Option<String>,
     balance: Option<f64>,
     threshold: f64,
@@ -80,6 +98,23 @@ struct BalanceRow {
 impl BalanceRow {
     fn is_underfunded(&self) -> bool {
         self.balance.is_none_or(|b| b < self.threshold)
+    }
+
+    /// Whether this row fails the preflight (blocks the whole cron run).
+    /// Native-gas underfunding — including an unreachable RPC — is always
+    /// fatal. An AXE row is fatal only on a *confirmed* low balance; an AXE
+    /// read error is downgraded to a warning ([`Self::is_axe_read_error`]) so a
+    /// flaky token read can't wedge the cron when the gas balances are fine.
+    fn is_fatal(&self) -> bool {
+        match self.asset {
+            Asset::Native => self.is_underfunded(),
+            Asset::Axe => self.balance.is_some_and(|b| b < self.threshold),
+        }
+    }
+
+    /// AXE balance couldn't be read (RPC/decode error) — advisory, not fatal.
+    fn is_axe_read_error(&self) -> bool {
+        self.asset == Asset::Axe && self.balance.is_none()
     }
 }
 
@@ -166,6 +201,54 @@ fn chain_targets(network: Network) -> Vec<ChainTarget> {
     ]
 }
 
+/// The Monad amplifier chain id differs by network: `monad` on mainnet,
+/// `monad-3` on testnet.
+fn monad_chain_key(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "monad",
+        Network::Testnet | Network::Stagenet | Network::DevnetAmplifier => "monad-3",
+    }
+}
+
+fn stellar_chain_key(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "stellar",
+        Network::Testnet | Network::Stagenet | Network::DevnetAmplifier => "stellar-2026-q1-2",
+    }
+}
+
+/// Chains the daily ITS cron spends AXE *from* as a source — each must hold
+/// `>= AXE_MIN_WHOLE_TOKENS` or the run deploys a throwaway token instead of
+/// reusing the canonical one. Scoped to the AXE sources whose wallet is
+/// derivable from a local secret (EVM + Stellar); Sui and Solana also transfer
+/// AXE and hold ~1M, but their preflight keys aren't in the local env so their
+/// readers aren't exercised here. XRPL / XRPL-EVM cron routes move XRP (not
+/// AXE), and destination-only chains (e.g. Ethereum) never spend source AXE, so
+/// both are excluded. A source whose `contracts.AXE` isn't recorded yet reads
+/// as an advisory "?" (non-fatal) until the config + seed land.
+fn axe_targets(network: Network) -> Vec<ChainTarget> {
+    let axe = |chain_key: &str, kind: ChainKind| ChainTarget {
+        chain_key: chain_key.to_string(),
+        kind,
+        threshold_units: AXE_MIN_WHOLE_TOKENS,
+    };
+    let mut targets = vec![
+        axe("hyperliquid", ChainKind::Evm),
+        axe(monad_chain_key(network), ChainKind::Evm),
+        axe("hedera", ChainKind::Evm),
+        // Avalanche is the legacy (consensus-EVM) ITS source in the fleet
+        // (Avalanche→Monad, Avalanche→Ethereum) — it holds the canonical AXE
+        // seeded from xrpl-evm. Same key on both networks.
+        axe("avalanche", ChainKind::Evm),
+    ];
+    // Stellar is a mainnet ITS AXE source (Stellar ↔ Hyperliquid); it was
+    // removed from the testnet ITS cron, so only check it on mainnet.
+    if network == Network::Mainnet {
+        targets.push(axe(stellar_chain_key(network), ChainKind::Stellar));
+    }
+    targets
+}
+
 pub async fn run(network: Network) -> Result<()> {
     let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path)?;
@@ -173,22 +256,40 @@ pub async fn run(network: Network) -> Result<()> {
     ui::section(&format!("wallet balance check: {network}"));
     ui::kv("config", &config_path.display().to_string());
 
-    let targets = chain_targets(network);
-    let mut rows = Vec::with_capacity(targets.len());
-    for target in targets {
-        let row = probe_row(&config, &target, network).await;
-        rows.push(row);
+    let native = chain_targets(network);
+    let axe = axe_targets(network);
+    let mut rows = Vec::with_capacity(native.len() + axe.len());
+    for target in &native {
+        rows.push(probe_row(&config, target, network, Asset::Native).await);
+    }
+    for target in &axe {
+        rows.push(probe_row(&config, target, network, Asset::Axe).await);
     }
 
     render_table(&rows);
 
-    let underfunded: Vec<&BalanceRow> = rows.iter().filter(|r| r.is_underfunded()).collect();
-    if !underfunded.is_empty() {
+    // AXE read errors are advisory — warn, but don't block the cron on them
+    // (the native-gas gate still applies; a genuine low AXE balance is fatal).
+    for row in rows.iter().filter(|r| r.is_axe_read_error()) {
+        ui::warn(&format!(
+            "AXE balance unread for {} ({}) — {} (not blocking)",
+            row.chain_key,
+            row.kind.label(),
+            if row.note.is_empty() {
+                "unknown error"
+            } else {
+                &row.note
+            },
+        ));
+    }
+
+    let fatal: Vec<&BalanceRow> = rows.iter().filter(|r| r.is_fatal()).collect();
+    if !fatal.is_empty() {
         ui::error(&format!(
             "{} wallet(s) below minimum threshold or unreachable:",
-            underfunded.len()
+            fatal.len()
         ));
-        for row in &underfunded {
+        for row in &fatal {
             ui::error(&format!("  {}", format_underfunded(row)));
         }
         return Err(eyre!(
@@ -196,21 +297,35 @@ pub async fn run(network: Network) -> Result<()> {
         ));
     }
 
-    ui::success("all wallets above minimum thresholds");
+    ui::success("all wallets above minimum thresholds (native gas + AXE)");
     Ok(())
 }
 
-async fn probe_row(config: &ChainsConfig, target: &ChainTarget, network: Network) -> BalanceRow {
-    let token_symbol = config
-        .chains
-        .get(&target.chain_key)
-        .and_then(|c| c.token_symbol.clone())
-        .unwrap_or_else(|| target.kind.default_symbol().to_string());
+async fn probe_row(
+    config: &ChainsConfig,
+    target: &ChainTarget,
+    network: Network,
+    asset: Asset,
+) -> BalanceRow {
+    let token_symbol = match asset {
+        Asset::Axe => "AXE".to_string(),
+        Asset::Native => config
+            .chains
+            .get(&target.chain_key)
+            .and_then(|c| c.token_symbol.clone())
+            .unwrap_or_else(|| target.kind.default_symbol().to_string()),
+    };
 
-    match probe_balance(config, target, network).await {
+    let probe = match asset {
+        Asset::Native => probe_balance(config, target, network).await,
+        Asset::Axe => probe_axe(config, target, network).await,
+    };
+
+    match probe {
         Ok((address, balance)) => BalanceRow {
             chain_key: target.chain_key.clone(),
             kind: target.kind,
+            asset,
             address: Some(address),
             balance: Some(balance),
             threshold: target.threshold_units,
@@ -220,6 +335,7 @@ async fn probe_row(config: &ChainsConfig, target: &ChainTarget, network: Network
         Err(err) => BalanceRow {
             chain_key: target.chain_key.clone(),
             kind: target.kind,
+            asset,
             address: None,
             balance: None,
             threshold: target.threshold_units,
@@ -227,6 +343,100 @@ async fn probe_row(config: &ChainsConfig, target: &ChainTarget, network: Network
             note: shorten_error(&err.to_string()),
         },
     }
+}
+
+/// Read the cron wallet's AXE-token balance (whole tokens) on `target`'s chain.
+/// Resolves the token address + decimals from the chain's `contracts.AXE`
+/// config entry, then queries per chain kind. Read-only on every path.
+async fn probe_axe(
+    config: &ChainsConfig,
+    target: &ChainTarget,
+    network: Network,
+) -> Result<(String, f64)> {
+    let chain = config
+        .chains
+        .get(&target.chain_key)
+        .ok_or_else(|| eyre!("chain '{}' not in {network} config", target.chain_key))?;
+    let axe = chain
+        .contracts
+        .as_ref()
+        .and_then(|m| m.get("AXE"))
+        .ok_or_else(|| eyre!("no contracts.AXE entry for {}", target.chain_key))?;
+    let token = axe
+        .address
+        .as_deref()
+        .ok_or_else(|| eyre!("contracts.AXE.address missing for {}", target.chain_key))?;
+    let decimals = axe
+        .extra
+        .get("decimals")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(18) as u32;
+    match target.kind {
+        ChainKind::Evm => probe_axe_evm(chain, token, decimals).await,
+        ChainKind::Stellar => probe_axe_stellar(chain, token, decimals, network).await,
+        other => Err(eyre!(
+            "AXE balance check not implemented for {}",
+            other.label()
+        )),
+    }
+}
+
+async fn probe_axe_evm(
+    chain: &ChainConfig,
+    token_addr: &str,
+    decimals: u32,
+) -> Result<(String, f64)> {
+    let rpc_url = chain
+        .rpc
+        .as_deref()
+        .ok_or_else(|| eyre!("no rpc in config"))?;
+    let key = std::env::var("EVM_PRIVATE_KEY").wrap_err("EVM_PRIVATE_KEY env not set")?;
+    let signer: PrivateKeySigner = key
+        .parse()
+        .wrap_err("EVM_PRIVATE_KEY is not a valid hex private key")?;
+    let addr: Address = signer.address();
+    let token: Address = token_addr
+        .parse()
+        .wrap_err("contracts.AXE.address is not a valid EVM address")?;
+    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+    let erc20 = crate::evm::ERC20::new(token, &provider);
+    let raw = crate::retry::retry_all("probe_axe_evm.balanceOf", || async {
+        erc20.balanceOf(addr).call().await
+    })
+    .await?;
+    Ok((format!("{addr:#x}"), token_units(raw, decimals)))
+}
+
+async fn probe_axe_stellar(
+    chain: &ChainConfig,
+    token_addr: &str,
+    decimals: u32,
+    network: Network,
+) -> Result<(String, f64)> {
+    let rpc_url = chain
+        .rpc
+        .as_deref()
+        .ok_or_else(|| eyre!("no rpc in config"))?;
+    let network_type = stellar_network_type(chain, network);
+    let client = StellarClient::new(rpc_url, &network_type)?;
+    let key = std::env::var("STELLAR_PRIVATE_KEY").wrap_err("STELLAR_PRIVATE_KEY env not set")?;
+    let wallet = StellarWallet::from_secret_str(&key)?;
+    let pk = wallet.public_key_bytes;
+    let raw = crate::retry::retry_all("probe_axe_stellar.balance", || async {
+        client.token_balance_view(&pk, token_addr, &pk).await
+    })
+    .await?;
+    Ok((wallet.address(), raw as f64 / 10f64.powi(decimals as i32)))
+}
+
+/// Scale a raw `U256` token amount to whole tokens as `f64`, given `decimals`.
+/// Generalizes [`wei_to_eth`] to arbitrary-precision tokens (AXE is 18 on most
+/// EVM chains, 6 on the Hedera HTS fork).
+fn token_units(raw: alloy::primitives::U256, decimals: u32) -> f64 {
+    let divisor = alloy::primitives::U256::from(10u64).pow(alloy::primitives::U256::from(decimals));
+    let whole = (raw / divisor).to::<u128>() as f64;
+    let remainder = (raw % divisor).to::<u128>() as f64 / 10f64.powi(decimals as i32);
+    whole + remainder
 }
 
 async fn probe_balance(
@@ -379,13 +589,19 @@ fn render_table(rows: &[BalanceRow]) {
         header_cell("Note"),
     ]);
     for row in rows {
-        let (status_label, status_color) = if row.is_underfunded() {
+        let (status_label, status_color) = if row.is_fatal() {
             ("LOW", Color::Red)
+        } else if row.is_axe_read_error() {
+            ("?", Color::Yellow)
         } else {
             ("ok", Color::Green)
         };
+        let chain_label = match row.asset {
+            Asset::Native => row.chain_key.clone(),
+            Asset::Axe => format!("{} (AXE)", row.chain_key),
+        };
         table.add_row(vec![
-            Cell::new(&row.chain_key).fg(Color::Cyan),
+            Cell::new(&chain_label).fg(Color::Cyan),
             Cell::new(row.kind.label()),
             Cell::new(row.address.as_deref().unwrap_or("-")),
             Cell::new(format_balance(row.balance, &row.token_symbol)),
@@ -512,6 +728,7 @@ mod tests {
         let row = BalanceRow {
             chain_key: "hyperliquid".to_string(),
             kind: ChainKind::Evm,
+            asset: Asset::Native,
             address: Some("0xabc".to_string()),
             balance: Some(0.005),
             threshold: 0.01,
@@ -526,6 +743,7 @@ mod tests {
         let row = BalanceRow {
             chain_key: "hyperliquid".to_string(),
             kind: ChainKind::Evm,
+            asset: Asset::Native,
             address: Some("0xabc".to_string()),
             balance: Some(1.0),
             threshold: 0.01,
@@ -541,6 +759,7 @@ mod tests {
         let row = BalanceRow {
             chain_key: "hyperliquid".to_string(),
             kind: ChainKind::Evm,
+            asset: Asset::Native,
             address: None,
             balance: None,
             threshold: 0.01,
@@ -548,5 +767,63 @@ mod tests {
             note: "RPC unreachable".to_string(),
         };
         assert!(row.is_underfunded());
+        assert!(row.is_fatal(), "native read error must block the cron");
+    }
+
+    fn axe_row(balance: Option<f64>) -> BalanceRow {
+        BalanceRow {
+            chain_key: "stellar".to_string(),
+            kind: ChainKind::Stellar,
+            asset: Asset::Axe,
+            address: Some("G...".to_string()),
+            balance,
+            threshold: AXE_MIN_WHOLE_TOKENS,
+            token_symbol: "AXE".to_string(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn axe_confirmed_low_is_fatal() {
+        assert!(axe_row(Some(50.0)).is_fatal());
+    }
+
+    #[test]
+    fn axe_above_threshold_ok() {
+        let row = axe_row(Some(100_000.0));
+        assert!(!row.is_fatal());
+        assert!(!row.is_axe_read_error());
+    }
+
+    #[test]
+    fn axe_read_error_is_advisory_not_fatal() {
+        // An unreadable AXE balance must NOT block the cron (unlike native gas).
+        let row = axe_row(None);
+        assert!(!row.is_fatal());
+        assert!(row.is_axe_read_error());
+    }
+
+    #[test]
+    fn axe_targets_scope_by_network() {
+        let mainnet: Vec<_> = axe_targets(Network::Mainnet)
+            .iter()
+            .map(|t| t.chain_key.clone())
+            .collect();
+        assert!(mainnet.contains(&"stellar".to_string()));
+        assert!(mainnet.contains(&"hyperliquid".to_string()));
+        assert!(mainnet.contains(&"monad".to_string()));
+        assert!(mainnet.contains(&"hedera".to_string()));
+        assert!(mainnet.contains(&"avalanche".to_string()));
+
+        let testnet: Vec<_> = axe_targets(Network::Testnet)
+            .iter()
+            .map(|t| t.chain_key.clone())
+            .collect();
+        assert!(testnet.contains(&"monad-3".to_string()));
+        assert!(testnet.contains(&"avalanche".to_string()));
+        assert!(
+            !testnet.iter().any(|k| k.starts_with("stellar")),
+            "Stellar was removed from the testnet ITS cron"
+        );
     }
 }

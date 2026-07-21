@@ -713,6 +713,27 @@ impl StellarClient {
             .unwrap_or(0))
     }
 
+    /// Read-only `balance(account)` via simulate — no tx submitted, no fee, no
+    /// sequence consumed. Companion to [`Self::token_balance`] (which submits);
+    /// use this on read/preflight paths where signing a tx would be wrong.
+    pub async fn token_balance_view(
+        &self,
+        signer_account_pk: &[u8; 32],
+        token_contract: &str,
+        account_pk: &[u8; 32],
+    ) -> Result<u128> {
+        let account_v = scval_address_account(account_pk);
+        let ret = self
+            .simulate_view(
+                signer_account_pk,
+                token_contract,
+                "balance",
+                vec![account_v],
+            )
+            .await?;
+        Ok(ret.as_ref().and_then(scval_to_u128).unwrap_or(0))
+    }
+
     /// Simulate `decimals()` on a SAC token contract. Read-only — used to
     /// scale load-test amounts to the actual on-chain token decimals.
     pub async fn token_decimals(
