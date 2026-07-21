@@ -1,6 +1,6 @@
 name: Test Routes
 
-run-name: "Amplifier routes: ${{ inputs.protocol }} on ${{ inputs.network }}"
+run-name: "Routes: ${{ inputs.protocol }} on ${{ inputs.network }}"
 
 # Fans out a single-tx route smoke test across the wired axe routes for the
 # chosen network + protocol, in parallel matrix jobs. Final summary lists each
