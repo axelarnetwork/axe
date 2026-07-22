@@ -297,22 +297,17 @@ impl StellarClient {
         Ok(())
     }
 
-    /// Build + simulate + sign + submit an InvokeContract call, then poll.
-    ///
-    /// `event_filter` (if provided) is the contract hash of the emitter we
-    /// want to locate in the validated tx's event list — axe uses the
-    /// `AxelarGateway` hash so the returned `event_index` matches the
-    /// `hex_tx_hash_and_event_index` message-id format expected by the
-    /// Stellar `VotingVerifier`.
-    pub async fn invoke_contract(
+    /// One build → simulate → sign → submit attempt for
+    /// [`Self::invoke_contract`]. Reads the account sequence fresh, so retrying
+    /// it after a `TxBadSeq` picks up the advanced sequence. Returns the
+    /// submitted tx hash; a `TxBadSeq` surfaces as an `Err` whose string the
+    /// caller matches on to decide whether to retry.
+    async fn submit_invoke_once(
         &self,
         wallet: &StellarWallet,
-        contract: &str,
-        function: &str,
-        args: Vec<ScVal>,
+        invoke: &InvokeContractArgs,
         base_fee: u32,
-        event_filter: Option<Hash>,
-    ) -> Result<InvokedTx> {
+    ) -> Result<Hash> {
         // 1. Read account sequence
         let seq = self
             .account_sequence(&wallet.address())
@@ -324,21 +319,10 @@ impl StellarClient {
                 )
             })?;
 
-        let contract_id = parse_contract_id(contract)?;
-        let fn_symbol = scval_symbol(function)?;
-        let args_vec: VecM<ScVal> = args
-            .try_into()
-            .map_err(|e| eyre!("too many args for InvokeContract: {e}"))?;
-        let invoke = InvokeContractArgs {
-            contract_address: ScAddress::Contract(stellar_xdr::curr::ContractId(contract_id)),
-            function_name: fn_symbol,
-            args: args_vec,
-        };
-
         let op = Operation {
             source_account: None,
             body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
-                host_function: HostFunction::InvokeContract(invoke),
+                host_function: HostFunction::InvokeContract(invoke.clone()),
                 auth: VecM::default(),
             }),
         };
@@ -401,11 +385,63 @@ impl StellarClient {
         let signed = self.sign(wallet, tx)?;
 
         // 5. Submit.
-        let hash = self
-            .rpc
+        self.rpc
             .send_transaction(&signed)
             .await
-            .map_err(|e| eyre!("send_transaction: {e}"))?;
+            .map_err(|e| eyre!("send_transaction: {e}"))
+    }
+
+    /// Build + simulate + sign + submit an InvokeContract call, then poll.
+    ///
+    /// `event_filter` (if provided) is the contract hash of the emitter we
+    /// want to locate in the validated tx's event list — axe uses the
+    /// `AxelarGateway` hash so the returned `event_index` matches the
+    /// `hex_tx_hash_and_event_index` message-id format expected by the
+    /// Stellar `VotingVerifier`.
+    pub async fn invoke_contract(
+        &self,
+        wallet: &StellarWallet,
+        contract: &str,
+        function: &str,
+        args: Vec<ScVal>,
+        base_fee: u32,
+        event_filter: Option<Hash>,
+    ) -> Result<InvokedTx> {
+        let contract_id = parse_contract_id(contract)?;
+        let fn_symbol = scval_symbol(function)?;
+        let args_vec: VecM<ScVal> = args
+            .try_into()
+            .map_err(|e| eyre!("too many args for InvokeContract: {e}"))?;
+        let invoke = InvokeContractArgs {
+            contract_address: ScAddress::Contract(stellar_xdr::curr::ContractId(contract_id)),
+            function_name: fn_symbol,
+            args: args_vec,
+        };
+
+        // A shared `STELLAR_PRIVATE_KEY` (parallel cron jobs) and sequential
+        // Soroban txs whose sequence bump the RPC hasn't reflected yet both
+        // leave the fetched sequence stale, so a submit races another `seq + 1`
+        // and gets TxBadSeq. Re-fetch + re-simulate + resubmit up to 4 times —
+        // the same recovery `pay_native_classic` uses for classic payments.
+        const MAX_SEQ_RETRIES: u8 = 4;
+        let mut attempt: u8 = 0;
+        let hash = loop {
+            match self.submit_invoke_once(wallet, &invoke, base_fee).await {
+                Ok(hash) => break hash,
+                Err(e) if attempt + 1 < MAX_SEQ_RETRIES && format!("{e}").contains("TxBadSeq") => {
+                    crate::ui::warn(&format!(
+                        "stellar invoke_contract: TxBadSeq on attempt {} \
+                         (stale/racing sequence? re-simulating)",
+                        attempt + 1,
+                    ));
+                    // Brief backoff so the colliding tx settles.
+                    tokio::time::sleep(Duration::from_millis(500u64 << attempt)).await;
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         let tx_hash_hex = hex::encode(hash.0);
 
         // 6. Poll for validation.
@@ -675,6 +711,27 @@ impl StellarClient {
             .as_ref()
             .and_then(scval_to_u128)
             .unwrap_or(0))
+    }
+
+    /// Read-only `balance(account)` via simulate — no tx submitted, no fee, no
+    /// sequence consumed. Companion to [`Self::token_balance`] (which submits);
+    /// use this on read/preflight paths where signing a tx would be wrong.
+    pub async fn token_balance_view(
+        &self,
+        signer_account_pk: &[u8; 32],
+        token_contract: &str,
+        account_pk: &[u8; 32],
+    ) -> Result<u128> {
+        let account_v = scval_address_account(account_pk);
+        let ret = self
+            .simulate_view(
+                signer_account_pk,
+                token_contract,
+                "balance",
+                vec![account_v],
+            )
+            .await?;
+        Ok(ret.as_ref().and_then(scval_to_u128).unwrap_or(0))
     }
 
     /// Simulate `decimals()` on a SAC token contract. Read-only — used to

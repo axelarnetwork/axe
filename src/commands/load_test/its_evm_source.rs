@@ -42,10 +42,16 @@ use crate::config::ChainsConfig;
 use crate::evm::{ERC20, InterchainTokenFactory, InterchainTokenService};
 use crate::ui;
 
-/// How long to wait for an EVM tx receipt before giving up. Fast chains confirm in
-/// ~8s; other chains typically <20s. 60s gives congested networks enough room
-/// while still catching silently-dropped txs.
-const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long to wait for an EVM `interchainTransfer` receipt before giving up.
+/// Fast chains confirm in ~8s; other chains typically <20s. The binding
+/// constraint is Hyperliquid, whose gas-heavy txs (like ITS transfers) only
+/// land in **big blocks**, produced on a ~60s cadence (see `crate::hyperliquid`).
+/// A 60s budget times out right as the block is produced, recording an
+/// already-landed transfer as a source failure — the recurring mainnet
+/// `Hyperliquid -> *` false failure. 120s covers ~2 big-block cycles and
+/// matches the deploy-tx receipt waits in this file, while still catching
+/// silently-dropped txs on other chains.
+const EVM_RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 const TOKEN_NAME: &str = "AXE";
 const TOKEN_SYMBOL: &str = "AXE";

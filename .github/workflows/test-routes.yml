@@ -1,6 +1,6 @@
-name: Test Amplifier Routes
+name: Test Routes
 
-run-name: "Amplifier routes: ${{ inputs.protocol }} on ${{ inputs.network }}"
+run-name: "Routes: ${{ inputs.protocol }} on ${{ inputs.network }}"
 
 # Fans out a single-tx route smoke test across the wired axe routes for the
 # chosen network + protocol, in parallel matrix jobs. Final summary lists each
@@ -32,7 +32,7 @@ on:
         options:
           - gmp
           - its
-  # Reusable-workflow trigger so cron schedules (see cron-amplifier-mainnet.yml)
+  # Reusable-workflow trigger so cron schedules (see cron-mainnet.yml)
   # can fan into this same matrix without duplicating the setup/test/summary
   # plumbing. `inputs.network` / `inputs.protocol` are typed `string` here
   # (workflow_call doesn't support `choice`); the calling workflow is
@@ -103,13 +103,27 @@ jobs:
           # directions verified — source + on-chain delivery confirmed (axe's
           # HL-side verify is occasionally flaky on the public HL RPC, but the
           # transfer itself executes).
+          # Legacy (consensus-EVM) routes: Avalanche and ethereum-sepolia are
+          # consensus chains (no VotingVerifier) on testnet. The canonical
+          # testnet AXE (tokenId 0xbcbec67e, home monad-3) is registered on
+          # both legacy chains' ITS edges (recorded in testnet.json) and the
+          # cron wallet holds AXE supply on Avalanche (seeded from monad-3).
+          # Avalanche is the legacy *source* (sub-2s finality). Bidirectional
+          # Avalanche↔Monad keeps Avalanche's source-side AXE topped up. All
+          # three verified end-to-end via the config-token path (the exact
+          # path CI uses — no local salt cache):
+          #   Avalanche→Monad legacy→amp 39.6s, Avalanche→Ethereum legacy→legacy
+          #   61.6s, Monad→Avalanche amp→legacy.
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
             {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
             {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
-            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"}
+            {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"},
+            {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
+            {"name":"Monad -> Avalanche","src":"Monad","dst":"Avalanche","notes":"amp->legacy ITS"},
+            {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"}
           ]}'
           # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
           # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
@@ -134,6 +148,16 @@ jobs:
           # amplifier executor outage (~2026-06-04 to ~06-09, messages stuck
           # at "approved" with gas_used 0); restored once the executor came
           # back (inbound-to-Stellar executing again as of 2026-06-11).
+          # Legacy (consensus-EVM) routes mirror testnet: the canonical mainnet
+          # AXE (tokenId 0xbe1d7843, home xrpl-evm, salt axe_AXE_mainnet_v2) is
+          # registered on the Avalanche + Ethereum legacy ITS edges (recorded
+          # in mainnet.json, address 0x54BEdCF8…) and the cron wallet holds AXE
+          # on Avalanche (seeded from xrpl-evm). Avalanche is the legacy
+          # *source* (sub-2s finality); bidirectional Avalanche↔Monad keeps its
+          # source-side AXE topped up. All three verified end-to-end on mainnet
+          # via the config-token path (the exact path CI uses — no local salt
+          # cache): Avalanche→Monad legacy→amp 71.6s, Avalanche→Ethereum
+          # legacy→legacy 82.7s, Monad→Avalanche amp→legacy 37.1s.
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
@@ -142,7 +166,10 @@ jobs:
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
             {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"}
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
+            {"name":"Monad -> Avalanche","src":"Monad","dst":"Avalanche","notes":"amp->legacy ITS"},
+            {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"}
           ]}'
           MATRIX_MAINNET_GMP='{"include":[
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui GMP"},
@@ -154,7 +181,7 @@ jobs:
             "mainnet/its") MATRIX="$MATRIX_MAINNET_ITS" ;;
             "mainnet/gmp") MATRIX="$MATRIX_MAINNET_GMP" ;;
             *)
-              echo "::error::Route fleet for $NETWORK / $PROTOCOL is not defined yet — extend the matrix in .github/workflows/test-amplifier-routes.yml" >&2
+              echo "::error::Route fleet for $NETWORK / $PROTOCOL is not defined yet — extend the matrix in .github/workflows/test-routes.yml" >&2
               exit 1
               ;;
           esac
@@ -172,8 +199,12 @@ jobs:
       # check-balances reaches the EVM RPCs via the chains-config's `rpc`
       # field by default; per-chain secret overrides apply the same way they
       # do for `test-route` (same naming convention).
+      HEDERA_MAINNET_RPC:          ${{ secrets.HEDERA_MAINNET_RPC }}
+      HEDERA_TESTNET_RPC:          ${{ secrets.HEDERA_TESTNET_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
+      MONAD_MAINNET_RPC:           ${{ secrets.MONAD_MAINNET_RPC }}
+      MONAD_TESTNET_RPC:           ${{ secrets.MONAD_TESTNET_RPC }}
       SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
       SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
       STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
@@ -190,8 +221,14 @@ jobs:
       # Match `run-loadtest`'s build-or-download strategy so the preflight
       # uses the same binary as the matrix and a code change automatically
       # invalidates a stale prebuilt artifact.
+      # `continue-on-error` so a transient artifact-backend 503 ("No server is
+      # currently available to service your request") during the download falls
+      # through to the build-from-source fallback below instead of failing the
+      # whole preflight. `if_no_artifact_found: warn` only covers a missing
+      # artifact, not a 5xx mid-download.
       - name: Download pre-built axe (${{ github.sha }})
         id: download_axe
+        continue-on-error: true
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: build-axe.yml
@@ -274,9 +311,13 @@ jobs:
       ETHEREUM_MAINNET_RPC:        ${{ secrets.ETHEREUM_MAINNET_RPC }}
       ETHEREUM_TESTNET_RPC:        ${{ secrets.ETHEREUM_TESTNET_RPC }}
       ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
+      HEDERA_MAINNET_RPC:          ${{ secrets.HEDERA_MAINNET_RPC }}
+      HEDERA_TESTNET_RPC:          ${{ secrets.HEDERA_TESTNET_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
       HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
+      MONAD_MAINNET_RPC:           ${{ secrets.MONAD_MAINNET_RPC }}
+      MONAD_TESTNET_RPC:           ${{ secrets.MONAD_TESTNET_RPC }}
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
       OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
       OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
@@ -354,7 +395,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "## Amplifier route fleet — ${{ inputs.network }} / ${{ inputs.protocol }}"
+            echo "## Route fleet — ${{ inputs.network }} / ${{ inputs.protocol }}"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
