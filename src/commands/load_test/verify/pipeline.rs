@@ -614,7 +614,23 @@ pub(super) async fn poll_pipeline<P: Provider>(
                         .collect()
                         .await;
                     for result in results {
-                        let (i, phase, approved, executed) = result?;
+                        // A persistent destination-RPC error (transient retries
+                        // already exhausted in `check_evm_*`) must NOT abort the
+                        // whole run — the message may well have executed on-chain
+                        // (e.g. a flaky/archive-gated dest RPC). Skip this tx for
+                        // this cycle and keep polling; `finalize_timed_out_txs`
+                        // does an authoritative GMP-API recheck at the inactivity
+                        // timeout and recovers it if it actually executed.
+                        let (i, phase, approved, executed) = match result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                ui::warn(&format!(
+                                    "destination check RPC error (keeping in-flight for \
+                                     GMP-API recheck): {e}"
+                                ));
+                                continue;
+                            }
+                        };
                         match phase {
                             // Authoritative fast-path: the message is already
                             // executed on the destination gateway. Catches the
