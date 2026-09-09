@@ -39,7 +39,14 @@ jobs:
       # have min: 0, so the smallest nonzero amount exercises the exact same
       # front-and-reimburse path with nothing at stake.
       amount: '1'
-      gas_value: '60000000000000000'
+      # 0.35 AVAX. This is a ceiling, not a spend: whatever the route does not
+      # consume is refunded to the sender, so headroom is close to free (a
+      # measured run consumed 0.0024 AVAX and had 0.34762 refunded).
+      #
+      # The previous 0.06 had no headroom. On 2026-09-09 the avalanche -> base
+      # base fee reached 0.2557, the message was left with gas_remain_amount 0,
+      # and the express service declined it outright (run 34350578640).
+      gas_value: '350000000000000000'
     secrets: inherit
 
   mainnet-its:

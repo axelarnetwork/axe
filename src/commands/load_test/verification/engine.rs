@@ -43,12 +43,35 @@ pub type StreamingTimings = Vec<(super::identifiers::MessageId, AmplifierTiming)
 // days behind silently cancelled jobs, run 33455835970). A window just under
 // the job budget turns the same stall into an honest failure that runs the
 // API backstop and names the stuck phase.
-fn inactivity_timeout() -> Duration {
-    env::var("AXE_VERIFY_INACTIVITY_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map_or(Duration::from_secs(7200), Duration::from_secs)
+const DEFAULT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(7200);
+
+/// The inactivity budget, given whether every transaction has been sent.
+///
+/// The default doubles while sending is still in flight, so a large batch is
+/// never cut off mid-send. An explicit `AXE_VERIFY_INACTIVITY_SECS` is instead
+/// a **hard ceiling** that never doubles: CI sets it precisely to fit under a
+/// job timeout, and doubling it there would reintroduce the SIGKILL it exists
+/// to prevent (test-routes.yml's 1200s under a 30-minute job became a 2400s
+/// window in exactly the branch that stalls before sending completes).
+fn inactivity_budget(sending_complete: bool) -> Duration {
+    budget_from(
+        env::var("AXE_VERIFY_INACTIVITY_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok()),
+        sending_complete,
+    )
 }
+
+/// The pure half of [`inactivity_budget`], so the ceiling rule is testable
+/// without touching process-wide environment state.
+fn budget_from(override_secs: Option<u64>, sending_complete: bool) -> Duration {
+    match override_secs {
+        Some(secs) => Duration::from_secs(secs),
+        None if sending_complete => DEFAULT_INACTIVITY_TIMEOUT,
+        None => DEFAULT_INACTIVITY_TIMEOUT * 2,
+    }
+}
+
 /// Delay between poll attempts.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -1751,4 +1774,25 @@ pub async fn verify_onchain_evm_its_streaming(
     .await?;
 
     Ok(streaming_report_and_timings(&txs, peaks))
+}
+
+#[cfg(test)]
+mod inactivity_budget_tests {
+    use super::{DEFAULT_INACTIVITY_TIMEOUT, budget_from};
+    use std::time::Duration;
+
+    #[test]
+    fn default_doubles_while_sending_is_incomplete() {
+        assert_eq!(budget_from(None, true), DEFAULT_INACTIVITY_TIMEOUT);
+        assert_eq!(budget_from(None, false), DEFAULT_INACTIVITY_TIMEOUT * 2);
+    }
+
+    #[test]
+    fn explicit_override_is_a_hard_ceiling() {
+        // test-routes.yml sets 1200s to fit under a 30-minute job. Doubling it
+        // to 2400s in the not-yet-sent branch would outlive that job and hand
+        // the runner a SIGKILL, which is the failure the override prevents.
+        assert_eq!(budget_from(Some(1200), true), Duration::from_secs(1200));
+        assert_eq!(budget_from(Some(1200), false), Duration::from_secs(1200));
+    }
 }

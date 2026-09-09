@@ -104,7 +104,12 @@ on:
 jobs:
   express-monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Must stay above the monitor's own `--timeout-secs` (1200 = 20 min) so a
+    # stall ends as axe's own red failure naming the phase it stalled at. With
+    # both clocks at 20 minutes the runner won the race and SIGKILLed axe,
+    # which GitHub reports as "cancelled", not "failure" (run 34350578640).
+    # Same margin, same reason, as test-routes.yml.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

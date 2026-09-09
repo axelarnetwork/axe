@@ -34,6 +34,72 @@ pub struct ExpressRecord {
     pub interchain_transfer: Option<InterchainTransfer>,
     #[serde(default)]
     pub call: Option<Call>,
+    /// Set once express execution has been ruled out for this message. Two
+    /// writers set it, and they mean different things:
+    ///
+    /// - the express service's own pre-check, before it broadcasts anything,
+    ///   when the message has no gas left to cover the destination execute
+    ///   (`gas_remain_amount <= 0`) or the call is not a `ContractCallWithToken`.
+    /// - the GMP API, *after* an express transaction it already sent reverted
+    ///   with a non-retryable error or ran out of gas, in which case
+    ///   [`Self::express_error`] carries the real reason.
+    ///
+    /// Either way the message can no longer reach phase 1, so a monitor
+    /// waiting on `express_executed` would burn its whole deadline for nothing.
+    #[serde(default)]
+    pub not_to_express_execute: Option<bool>,
+    /// The error from an express transaction that was broadcast and failed.
+    /// Absent when the service declined before broadcasting.
+    #[serde(default)]
+    pub express_error: Option<ExpressError>,
+    /// Source-side gas accounting.
+    #[serde(default)]
+    pub gas: Option<GasInfo>,
+}
+
+/// The `gas` sub-object.
+///
+/// `gas_remain_amount` is the field that actually decides express eligibility:
+/// the service refuses to front a message with nothing left to pay for the
+/// destination execute, since it would not be reimbursed. Paid and base-fee
+/// amounts are carried only to describe *why* the remainder ran out.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GasInfo {
+    #[serde(default)]
+    pub gas_paid_amount: Option<f64>,
+    #[serde(default)]
+    pub gas_base_fee_amount: Option<f64>,
+    #[serde(default)]
+    pub gas_remain_amount: Option<f64>,
+}
+
+/// The `express_error` sub-object, as the GMP API normalizes it: the useful
+/// text is on the nested `error`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpressError {
+    #[serde(default)]
+    pub error: Option<ExpressErrorDetail>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExpressErrorDetail {
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl ExpressError {
+    /// The most specific human-readable text the API kept, if any.
+    fn text(&self) -> Option<&str> {
+        let detail = self.error.as_ref()?;
+        detail
+            .reason
+            .as_deref()
+            .or(detail.message.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// The `express_executed` sub-object: who fronted the funds and where.
@@ -238,6 +304,38 @@ impl ExpressRecord {
         self.status
             .as_deref()
             .is_some_and(|s| s.eq_ignore_ascii_case("error"))
+    }
+
+    /// `Some(reason)` when express execution has been ruled out for this
+    /// message. Such a record can never reach phase 1, so a caller waiting on
+    /// `express_executed` should fail immediately and name the reason rather
+    /// than burn its whole deadline.
+    ///
+    /// Prefers the recorded error of an express transaction that was actually
+    /// broadcast, and otherwise reports the exhausted gas remainder that makes
+    /// the service decline up front. The usual cause of the latter is an
+    /// underpaid source call: the cron attaches a fixed native gas value, and a
+    /// gas-price spike can lift the route's base fee above it.
+    pub fn express_refusal(&self) -> Option<String> {
+        if self.not_to_express_execute != Some(true) {
+            return None;
+        }
+
+        if let Some(text) = self.express_error.as_ref().and_then(ExpressError::text) {
+            return Some(format!("the express transaction failed: {text}"));
+        }
+
+        if let Some(gas) = &self.gas
+            && gas.gas_remain_amount.is_some_and(|remain| remain <= 0.0)
+        {
+            let mut reason = "no gas left to cover the destination execute".to_string();
+            if let (Some(paid), Some(base)) = (gas.gas_paid_amount, gas.gas_base_fee_amount) {
+                reason.push_str(&format!(" (gas paid {paid} against a {base} base fee)"));
+            }
+            return Some(reason);
+        }
+
+        Some("the GMP API marked it not_to_express_execute".to_string())
     }
 
     /// Classify this record into its two express-reimbursement phases.
@@ -476,5 +574,80 @@ mod tests {
     fn is_executed_false_for_unexecuted_message() {
         assert!(!record(Some("error"), false).is_executed());
         assert!(!record(None, false).is_executed());
+    }
+
+    fn refusal_record(json: &str) -> ExpressRecord {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn express_refusal_none_when_not_flagged() {
+        // The ordinary shape: no flag at all, so the monitor keeps waiting.
+        assert!(
+            refusal_record(r#"{ "message_id": "m" }"#)
+                .express_refusal()
+                .is_none()
+        );
+        assert!(
+            refusal_record(r#"{ "message_id": "m", "not_to_express_execute": false }"#)
+                .express_refusal()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn express_refusal_names_exhausted_gas_remainder() {
+        // The record left by run 34350578640, read back from the GMP API: a
+        // fixed 0.06 AVAX gas value against a 0.2557 base fee, leaving nothing
+        // for the destination execute. `gas_remain_amount` is what the express
+        // service actually tests, so it alone decides this branch.
+        let reason = refusal_record(
+            r#"{ "message_id": "m", "not_to_express_execute": true,
+                 "gas": { "gas_paid_amount": 0.06, "gas_base_fee_amount": 0.2557,
+                          "gas_remain_amount": 0 } }"#,
+        )
+        .express_refusal()
+        .expect("a flagged record is a refusal");
+        assert!(reason.contains("no gas left"), "{reason}");
+        assert!(reason.contains("0.06"), "{reason}");
+        assert!(reason.contains("0.2557"), "{reason}");
+    }
+
+    #[test]
+    fn express_refusal_prefers_the_recorded_express_error() {
+        // The service already broadcast and the transaction reverted, so the
+        // API holds the real reason. Never paper over it with a gas guess.
+        let reason = refusal_record(
+            r#"{ "message_id": "m", "not_to_express_execute": true,
+                 "express_error": { "error": { "reason": "execution reverted" } },
+                 "gas": { "gas_remain_amount": 0 } }"#,
+        )
+        .express_refusal()
+        .expect("a flagged record is a refusal");
+        assert!(reason.contains("execution reverted"), "{reason}");
+        assert!(!reason.contains("no gas left"), "{reason}");
+    }
+
+    #[test]
+    fn express_refusal_without_detail_still_reports() {
+        let reason = refusal_record(r#"{ "message_id": "m", "not_to_express_execute": true }"#)
+            .express_refusal()
+            .expect("a flagged record is a refusal");
+        assert!(reason.contains("not_to_express_execute"), "{reason}");
+    }
+
+    #[test]
+    fn express_refusal_omits_gas_clause_when_gas_remains() {
+        // Refused for a reason the record does not carry (a non-token call,
+        // say). Gas was fine, so do not invent a gas explanation.
+        let reason = refusal_record(
+            r#"{ "message_id": "m", "not_to_express_execute": true,
+                 "gas": { "gas_paid_amount": 0.35, "gas_base_fee_amount": 0.002,
+                          "gas_remain_amount": 0.348 } }"#,
+        )
+        .express_refusal()
+        .expect("a flagged record is a refusal");
+        assert!(!reason.contains("no gas left"), "{reason}");
+        assert!(reason.contains("not_to_express_execute"), "{reason}");
     }
 }
