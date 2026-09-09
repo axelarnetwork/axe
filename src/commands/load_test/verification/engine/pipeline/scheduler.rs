@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use super::super::{PendingTx, inactivity_timeout};
+use super::super::{PendingTx, inactivity_budget};
 
 #[derive(Debug)]
 pub(super) enum PollAction {
@@ -82,11 +82,6 @@ impl PollScheduler {
     }
 
     pub(super) fn timed_out(&self, sending_complete: bool) -> bool {
-        let timeout = if sending_complete {
-            inactivity_timeout()
-        } else {
-            inactivity_timeout() * 2
-        };
-        self.last_progress.elapsed() >= timeout
+        self.last_progress.elapsed() >= inactivity_budget(sending_complete)
     }
 }

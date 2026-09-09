@@ -22,7 +22,7 @@
 //! `Phase1`/`Phase2` classifier) live in the shared [`crate::gmp_api`] module,
 //! so the load-test verifier can reuse them for its final executed-state check.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eyre::{Result, eyre};
 
@@ -33,6 +33,38 @@ use crate::ui;
 
 /// Default number of recent express transfers to report per chain in scan mode.
 const DEFAULT_RECENT: usize = 5;
+
+/// How often the single-tx watch prints a still-waiting line.
+///
+/// Without one the monitor polls in silence: run 34350578640 logged nothing
+/// between its second poll and the runner's SIGKILL 20 minutes later, leaving a
+/// genuine stall indistinguishable from a hung process in the cron log.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rate-limits the still-waiting lines to one per [`HEARTBEAT_INTERVAL`], so a
+/// long wait stays visible without burying the phase transitions.
+struct Heartbeat {
+    last: Instant,
+}
+
+impl Heartbeat {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+        }
+    }
+
+    fn tick(&mut self, waiting_for: &str, start: Instant) {
+        if self.last.elapsed() < HEARTBEAT_INTERVAL {
+            return;
+        }
+        self.last = Instant::now();
+        ui::info(&format!(
+            "{waiting_for} ({} elapsed)",
+            ui::format_elapsed(start)
+        ));
+    }
+}
 
 pub async fn run_config(
     network: Network,
@@ -65,20 +97,27 @@ async fn poll_single_tx(base: &str, tx: &str, timeout_secs: u64) -> Result<()> {
     let deadline = start + std::time::Duration::from_secs(timeout_secs);
 
     let mut phase1_printed = false;
+    let mut heartbeat = Heartbeat::new();
 
     loop {
         let record = gmp_api::search_by_tx(base, tx).await?;
         let Some(record) = record else {
             ui::info("not yet indexed by the GMP API");
             if Instant::now() >= deadline {
-                ui::warn(&format!(
-                    "tx not indexed within {timeout_secs}s — nothing observed"
+                return Err(eyre!(
+                    "tx never indexed by the GMP API within {timeout_secs}s: the source call \
+                     landed but Axelar never picked it up"
                 ));
-                return Ok(());
             }
             tokio::time::sleep(EXPRESS_POLL_INTERVAL).await;
             continue;
         };
+
+        // A refused message can never reach phase 1, so waiting out the
+        // deadline would only hide why. Fail now, naming the reason.
+        if let Some(reason) = record.express_refusal() {
+            return Err(eyre!("express execution was ruled out: {reason}"));
+        }
 
         let (phase1, phase2) = record.phase_status();
 
@@ -90,12 +129,12 @@ async fn poll_single_tx(base: &str, tx: &str, timeout_secs: u64) -> Result<()> {
         match (&phase1, &phase2) {
             (Phase1::NotObserved, _) => {
                 if Instant::now() >= deadline {
-                    ui::warn(&format!(
+                    return Err(eyre!(
                         "no express execution observed within {timeout_secs}s ({})",
                         ui::format_elapsed(start)
                     ));
-                    return Ok(());
                 }
+                heartbeat.tick("waiting for the express executor to front the funds", start);
             }
             (Phase1::Executed { .. }, Phase2::Reimbursed { .. }) => {
                 print_phase2(&phase2);
@@ -112,12 +151,13 @@ async fn poll_single_tx(base: &str, tx: &str, timeout_secs: u64) -> Result<()> {
             }
             (Phase1::Executed { .. }, _) => {
                 if Instant::now() >= deadline {
-                    ui::warn(&format!(
-                        "reimbursement still PENDING after {timeout_secs}s — canonical execute not observed ({})",
+                    return Err(eyre!(
+                        "express executor fronted the funds but was not reimbursed within \
+                         {timeout_secs}s: canonical execute never observed ({})",
                         ui::format_elapsed(start)
                     ));
-                    return Ok(());
                 }
+                heartbeat.tick("waiting for the canonical execute to reimburse", start);
             }
         }
 

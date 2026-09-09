@@ -122,6 +122,12 @@ jobs:
     # as the RPC default. Explicit `source_rpc`/`destination_rpc` inputs still
     # win. Empty `${{ secrets.X }}` (secret not defined) is treated as absent.
     env:
+      # Keep axe's verification window under the 90-minute job timeout so a
+      # stall ends as axe's own failure, with a written report and the
+      # GMP-API final recheck, instead of a SIGKILLed "cancelled" job
+      # with no diagnostics. An explicit value is a hard ceiling: unlike
+      # the default it is never doubled while sending is incomplete.
+      AXE_VERIFY_INACTIVITY_SECS: "4800"
       ARBITRUM_MAINNET_RPC:        ${{ secrets.ARBITRUM_MAINNET_RPC }}
       ARBITRUM_TESTNET_RPC:        ${{ secrets.ARBITRUM_TESTNET_RPC }}
       ARBITRUM_STAGENET_RPC:       ${{ secrets.ARBITRUM_STAGENET_RPC }}

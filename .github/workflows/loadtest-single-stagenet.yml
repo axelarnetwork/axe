@@ -104,6 +104,12 @@ jobs:
     # naming convention). Chains without a secret fall through to the public
     # chains-config RPC.
     env:
+      # Keep axe's verification window under the 60-minute job timeout so a
+      # stall ends as axe's own failure, with a written report and the
+      # GMP-API final recheck, instead of a SIGKILLed "cancelled" job
+      # with no diagnostics. An explicit value is a hard ceiling: unlike
+      # the default it is never doubled while sending is incomplete.
+      AXE_VERIFY_INACTIVITY_SECS: "3000"
       ARBITRUM_STAGENET_RPC:    ${{ secrets.ARBITRUM_STAGENET_RPC }}
       AVALANCHE_STAGENET_RPC:   ${{ secrets.AVALANCHE_STAGENET_RPC }}
       BASE_STAGENET_RPC:        ${{ secrets.BASE_STAGENET_RPC }}
