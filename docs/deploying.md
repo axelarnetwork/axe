@@ -17,6 +17,20 @@ axe deploy init
 axe deploy run
 ```
 
+`init` requires every deployment role key: `DEPLOYER_PRIVATE_KEY`,
+`GATEWAY_DEPLOYER_PRIVATE_KEY`, `GAS_SERVICE_DEPLOYER_PRIVATE_KEY`, and
+`ITS_DEPLOYER_PRIVATE_KEY`. It also requires `MNEMONIC`, `SALT`, `ITS_SALT`,
+and `ITS_PROXY_SALT`, alongside the chain metadata in `.env.example`.
+It reports missing variables together and validates credentials before
+writing the chain config or deployment state. `MULTISIG_PROVER_MNEMONIC`
+is optional: without it, the pipeline waits for a manual verifier-set update.
+
+`init` refuses to overwrite existing deployment state. To repair an incomplete
+setup, export the missing role keys or ITS salts and rerun `axe deploy run`.
+The run command loads missing values without replacing saved values or resetting
+completed steps, then validates the configuration before sending transactions.
+Use `axe deploy reset` only when intentionally starting over.
+
 ```
 workspace/
 ├── axe/
@@ -26,7 +40,7 @@ workspace/
 ## Commands
 
 ```bash
-axe deploy run          # runs all 23 steps sequentially
+axe deploy run          # runs all 24 steps sequentially
 axe deploy status       # shows progress
 axe deploy reset        # start over
 ```
