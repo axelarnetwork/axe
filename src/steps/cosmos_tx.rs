@@ -9,6 +9,8 @@ mod register_deployment;
 mod register_its;
 mod reward_pools;
 
+pub use instantiate::recovery::recover_failed_instantiation;
+
 use eyre::Result;
 use serde_json::Value;
 

@@ -15,31 +15,15 @@ use crate::cosmos::{
     read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::get_salt_from_key;
+use crate::state::StepStatus;
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
-struct ChainContractAddresses {
-    coordinator: String,
-    rewards: String,
-    multisig: String,
-    codec: String,
-    governance: String,
-}
+mod reconcile;
+pub(super) mod recovery;
+mod types;
 
-struct ChainCodeIds {
-    gateway: u64,
-    verifier: u64,
-    prover: u64,
-}
-
-struct InstantiatePlan {
-    execute_msg: Value,
-    deployment_name: String,
-    salt_key: String,
-    domain_separator: String,
-    contract_admin: &'static str,
-    codes: ChainCodeIds,
-}
+use types::{ChainCodeIds, ChainContractAddresses, InstantiatePlan};
 
 async fn read_chain_contract_addresses(ctx: &DeployContext) -> Result<ChainContractAddresses> {
     read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Router/address").await?;
@@ -121,7 +105,7 @@ async fn build_instantiate_plan(
             tx.chain_axelar_id
         ))
         .ok_or_else(|| eyre::eyre!("no MultisigProver.{} config", tx.chain_axelar_id))?;
-    let salt_key = ctx.state.cosm_salt.clone();
+    let salt_key = reconcile::chain_salt_key(tx.chain_axelar_id, &ctx.state.cosm_salt);
     let salt =
         base64::engine::general_purpose::STANDARD.encode(get_salt_from_key(&salt_key).as_slice());
     let domain_separator = alloy::hex::encode(
@@ -273,7 +257,34 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
     ));
     let addresses = read_chain_contract_addresses(ctx).await?;
     let codes = fetch_chain_code_ids(ctx, tx.lcd).await?;
-    let plan = build_instantiate_plan(ctx, &tx, &addresses, codes).await?;
+    let mut plan = build_instantiate_plan(ctx, &tx, &addresses, codes).await?;
+    if reconcile::reuse_existing(
+        ctx,
+        tx.lcd,
+        &addresses.coordinator,
+        tx.chain_axelar_id,
+        &mut plan,
+    )
+    .await?
+    {
+        save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
+        complete_instantiate_wait(ctx);
+        return Ok(());
+    }
+    if recovery::has_pending_proposal(ctx, tx.lcd).await? {
+        return Ok(());
+    }
+    reconcile::check_addresses_available(tx.lcd, &addresses.coordinator, &plan).await?;
+    save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
+    submit_instantiate(ctx, tx, &addresses, &plan).await
+}
+
+async fn submit_instantiate(
+    ctx: &mut DeployContext,
+    tx: StepTxContext<'_>,
+    addresses: &ChainContractAddresses,
+    plan: &InstantiatePlan,
+) -> Result<()> {
     let json_str = serde_json::to_string_pretty(&plan.execute_msg)?;
     ui::info(&format!(
         "execute msg: {}",
@@ -319,7 +330,6 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
         messages,
     )
     .await?;
-    save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
     if tx.use_governance {
         let proposal_id = extract_proposal_id(&tx_resp)?;
         ui::kv("proposal submitted", &proposal_id.to_string());
@@ -335,7 +345,19 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
             .insert(tx.proposal_key.to_string(), proposal_id);
     } else {
         ui::success("direct execution completed");
+        complete_instantiate_wait(ctx);
     }
 
     Ok(())
+}
+
+fn complete_instantiate_wait(ctx: &mut DeployContext) {
+    if let Some(step) = ctx
+        .state
+        .steps
+        .iter_mut()
+        .find(|step| step.name == "WaitInstantiateProposal")
+    {
+        step.status = StepStatus::Completed;
+    }
 }

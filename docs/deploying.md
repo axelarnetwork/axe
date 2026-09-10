@@ -31,6 +31,15 @@ The run command loads missing values without replacing saved values or resetting
 completed steps, then validates the configuration before sending transactions.
 Use `axe deploy reset` only when intentionally starting over.
 
+Cosmos instantiation derives its salt from `Coordinator:<chain>:<SALT>` so
+different chains can use the same version label. Before submitting a proposal,
+axe checks for an existing deployment and verifies its addresses, code, admin,
+source gateway, and prover identity. A matching deployment is reused, including
+legacy deployments that used the unscoped salt. Pending proposals are reused.
+If an earlier instantiation proposal failed with an address collision, rerunning
+`deploy run` rechecks that step while preserving earlier completed steps. It
+checks address availability before submitting a replacement proposal.
+
 ```
 workspace/
 ├── axe/

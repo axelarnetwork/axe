@@ -236,6 +236,7 @@ pub async fn run(
     };
 
     check_deployment_balances(&ctx, private_key.as_deref()).await?;
+    steps::cosmos_tx::recover_failed_instantiation(&mut ctx).await?;
 
     loop {
         let Some((step_idx, step_ref)) = next_pending_step(&ctx.state) else {
