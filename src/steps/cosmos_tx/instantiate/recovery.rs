@@ -9,17 +9,18 @@ use crate::ui;
 #[cfg(test)]
 mod tests;
 
-fn is_collision(proposal: &Proposal) -> bool {
+fn is_retryable_instantiation_failure(proposal: &Proposal) -> bool {
     proposal.status == "PROPOSAL_STATUS_FAILED"
-        && (proposal
-            .failed_reason
-            .contains("contract address already exists")
+        && (proposal.failed_reason == "can not instantiate: unauthorized"
+            || proposal
+                .failed_reason
+                .contains("contract address already exists")
             || (proposal.failed_reason.contains("deployment name")
                 && proposal.failed_reason.contains("already in use")))
 }
 
-fn reset_after_collision(steps: &mut [Step], proposal: &Proposal) -> bool {
-    if !is_collision(proposal) {
+fn reset_after_failure(steps: &mut [Step], proposal: &Proposal) -> bool {
+    if !is_retryable_instantiation_failure(proposal) {
         return false;
     }
     let Some(step) = steps
@@ -43,9 +44,10 @@ pub async fn recover_failed_instantiation(ctx: &mut DeployContext) -> Result<()>
     };
     let (lcd, _, _, _) = read_axelar_config(&ctx.target_json).await?;
     let proposal: Proposal = serde_json::from_value(lcd_query_proposal(&lcd, id).await?)?;
-    if reset_after_collision(&mut ctx.state.steps, &proposal) {
+    if reset_after_failure(&mut ctx.state.steps, &proposal) {
         ui::warn(&format!(
-            "proposal {id} failed with an address collision. Rechecking the deployment before retrying instantiation"
+            "proposal {id} failed: {}. Rechecking the deployment before retrying instantiation",
+            proposal.failed_reason
         ));
         save_state(&ctx.state).await?;
     }
@@ -57,7 +59,7 @@ pub(super) async fn has_pending_proposal(ctx: &DeployContext, lcd: &str) -> Resu
         return Ok(false);
     };
     let proposal: Proposal = serde_json::from_value(lcd_query_proposal(lcd, id).await?)?;
-    if is_collision(&proposal) {
+    if is_retryable_instantiation_failure(&proposal) {
         return Ok(false);
     }
     match proposal.status.as_str() {

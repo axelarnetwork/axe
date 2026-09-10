@@ -9,6 +9,7 @@ mod register_deployment;
 mod register_its;
 mod reward_pools;
 
+pub use instantiate::check_instantiate_permissions;
 pub use instantiate::recovery::recover_failed_instantiation;
 
 use eyre::Result;

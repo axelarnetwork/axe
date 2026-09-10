@@ -1,4 +1,4 @@
-use super::{is_collision, reset_after_collision};
+use super::{is_retryable_instantiation_failure, reset_after_failure};
 use crate::state::{StepStatus, default_steps};
 use crate::steps::cosmos_tx::instantiate::types::Proposal;
 
@@ -13,7 +13,7 @@ fn collision_recovery_only_resets_instantiation() {
         status: "PROPOSAL_STATUS_FAILED".into(),
         failed_reason: "contract address already exists, try a different combination of creator, checksum and salt: duplicate".into(),
     };
-    assert!(reset_after_collision(&mut steps, &proposal));
+    assert!(reset_after_failure(&mut steps, &proposal));
     assert_eq!(steps[5].status, StepStatus::Pending);
     steps[5].status = StepStatus::Completed;
     assert_eq!(serde_json::to_value(&steps).unwrap(), before);
@@ -36,8 +36,20 @@ fn pending_rejected_and_unrelated_failures_do_not_trigger_retry() {
             status: status.into(),
             failed_reason: reason.into(),
         };
-        assert!(!is_collision(&proposal));
-        assert!(!reset_after_collision(&mut steps, &proposal));
+        assert!(!is_retryable_instantiation_failure(&proposal));
+        assert!(!reset_after_failure(&mut steps, &proposal));
         assert_eq!(serde_json::to_value(&steps).unwrap(), before);
     }
+}
+
+#[test]
+fn code_permission_failure_can_retry_after_permission_preflight_passes() {
+    let proposal = Proposal {
+        status: "PROPOSAL_STATUS_FAILED".into(),
+        failed_reason: "can not instantiate: unauthorized".into(),
+    };
+    let mut steps = default_steps();
+    steps[5].status = StepStatus::Completed;
+    assert!(reset_after_failure(&mut steps, &proposal));
+    assert_eq!(steps[5].status, StepStatus::Pending);
 }

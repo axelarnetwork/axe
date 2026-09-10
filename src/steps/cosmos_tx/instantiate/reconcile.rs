@@ -28,7 +28,11 @@ fn deployment_not_found(body: &str, name: &str) -> bool {
     })
 }
 
-async fn find_deployment(lcd: &str, coordinator: &str, name: &str) -> Result<Option<Deployment>> {
+pub(super) async fn find_deployment(
+    lcd: &str,
+    coordinator: &str,
+    name: &str,
+) -> Result<Option<Deployment>> {
     let query = json!({"deployment": {"deployment_name": name}});
     match lcd_cosmwasm_smart_query_typed(lcd, coordinator, &query).await {
         Ok(value) => Ok(Some(serde_json::from_value(value)?)),

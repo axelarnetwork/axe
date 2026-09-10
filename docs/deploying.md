@@ -40,6 +40,15 @@ If an earlier instantiation proposal failed with an address collision, rerunning
 `deploy run` rechecks that step while preserving earlier completed steps. It
 checks address availability before submitting a replacement proposal.
 
+Both `init` and `run` check that the Coordinator can instantiate the selected
+CosmWasm code IDs before saving state or sending deployment transactions.
+Instantiation checks permission again immediately before submission. The
+Coordinator is the creator of these contracts, so allowing only the governance
+module or proposer wallet is insufficient. Missing permissions require a
+governance update to the code's instantiate allowlist, preserving existing
+addresses. After that update passes, `deploy run` can recover an instantiation
+proposal that failed with `can not instantiate: unauthorized`.
+
 ```
 workspace/
 ├── axe/

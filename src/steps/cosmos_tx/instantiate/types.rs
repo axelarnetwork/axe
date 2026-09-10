@@ -76,3 +76,32 @@ pub(super) struct Proposal {
     #[serde(default)]
     pub failed_reason: String,
 }
+
+#[derive(Deserialize)]
+pub(super) struct StoredCode {
+    pub code_info: CodePermissions,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CodePermissions {
+    pub instantiate_permission: InstantiatePermission,
+}
+
+#[derive(Deserialize)]
+pub(super) struct InstantiatePermission {
+    pub permission: InstantiateAccess,
+    #[serde(default)]
+    pub addresses: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) enum InstantiateAccess {
+    #[serde(alias = "ACCESS_TYPE_EVERYBODY")]
+    Everybody,
+    #[serde(alias = "ACCESS_TYPE_ANY_OF_ADDRESSES")]
+    AnyOfAddresses,
+    #[serde(alias = "ACCESS_TYPE_NOBODY")]
+    Nobody,
+    #[serde(other)]
+    Unknown,
+}

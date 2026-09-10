@@ -3,6 +3,8 @@
 //! networks the message is wrapped in a governance proposal and the user
 //! has to vote it through.
 
+use std::path::Path;
+
 use base64::Engine;
 use eyre::Result;
 use serde_json::{Value, json};
@@ -12,13 +14,14 @@ use super::defaults::{DEFAULT_PROPOSAL_DEPOSIT_UAXL, DEFAULT_VV_BLOCK_EXPIRY};
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{
     build_execute_msg_any, build_submit_proposal_any, extract_proposal_id, lcd_fetch_code_id,
-    read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
+    read_axelar_config, read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::get_salt_from_key;
-use crate::state::StepStatus;
+use crate::state::{State, StepStatus};
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
+mod permissions;
 mod reconcile;
 pub(super) mod recovery;
 mod types;
@@ -50,11 +53,11 @@ async fn read_chain_contract_addresses(ctx: &DeployContext) -> Result<ChainContr
     })
 }
 
-async fn fetch_chain_code_ids(ctx: &DeployContext, lcd: &str) -> Result<ChainCodeIds> {
+async fn fetch_chain_code_ids(target_json: &Path, lcd: &str) -> Result<ChainCodeIds> {
     ui::info("fetching code IDs...");
-    let gateway_hash = read_code_hash(ctx, "Gateway").await?;
-    let verifier_hash = read_code_hash(ctx, "VotingVerifier").await?;
-    let prover_hash = read_code_hash(ctx, "MultisigProver").await?;
+    let gateway_hash = read_code_hash(target_json, "Gateway").await?;
+    let verifier_hash = read_code_hash(target_json, "VotingVerifier").await?;
+    let prover_hash = read_code_hash(target_json, "MultisigProver").await?;
 
     let gateway = lcd_fetch_code_id(lcd, &gateway_hash).await?;
     let verifier = lcd_fetch_code_id(lcd, &verifier_hash).await?;
@@ -70,10 +73,40 @@ async fn fetch_chain_code_ids(ctx: &DeployContext, lcd: &str) -> Result<ChainCod
     })
 }
 
-async fn read_code_hash(ctx: &DeployContext, contract: &str) -> Result<String> {
+async fn read_code_hash(target_json: &Path, contract: &str) -> Result<String> {
     let pointer = format!("/axelar/contracts/{contract}/storeCodeProposalCodeHash");
 
-    read_axelar_contract_field(&ctx.target_json, &pointer).await
+    read_axelar_contract_field(target_json, &pointer).await
+}
+
+pub async fn check_instantiate_permissions(state: &State) -> Result<()> {
+    if !state.steps.iter().any(|step| {
+        step.status == StepStatus::Pending
+            && matches!(
+                step.name.as_str(),
+                "InstantiateChainContracts" | "WaitInstantiateProposal"
+            )
+    }) {
+        return Ok(());
+    }
+    let (lcd, _, _, _) = read_axelar_config(&state.target_json).await?;
+    let coordinator =
+        read_axelar_contract_field(&state.target_json, "/axelar/contracts/Coordinator/address")
+            .await?;
+    let codes = fetch_chain_code_ids(&state.target_json, &lcd).await?;
+    let chain = state.axelar_id.as_str();
+    let name = format!(
+        "{chain}-{}-{}-{}",
+        codes.gateway, codes.verifier, codes.prover
+    );
+    if let Some(deployment) = reconcile::find_deployment(&lcd, &coordinator, &name).await? {
+        eyre::ensure!(
+            deployment.chain_name == chain,
+            "deployment name is already used by another chain"
+        );
+        return Ok(());
+    }
+    permissions::check(&lcd, &coordinator, &codes).await
 }
 
 fn contract_admin(env: &str) -> &'static str {
@@ -256,7 +289,7 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
         tx.chain_axelar_id
     ));
     let addresses = read_chain_contract_addresses(ctx).await?;
-    let codes = fetch_chain_code_ids(ctx, tx.lcd).await?;
+    let codes = fetch_chain_code_ids(&ctx.target_json, tx.lcd).await?;
     let mut plan = build_instantiate_plan(ctx, &tx, &addresses, codes).await?;
     if reconcile::reuse_existing(
         ctx,
@@ -274,6 +307,7 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
     if recovery::has_pending_proposal(ctx, tx.lcd).await? {
         return Ok(());
     }
+    permissions::check(tx.lcd, &addresses.coordinator, &plan.codes).await?;
     reconcile::check_addresses_available(tx.lcd, &addresses.coordinator, &plan).await?;
     save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
     submit_instantiate(ctx, tx, &addresses, &plan).await
