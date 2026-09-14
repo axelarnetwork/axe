@@ -177,6 +177,7 @@ impl Display for BackendType {
 pub struct Validity {
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(rename = "depositDeadline", alias = "quoteExpiresAt")]
     pub quote_expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fulfillment_deadline: Option<DateTime<Utc>>,
@@ -812,7 +813,7 @@ mod tests {
                 "estimatedTimeSeconds": 60,
                 "validity": {
                     "type": "expires_at",
-                    "quoteExpiresAt": "2026-09-02T14:08:56Z",
+                    "depositDeadline": "2026-09-02T14:08:56Z",
                     "fulfillmentDeadline": "2026-09-02T14:26:56Z"
                 },
                 "input": {
@@ -880,6 +881,38 @@ mod tests {
             "53338194000000"
         );
         assert_eq!(serde_json::to_value(typed).unwrap(), response);
+    }
+
+    #[test]
+    fn validity_accepts_current_and_legacy_deposit_deadlines() {
+        let deadline = "2026-09-14T07:20:51.427710204Z";
+        for field in ["depositDeadline", "quoteExpiresAt"] {
+            let validity: Validity = serde_json::from_value(json!({
+                "type": "expires_at",
+                (field): deadline
+            }))
+            .unwrap();
+
+            assert_eq!(
+                validity.quote_expires_at,
+                deadline.parse::<DateTime<Utc>>().unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(validity).unwrap(),
+                json!({ "type": "expires_at", "depositDeadline": deadline })
+            );
+        }
+    }
+
+    #[test]
+    fn validity_requires_a_valid_deposit_deadline() {
+        for invalid in [
+            json!({ "type": "expires_at" }),
+            json!({ "type": "expires_at", "depositDeadline": null }),
+            json!({ "type": "expires_at", "depositDeadline": "invalid" }),
+        ] {
+            assert!(serde_json::from_value::<Validity>(invalid).is_err());
+        }
     }
 
     #[test]
