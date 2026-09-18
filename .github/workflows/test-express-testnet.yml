@@ -1,0 +1,69 @@
+name: Test Express Execution (testnet)
+
+# Testnet express-execution check. Thin dispatch wrapper around the reusable
+# test-express-execution.yml, which holds the actual steps and is also what
+# cron-testnet.yml calls.
+#
+# Split per network so each dropdown offers only the chains that network can
+# actually use: a single combined list would have to hold the union and let
+# you pick a mainnet-only chain on testnet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        # ORIGINATE IS LIMITED TO TWO CHAINS ON TESTNET.
+        # axe sends through the AxelarApp proxy 0xe4f05a0D5541C03d07f5175147E92D796Cae8db6,
+        # and that proxy is only deployed on avalanche and ethereum-sepolia
+        # (verified with eth_getCode). Those are also the only two testnet
+        # chains the express executor is observed fronting to. So the only
+        # originate routes that exist are:
+        #     avalanche -> ethereum-sepolia
+        #     ethereum-sepolia -> avalanche
+        # monitor mode has no such limit: it only reads the public GMP API.
+        description: 'originate = real transfer through the live express executor, verify reimbursement (needs EVM_PRIVATE_KEY). ONLY avalanche <-> ethereum-sepolia work: the AxelarApp proxy is deployed on no other testnet chain. monitor = read-only scan of recent express transfers, no keys needed.'
+        type: choice
+        required: true
+        default: originate
+        options:
+          - originate
+          - monitor
+      source_chain:
+        description: 'originate: source chain. Ignored by monitor.'
+        type: choice
+        required: true
+        default: avalanche
+        options:
+          - avalanche
+          - ethereum-sepolia
+      destination_chain:
+        description: 'originate: destination chain (pick the other one). monitor: chain to scan, or "all" for both.'
+        type: choice
+        required: true
+        default: ethereum-sepolia
+        options:
+          - all
+          - avalanche
+          - ethereum-sepolia
+      amount:
+        description: 'Optional. originate: aUSDC base units (6 dp). Blank = 10. The registry min is 0, so dust exercises the same path.'
+        type: string
+        required: false
+        default: ''
+      gas_value:
+        description: 'Optional. originate: native gas to attach, in wei. Blank = 350000000000000000 (0.35 AVAX). Unused gas is refunded.'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  express:
+    uses: ./.github/workflows/test-express-execution.yml
+    with:
+      mode: ${{ inputs.mode }}
+      network: testnet
+      source_chain: ${{ inputs.source_chain }}
+      destination_chain: ${{ inputs.destination_chain }}
+      amount: ${{ inputs.amount }}
+      gas_value: ${{ inputs.gas_value }}
+    secrets: inherit

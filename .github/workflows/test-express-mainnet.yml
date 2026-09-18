@@ -1,0 +1,98 @@
+name: Test Express Execution (mainnet)
+
+# Mainnet express-execution check. Thin dispatch wrapper around the reusable
+# test-express-execution.yml, which holds the actual steps and is also what
+# cron-mainnet.yml calls.
+#
+# SPENDS REAL FUNDS in originate mode. The transfer itself is dust (1 base
+# unit of axlUSDC, 0.000001 USDC) and lands on our own address, so the only
+# real cost is source gas: a measured run used 0.0021 AVAX of the 0.35
+# attached, with the remainder refunded on chain.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        # Every chain listed below carries the AxelarApp proxy
+        # 0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401 (verified with
+        # eth_getCode) and has express gas config in the registry at
+        # gmp-api/config/projects.yml. Unlike testnet, mainnet is not
+        # restricted to a single pair: any listed chain can originate to any
+        # other. fantom is excluded (proxy absent); centrifuge is excluded as
+        # unverified (its RPC did not respond when the list was measured).
+        description: 'originate = real transfer through the live express executor, verify reimbursement. SPENDS REAL GAS (~0.002 AVAX; the axlUSDC is dust and returns to our own address). Any listed chain can originate to any other. monitor = read-only scan of recent express transfers, no keys and no spend.'
+        type: choice
+        required: true
+        default: monitor
+        options:
+          - monitor
+          - originate
+      source_chain:
+        description: 'originate: source chain (must carry the express asset). Ignored by monitor.'
+        type: choice
+        required: true
+        default: avalanche
+        options:
+          - arbitrum
+          - avalanche
+          - base
+          - binance
+          - blast
+          - celo
+          - ethereum
+          - filecoin
+          - fraxtal
+          - immutable
+          - kava
+          - linea
+          - mantle
+          - moonbeam
+          - optimism
+          - polygon
+          - scroll
+      destination_chain:
+        description: 'originate: destination chain. monitor: chain to scan, or "all" for every express chain on mainnet.'
+        type: choice
+        required: true
+        default: base
+        options:
+          - all
+          - arbitrum
+          - avalanche
+          - base
+          - binance
+          - blast
+          - celo
+          - ethereum
+          - filecoin
+          - fraxtal
+          - immutable
+          - kava
+          - linea
+          - mantle
+          - moonbeam
+          - optimism
+          - polygon
+          - scroll
+      amount:
+        description: 'Optional. originate: axlUSDC base units (6 dp). Blank = 10. Keep it dust; the registry cap is $5000.'
+        type: string
+        required: false
+        default: ''
+      gas_value:
+        description: 'Optional. originate: native gas to attach, in wei. Blank = 350000000000000000 (0.35 AVAX). This is a ceiling, not a spend: the unused part is refunded.'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  express:
+    uses: ./.github/workflows/test-express-execution.yml
+    with:
+      mode: ${{ inputs.mode }}
+      network: mainnet
+      source_chain: ${{ inputs.source_chain }}
+      destination_chain: ${{ inputs.destination_chain }}
+      amount: ${{ inputs.amount }}
+      gas_value: ${{ inputs.gas_value }}
+    secrets: inherit

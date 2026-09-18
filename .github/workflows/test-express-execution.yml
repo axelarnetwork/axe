@@ -49,70 +49,6 @@ on:
         type: string
         required: false
         default: '350000000000000000'
-  workflow_dispatch:
-    inputs:
-      network:
-        description: Axelar network (testnet and mainnet both carry express data)
-        type: choice
-        required: true
-        default: testnet
-        options:
-          - testnet
-          - mainnet
-      mode:
-        description: 'originate = drive a real express transfer through the live executor and verify reimbursement (needs EVM_PRIVATE_KEY); monitor = observe recent express transfers only.'
-        type: choice
-        required: true
-        default: originate
-        options:
-          - originate
-          - monitor
-      source_chain:
-        description: 'originate: source chain (must carry the express asset + the AxelarApp proxy). Ignored in monitor mode.'
-        type: choice
-        required: true
-        default: avalanche
-        options:
-          - arbitrum
-          - avalanche
-          - base
-          - binance
-          - celo
-          - ethereum
-          - ethereum-sepolia
-          - linea
-          - mantle
-          - optimism
-          - polygon
-      destination_chain:
-        description: 'originate: destination chain (must be in the express executor config). monitor: the chain to scan, or "all" for every express chain on the network.'
-        type: choice
-        required: true
-        default: ethereum-sepolia
-        options:
-          - all
-          - arbitrum
-          - avalanche
-          - base
-          - binance
-          - celo
-          - ethereum
-          - ethereum-sepolia
-          - linea
-          - mantle
-          - optimism
-          - polygon
-      amount:
-        description: 'Optional. originate: express-asset base units (6 dp). Blank = 10. Must stay under the registry cap (testnet $1000, mainnet $5000).'
-        type: string
-        required: false
-        default: ''
-      gas_value:
-        description: 'Optional. originate: native gas to attach, in wei. Blank = 350000000000000000 (0.35 AVAX). Unused gas is refunded, so headroom is close to free.'
-        type: string
-        required: false
-        default: ''
-
 jobs:
   express-monitor:
     runs-on: ubuntu-latest
@@ -138,10 +74,14 @@ jobs:
           DST: ${{ inputs.destination_chain || 'ethereum-sepolia' }}
         run: |
           set -euo pipefail
+          # Measured, not assumed: a chain can originate only if the
+          # AxelarApp proxy is deployed on it (eth_getCode) AND the express
+          # registry has gas config for it (gmp-api/config/projects.yml).
+          # Testnet carries the proxy on exactly two chains.
           if [ "$NETWORK" = mainnet ]; then
-            SUPPORTED="arbitrum avalanche base binance celo ethereum mantle optimism polygon"
+            SUPPORTED="arbitrum avalanche base binance blast celo ethereum filecoin fraxtal immutable kava linea mantle moonbeam optimism polygon scroll"
           else
-            SUPPORTED="avalanche binance ethereum-sepolia linea"
+            SUPPORTED="avalanche ethereum-sepolia"
           fi
           supported() { case " $SUPPORTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -242,9 +182,9 @@ jobs:
           # lists come from live express activity on the Axelarscan GMP API.
           if [ "$DEST_CHAIN" = all ]; then
             if [ "$NETWORK" = mainnet ]; then
-              CHAIN_ARGS=(ethereum base binance optimism polygon arbitrum mantle celo avalanche)
+              CHAIN_ARGS=(ethereum base binance optimism polygon arbitrum mantle celo avalanche linea scroll blast)
             else
-              CHAIN_ARGS=(avalanche ethereum-sepolia linea binance)
+              CHAIN_ARGS=(avalanche ethereum-sepolia)
             fi
           else
             CHAIN_ARGS=("$DEST_CHAIN")
