@@ -77,7 +77,7 @@ GMP is the cross-chain **delivery** primitive; ITS rides the identical
 verify→route→approve→execute path and additionally needs its token registered on
 each endpoint. Validating GMP validates the delivery path for both.
 
-### `test express-execution` — express-reimbursement monitor (observe-only)
+### `test express-execution` — express-reimbursement test
 
 `axe test express-execution <chains…> [--source-tx <hash>] [--network …]
 [--recent N] [--timeout-secs N]` monitors Axelar **express execution
@@ -95,15 +95,38 @@ decodes the executor EOA's outbound ERC-20 `Transfer`s in the express tx
 the GMP-API receipt logs, and asserts the two are equal. A mismatch or a missing
 inbound transfer is surfaced as an error and **fails** the single-tx watch
 (non-zero exit); the fronted/reimbursed base-unit amounts are printed either way.
-Two modes: a chains scan (newest `--recent` express transfers per chain) and a
+Three modes: a chains scan (newest `--recent` express transfers per chain), a
 single-tx watch (`--source-tx`, polled every 10 s up to `--timeout-secs`, default
-1800). It needs no wallet keys, RPCs, or chains-config — GMP-API reads only. CI:
+1800), and `--originate` (below). The two observe-only modes need no wallet keys,
+RPCs, or chains-config — GMP-API reads only. CI:
 `.github/workflows/test-express-execution.yml`.
 
-**v1 is monitor-only.** axe does **not** yet originate a qualifying express
-transfer — producing one requires routing through an express-enabled project
-(e.g. the Squid router), which is an open board decision tracked as a follow-up.
-v1 only observes reimbursement on transfers initiated elsewhere.
+**`--originate` drives the real express executor.** `axe test express-execution
+--originate --source-chain <src> --destination-chain <dst> [--amount N]
+[--gas-value wei] [--symbol S] [--app-address 0x…]` sends the one call shape the
+`gmp-express-executor` service picks up, then watches the resulting tx through
+both phases above. The shape is fixed by the express registry
+(`gmp-api/config/projects.yml`, project `axelar-app`): the **gateway** path
+(`ContractCallWithToken`: express gates on that event, so ITS
+`interchainTransfer` never enters the queue), source address *and* destination
+contract equal to the registered AxelarApp proxy (testnet
+`0xe4f05a0D5541C03d07f5175147E92D796Cae8db6`, mainnet
+`0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401`), the registry's express asset
+(testnet `aUSDC`, mainnet `axlUSDC`/`USDC`) inside the per-chain cap (testnet
+$1000, mainnet $5000), and gas paid through
+`payNativeGasForExpressCallWithToken`, which AxelarApp does when
+`gatewaySend.enableExpress` is set. axe never express-executes anything itself,
+so a green run means the **live service** fronted the funds and was reimbursed in
+full. Needs `EVM_PRIVATE_KEY` and a source RPC. The registry min is 0, so the
+crons send dust (1 to 10 base units) and the check costs only gas. Wired into both
+crons (`cron-testnet.yml`, `cron-mainnet.yml`) as `mode: originate`.
+
+**Real-executor runs verified end-to-end:**
+
+| network | route | amount | fronted = reimbursed | source → reimbursed |
+| --- | --- | --- | --- | --- |
+| mainnet | avalanche → base | 100000 axlUSDC base units | yes | 51.5 s |
+| testnet (2026-09-18) | avalanche → ethereum-sepolia | 1 aUSDC base unit | yes | 1 m 42 s |
 
 **On-chain reimbursement verified (MOU-26, mainnet, 2026-06-25).** The monitor's
 API-derived "reimbursed" flag was cross-checked against the destination-chain

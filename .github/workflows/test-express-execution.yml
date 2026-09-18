@@ -51,8 +51,16 @@ on:
         default: '350000000000000000'
   workflow_dispatch:
     inputs:
+      network:
+        description: Axelar network (testnet and mainnet both carry express data)
+        type: choice
+        required: true
+        default: testnet
+        options:
+          - testnet
+          - mainnet
       mode:
-        description: 'monitor = observe recent express transfers; originate = drive a real express transfer through the actual express executor and verify reimbursement.'
+        description: 'originate = drive a real express transfer through the live executor and verify reimbursement (needs EVM_PRIVATE_KEY); monitor = observe recent express transfers only.'
         type: choice
         required: true
         default: originate
@@ -60,46 +68,50 @@ on:
           - originate
           - monitor
       source_chain:
-        description: 'originate mode: source chain (must carry the express asset + the AxelarApp proxy).'
-        type: string
-        required: false
-        default: avalanche
-      destination_chain:
-        description: 'originate mode: destination chain (must be in the express executor config).'
-        type: string
-        required: false
-        default: ethereum-sepolia
-      amount:
-        description: 'originate mode: express-asset base units (6 dp). Dust is fine - the registry min is 0. Must stay under the cap (testnet $1000, mainnet $5000).'
-        type: string
-        required: false
-        default: '10'
-      chains:
-        description: 'Express-supported chain(s) to monitor. "all" scans every express chain for the chosen network; or pick one for a focused run.'
+        description: 'originate: source chain (must carry the express asset + the AxelarApp proxy). Ignored in monitor mode.'
         type: choice
         required: true
-        default: all
+        default: avalanche
         options:
-          - all
-          - ethereum
-          - ethereum-sepolia
+          - arbitrum
           - avalanche
           - base
           - binance
+          - celo
+          - ethereum
+          - ethereum-sepolia
+          - linea
+          - mantle
           - optimism
           - polygon
-          - arbitrum
-          - mantle
-          - celo
-          - linea
-      network:
-        description: Axelar network (testnet + mainnet have express data)
+      destination_chain:
+        description: 'originate: destination chain (must be in the express executor config). monitor: the chain to scan, or "all" for every express chain on the network.'
         type: choice
         required: true
-        default: testnet
+        default: ethereum-sepolia
         options:
-          - testnet
-          - mainnet
+          - all
+          - arbitrum
+          - avalanche
+          - base
+          - binance
+          - celo
+          - ethereum
+          - ethereum-sepolia
+          - linea
+          - mantle
+          - optimism
+          - polygon
+      amount:
+        description: 'Optional. originate: express-asset base units (6 dp). Blank = 10. Must stay under the registry cap (testnet $1000, mainnet $5000).'
+        type: string
+        required: false
+        default: ''
+      gas_value:
+        description: 'Optional. originate: native gas to attach, in wei. Blank = 350000000000000000 (0.35 AVAX). Unused gas is refunded, so headroom is close to free.'
+        type: string
+        required: false
+        default: ''
 
 jobs:
   express-monitor:
@@ -112,6 +124,42 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      # Express support is per-network: a chain that is express-enabled on
+      # mainnet may not be on testnet, and the sepolia ids only exist on
+      # testnet. The dropdown offers the union, so the pair is checked here
+      # rather than failing later with an opaque API or revert error.
+      - name: Check the chains are express-supported on this network
+        shell: bash
+        env:
+          NETWORK: ${{ inputs.network || 'testnet' }}
+          MODE: ${{ inputs.mode || 'originate' }}
+          SRC: ${{ inputs.source_chain || 'avalanche' }}
+          DST: ${{ inputs.destination_chain || 'ethereum-sepolia' }}
+        run: |
+          set -euo pipefail
+          if [ "$NETWORK" = mainnet ]; then
+            SUPPORTED="arbitrum avalanche base binance celo ethereum mantle optimism polygon"
+          else
+            SUPPORTED="avalanche binance ethereum-sepolia linea"
+          fi
+          supported() { case " $SUPPORTED " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+          if [ "$MODE" = originate ]; then
+            if [ "$DST" = all ]; then
+              echo "::error::originate needs one destination chain, not 'all'" >&2
+              exit 1
+            fi
+            for chain in "$SRC" "$DST"; do
+              if ! supported "$chain"; then
+                echo "::error::$chain is not express-supported on $NETWORK (supported: $SUPPORTED)" >&2
+                exit 1
+              fi
+            done
+          elif [ "$DST" != all ] && ! supported "$DST"; then
+            echo "::error::$DST is not express-supported on $NETWORK (supported: $SUPPORTED)" >&2
+            exit 1
+          fi
 
       # Build-or-download strategy mirrors test-routes.yml so a code
       # change automatically invalidates a stale prebuilt artifact.
@@ -184,21 +232,21 @@ jobs:
         if: ${{ (inputs.mode || 'originate') == 'monitor' }}
         shell: bash
         env:
-          CHAINS: ${{ inputs.chains }}
+          DEST_CHAIN: ${{ inputs.destination_chain || 'ethereum-sepolia' }}
           NETWORK: ${{ inputs.network || 'testnet' }}
         run: |
           set -euo pipefail
           # "all" expands to the network's express-supported chains; any other
-          # choice scans just that chain. (The GMP-API destinationChain filter is
+          # choice scans just that destination chain. (The GMP-API destinationChain filter is
           # case-insensitive, so lowercase axelar ids are fine.) The per-network
           # lists come from live express activity on the Axelarscan GMP API.
-          if [ "$CHAINS" = all ]; then
+          if [ "$DEST_CHAIN" = all ]; then
             if [ "$NETWORK" = mainnet ]; then
               CHAIN_ARGS=(ethereum base binance optimism polygon arbitrum mantle celo avalanche)
             else
               CHAIN_ARGS=(avalanche ethereum-sepolia linea binance)
             fi
           else
-            CHAIN_ARGS=("$CHAINS")
+            CHAIN_ARGS=("$DEST_CHAIN")
           fi
           ./target/release/axe test express-execution "${CHAIN_ARGS[@]}" --network "$NETWORK"
