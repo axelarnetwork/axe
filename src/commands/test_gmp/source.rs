@@ -79,6 +79,8 @@ pub async fn send_evm_call_contract<P: Provider>(
     ui::kv("message_id", &message_id);
     ui::kv("payload_hash", &format!("{payload_hash}"));
 
+    crate::evm::finality::wait_for_finalized_receipt(provider, &receipt).await?;
+
     Ok(SentGmp {
         source_address: format!("{sender_receiver}"),
         destination_chain,

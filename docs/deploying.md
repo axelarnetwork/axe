@@ -61,6 +61,20 @@ governance update to the code's instantiate allowlist, preserving existing
 addresses. After that update passes, `deploy run` can recover an instantiation
 proposal that failed with `can not instantiate: unauthorized`.
 
+ITS deployment and the EVM GMP smoke test retry transient RPC requests up to
+three times. Broadcast retries reuse identical signed transaction bytes, so a
+lost response does not cause a second transaction with a new nonce. Contract
+reverts are not retried. If requests still fail, resume deployment using its
+existing state so the predicted contract addresses are checked again.
+
+`axe test gmp --axelar-id <chain>` waits for the source transaction's block to
+be covered by the RPC's `finalized` block before requesting verification. L2
+finality can take tens of minutes even when a receipt appears immediately.
+The wait shows finalized/required heights and times out after one hour without
+requesting verification. A missing or changed receipt also stops verification.
+This avoids asking handlers to vote on an unfinalized transaction, which they
+would report as `NotFound`.
+
 ```
 workspace/
 ├── axe/

@@ -465,7 +465,7 @@ pub async fn run(
     let deployer_addr = signer.address();
     let provider = ProviderBuilder::new()
         .wallet(signer)
-        .connect_http(ctx.rpc_url.parse()?);
+        .connect_client(crate::evm::rpc_retry::client(&ctx.rpc_url)?);
     let plan = prepare_its_plan(ctx, step_idx, step, deployer_addr, &provider).await?;
 
     let helpers = deploy_its_helpers(ctx, step_idx, &plan, &provider).await?;

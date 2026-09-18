@@ -15,6 +15,10 @@ use std::time::Duration;
 /// generous for any production EVM and lets relayer races resolve cleanly.
 pub const EVM_TX_RECEIPT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// L2 finality can lag transaction inclusion by tens of minutes.
+pub const EVM_FINALITY_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+pub const EVM_FINALITY_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
 // ---------------------------------------------------------------------------
 // Cosmos LCD
 // ---------------------------------------------------------------------------
