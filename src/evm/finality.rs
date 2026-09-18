@@ -1,10 +1,13 @@
-use std::time::Duration;
+mod progress;
+
+use std::time::{Duration, Instant};
 
 use alloy::{eips::BlockNumberOrTag, providers::Provider, rpc::types::TransactionReceipt};
 use eyre::{Result, WrapErr};
 
 use crate::timing::{EVM_FINALITY_POLL_INTERVAL, EVM_FINALITY_TIMEOUT};
 use crate::ui;
+use progress::FinalityProgress;
 
 #[cfg(test)]
 mod tests;
@@ -39,13 +42,25 @@ async fn wait_with_timeout<P: Provider>(
     let spinner = ui::wait_spinner(&format!(
         "waiting for source block {target} to be finalized..."
     ));
+    spinner.set_style(ui::progress_bar_style(
+        "  {spinner:.cyan} [{bar:20.cyan/blue}] {percent}% [{elapsed_precise}] {msg}",
+    ));
+    let started = Instant::now();
+    let mut progress = None;
     let result = tokio::time::timeout(timeout, async {
         loop {
             let block = provider.get_block_by_number(BlockNumberOrTag::Finalized).await
                 .wrap_err("cannot read source finality, verification has not been requested")?
                 .ok_or_else(|| eyre::eyre!("RPC returned no finalized block, verification has not been requested"))?;
             let finalized = block.header.number;
-            spinner.set_message(format!("source finality: finalized block {finalized}, need {target}"));
+            let elapsed = started.elapsed();
+            let progress = progress.get_or_insert_with(|| FinalityProgress::new(finalized, elapsed));
+            progress.observe(finalized, elapsed);
+            spinner.set_length(progress.total(target));
+            spinner.set_position(progress.completed(target));
+            let remaining = target.saturating_sub(finalized);
+            let eta = progress.eta_label(target, elapsed);
+            spinner.set_message(format!("source finality: {finalized}/{target}, {remaining} blocks left, ETA {eta}"));
             if finalized >= target {
                 let observed = provider.get_transaction_receipt(tx_hash).await?
                     .ok_or_else(|| eyre::eyre!("source transaction {tx_hash} disappeared before finality"))?;

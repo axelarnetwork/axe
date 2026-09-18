@@ -70,7 +70,11 @@ existing state so the predicted contract addresses are checked again.
 `axe test gmp --axelar-id <chain>` waits for the source transaction's block to
 be covered by the RPC's `finalized` block before requesting verification. L2
 finality can take tens of minutes even when a receipt appears immediately.
-The wait shows finalized/required heights and times out after one hour without
+The wait shows finalized/required heights, remaining blocks, elapsed time, and
+a progress bar measuring how much of the initial block gap has closed. An
+approximate ETA appears after at least 30 seconds of observations with finalized
+height advancing. It is hidden after two minutes without advancement because
+finality can arrive in batches. The wait times out after one hour without
 requesting verification. A missing or changed receipt also stops verification.
 This avoids asking handlers to vote on an unfinalized transaction, which they
 would report as `NotFound`.
