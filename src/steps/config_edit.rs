@@ -24,37 +24,32 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         .unwrap_or(&ctx.axelar_id)
         .to_string();
 
-    let (governance_address, admin_address, service_name, voting_threshold, signing_threshold) =
-        match env {
-            Network::DevnetAmplifier => (
-                "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
-                "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
-                "validators",
-                json!(["6", "10"]),
-                json!(["6", "10"]),
-            ),
-            Network::Testnet => (
-                "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-                "axelar17qafmnc4hrfa96cq37wg5l68sxh354pj6eky35",
-                "amplifier",
-                json!(["51", "100"]),
-                json!(["51", "100"]),
-            ),
-            Network::Mainnet => (
-                "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-                "axelar1pczf792wf3p3xssk4dmwfxrh6hcqnrjp70danj",
-                "amplifier",
-                json!(["2", "3"]),
-                json!(["2", "3"]),
-            ),
-            Network::Stagenet => (
-                "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-                "axelar1l7vz4m5g92kvga050vk9ycjynywdlk4zhs07dv",
-                "amplifier",
-                json!(["51", "100"]),
-                json!(["51", "100"]),
-            ),
-        };
+    let (governance_address, service_name, voting_threshold, signing_threshold) = match env {
+        Network::DevnetAmplifier => (
+            "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
+            "validators",
+            json!(["6", "10"]),
+            json!(["6", "10"]),
+        ),
+        Network::Testnet => (
+            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
+            "amplifier",
+            json!(["51", "100"]),
+            json!(["51", "100"]),
+        ),
+        Network::Mainnet => (
+            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
+            "amplifier",
+            json!(["2", "3"]),
+            json!(["2", "3"]),
+        ),
+        Network::Stagenet => (
+            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
+            "amplifier",
+            json!(["51", "100"]),
+            json!(["51", "100"]),
+        ),
+    };
 
     // Add VotingVerifier chain config
     let voting_verifier_config = json!({
@@ -79,7 +74,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     // Add MultisigProver chain config
     let multisig_prover_config = json!({
         "governanceAddress": governance_address,
-        "adminAddress": admin_address,
+        "adminAddress": super::prover_admin::default_address(env),
         "signingThreshold": signing_threshold,
         "serviceName": service_name,
         "verifierSetDiffThreshold": 0,

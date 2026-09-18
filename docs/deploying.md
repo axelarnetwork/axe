@@ -22,12 +22,24 @@ axe deploy run
 `ITS_DEPLOYER_PRIVATE_KEY`. It also requires `MNEMONIC`, `SALT`, `ITS_SALT`,
 and `ITS_PROXY_SALT`, alongside the chain metadata in `.env.example`.
 It reports missing variables together and validates credentials before
-writing the chain config or deployment state. `MULTISIG_PROVER_MNEMONIC`
-is optional: without it, the pipeline waits for a manual verifier-set update.
+writing the chain config or deployment state.
+
+Before starting, axe requires a mnemonic that derives the prover admin address.
+Set `MULTISIG_PROVER_MNEMONIC` for that wallet, or omit it only if `MNEMONIC`
+already derives the same address. Axe checks the planned admin for new contracts
+and reads the on-chain admin for an existing prover. Invalid or mismatched keys
+stop deployment before transactions. A mnemonic cannot be recovered from an
+address, and importing a key into axelard does not make it available to axe.
+Once verifiers are ready, axe sends `update_verifier_set` automatically and
+checks the on-chain admin again immediately before doing so. Resumes past the
+completed verifier-set step do not require this credential. Infrastructure
+rollout, verifier registration, and proposal voting remain manual steps.
+An explicitly supplied `MULTISIG_PROVER_MNEMONIC` replaces the saved admin
+mnemonic only after preflight succeeds, allowing a wrong saved key to be repaired.
 
 `init` refuses to overwrite existing deployment state. To repair an incomplete
 setup, export the missing role keys or ITS salts and rerun `axe deploy run`.
-The run command loads missing values without replacing saved values or resetting
+The run command loads missing role keys and salts without replacing saved values or resetting
 completed steps, then validates the configuration before sending transactions.
 Use `axe deploy reset` only when intentionally starting over.
 

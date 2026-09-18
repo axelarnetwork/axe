@@ -54,7 +54,6 @@ pub(crate) fn load_missing_environment(state: &mut State, lookup: impl Fn(&str) 
         ),
         ("ITS_SALT", &mut state.its_salt),
         ("ITS_PROXY_SALT", &mut state.its_proxy_salt),
-        ("MULTISIG_PROVER_MNEMONIC", &mut state.admin_mnemonic),
     ] {
         if destination
             .as_deref()
@@ -62,6 +61,11 @@ pub(crate) fn load_missing_environment(state: &mut State, lookup: impl Fn(&str) 
         {
             *destination = lookup(name);
         }
+    }
+    if let Some(mnemonic) =
+        lookup("MULTISIG_PROVER_MNEMONIC").filter(|mnemonic| !mnemonic.trim().is_empty())
+    {
+        state.admin_mnemonic = Some(mnemonic);
     }
 }
 

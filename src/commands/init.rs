@@ -134,6 +134,7 @@ pub async fn run() -> Result<()> {
     configuration::load_missing_environment(&mut state, |name| std::env::var(name).ok());
     configuration::validate_state(&mut state, None)?;
     read_axelar_config(&target_json).await?;
+    crate::steps::prover_admin::validate(&mut state).await?;
     crate::steps::cosmos_tx::check_instantiate_permissions(&state).await?;
     print_deployer_addresses(&state)?;
     write_chain_config(&state, &chain_name, chain_id, &token_symbol, decimals).await?;

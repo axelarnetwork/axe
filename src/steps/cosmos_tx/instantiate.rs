@@ -151,15 +151,10 @@ async fn build_instantiate_plan(
         "{}-{}-{}-{}",
         tx.chain_axelar_id, codes.gateway, codes.verifier, codes.prover
     );
-    let admin_address = match tx.env {
-        "testnet" => "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
-        _ => prover
-            .get("adminAddress")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                eyre::eyre!("no adminAddress in MultisigProver config for {}", tx.env)
-            })?,
-    };
+    let admin_address = crate::steps::prover_admin::planned_address(
+        ctx.state.env,
+        prover.get("adminAddress").and_then(Value::as_str),
+    )?;
     let execute_msg = json!({
         "instantiate_chain_contracts": {
             "deployment_name": deployment_name,

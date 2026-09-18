@@ -136,3 +136,18 @@ fn private_key_override_can_supply_missing_role_keys() {
     assert!(state.gateway_deployer.is_some());
     assert!(state.admin_mnemonic.is_none());
 }
+
+#[test]
+fn explicit_admin_environment_repairs_saved_key_without_resetting_progress() {
+    let mut state = complete_state();
+    state.admin_mnemonic = Some("old admin".into());
+    let steps = serde_json::to_value(&state.steps).unwrap();
+    let replacement = Mnemonic::from_entropy([43; 32], Language::English);
+    load_missing_environment(&mut state, |name| {
+        (name == "MULTISIG_PROVER_MNEMONIC").then(|| replacement.phrase().to_string())
+    });
+    assert_eq!(state.admin_mnemonic.as_deref(), Some(replacement.phrase()));
+    assert_eq!(serde_json::to_value(&state.steps).unwrap(), steps);
+    load_missing_environment(&mut state, |_| Some(" ".into()));
+    assert_eq!(state.admin_mnemonic.as_deref(), Some(replacement.phrase()));
+}

@@ -215,6 +215,7 @@ pub async fn run(
     configuration::load_missing_environment(&mut state, |name| std::env::var(name).ok());
     configuration::validate_state(&mut state, private_key.as_deref())?;
     crate::cosmos::read_axelar_config(&state.target_json).await?;
+    steps::prover_admin::validate(&mut state).await?;
     steps::cosmos_tx::check_instantiate_permissions(&state).await?;
     save_state(&state).await?;
 
