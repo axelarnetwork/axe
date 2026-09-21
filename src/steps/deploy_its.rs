@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy::{
-    primitives::{Address, Bytes, FixedBytes, keccak256},
+    primitives::{Address, Bytes, FixedBytes},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol_types::SolValue,
@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
+use crate::evm::artifact::read_artifact_runtime_hash;
 use crate::evm::{
     ConstAddressDeployer, Create3Deployer, broadcast_and_log, get_salt_from_key,
     read_artifact_bytecode,
@@ -18,6 +19,17 @@ use crate::evm::{
 use crate::state::{Step, save_state};
 use crate::ui;
 use crate::utils::{deployments_root, read_contract_address, update_target_json};
+
+const INTERCHAIN_PROXY_ARTIFACT: &str = "proxies/InterchainProxy.sol/InterchainProxy.json";
+
+async fn proxy_predeploy_codehash(artifact_base: &Path) -> Result<FixedBytes<32>> {
+    read_artifact_runtime_hash(
+        &artifact_base
+            .join(INTERCHAIN_PROXY_ARTIFACT)
+            .to_string_lossy(),
+    )
+    .await
+}
 
 struct ItsDeploymentPlan {
     step: Step,
@@ -35,6 +47,7 @@ struct ItsDeploymentPlan {
     proxy_salt: FixedBytes<32>,
     factory_salt: FixedBytes<32>,
     artifact_base: PathBuf,
+    predeploy_codehash: FixedBytes<32>,
     its_proxy: Address,
     factory_proxy: Address,
 }
@@ -152,6 +165,7 @@ async fn prepare_its_plan<P: Provider>(
     );
     let artifact_base = deployments_root(&ctx.target_json)?
         .join("node_modules/@axelar-network/interchain-token-service/artifacts/contracts");
+    let predeploy_codehash = proxy_predeploy_codehash(&artifact_base).await?;
     let create3 = Create3Deployer::new(create3_deployer, provider);
     let its_proxy = create3
         .deployedAddress(Bytes::new(), deployer, proxy_salt)
@@ -179,6 +193,7 @@ async fn prepare_its_plan<P: Provider>(
         proxy_salt,
         factory_salt,
         artifact_base,
+        predeploy_codehash,
         its_proxy,
         factory_proxy,
     })
@@ -329,9 +344,7 @@ async fn deploy_its_service<P: Provider>(
     save_its_address(ctx, step_idx, "InterchainTokenServiceImpl", implementation).await?;
 
     ui::section("deploying InterchainTokenService proxy");
-    let proxy_bytecode =
-        read_artifact_bytecode(&plan.artifact("proxies/InterchainProxy.sol/InterchainProxy.json"))
-            .await?;
+    let proxy_bytecode = read_artifact_bytecode(&plan.artifact(INTERCHAIN_PROXY_ARTIFACT)).await?;
     let setup_params: Bytes = Bytes::from(
         (
             plan.deployer,
@@ -388,8 +401,7 @@ async fn deploy_its_factory<P: Provider>(
         &Create3Deployer::new(plan.create3_deployer, provider),
         provider,
         "InterchainTokenFactoryProxy",
-        read_artifact_bytecode(&plan.artifact("proxies/InterchainProxy.sol/InterchainProxy.json"))
-            .await?,
+        read_artifact_bytecode(&plan.artifact(INTERCHAIN_PROXY_ARTIFACT)).await?,
         (implementation, plan.deployer, Bytes::new()).abi_encode_params(),
         plan.factory_salt,
         plan.factory_proxy,
@@ -410,12 +422,6 @@ async fn save_its_deployment(
     factory: &ItsFactoryDeployment,
 ) -> Result<()> {
     ui::section("saving ITS contract data to target JSON");
-    let predeploy_codehash = keccak256(
-        read_artifact_bytecode(
-            &plan.artifact("InterchainTokenService.sol/InterchainTokenService.json"),
-        )
-        .await?,
-    );
     update_target_json(
         &ctx.target_json,
         &ctx.axelar_id,
@@ -431,7 +437,7 @@ async fn save_its_deployment(
             "tokenHandler": format!("{}", helpers.token_handler),
             "implementation": format!("{}", service.implementation),
             "address": format!("{}", service.proxy),
-            "predeployCodehash": format!("{predeploy_codehash}"),
+            "predeployCodehash": format!("{}", plan.predeploy_codehash),
             "owner": format!("{}", plan.deployer),
         }),
     )
@@ -597,4 +603,23 @@ async fn save_its_address(
     ctx.state.steps[step_idx].set_its_address(name, addr)?;
     save_state(&ctx.state).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn its_predeploy_hash_uses_interchain_proxy_runtime() {
+        let artifact_base = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "tests/fixtures/deployment-artifacts/node_modules/@axelar-network/interchain-token-service/artifacts/contracts",
+        );
+        assert_eq!(
+            proxy_predeploy_codehash(&artifact_base)
+                .await
+                .unwrap()
+                .to_string(),
+            "0x08a4a556c4db879b4f24104d13a8baf86915d58b12c81b382dfea2a82d2856cf"
+        );
+    }
 }

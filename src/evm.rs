@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod finality;
 pub mod pipeline;
 pub mod rpc_retry;
