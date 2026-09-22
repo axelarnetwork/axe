@@ -151,9 +151,10 @@ EOF
 case "$NETWORK/$PROTOCOL" in
     testnet/its)
         # Mirrors MATRIX_TESTNET_ITS in the workflow. XRPL↔XRPL EVM uses the
-        # canonical XRP token; Monad-3↔Hedera uses the testnet AXE family
-        # 0xbcbec67e (home monad-3); Hyperliquid↔Solana uses the testnet AXE
-        # family 0x63e3c40e (home solana). All verified end-to-end. Stellar
+        # canonical XRP token; every other ITS pair (Monad-3↔Hedera,
+        # Hyperliquid↔Solana, Avalanche↔Monad-3, Avalanche→Ethereum) uses the
+        # single canonical testnet AXE v3, tokenId 0x7ad51200 (home avalanche,
+        # deployer = the workflow wallet). All verified end-to-end. Stellar
         # removed during the testnet Stellar executor outage; Sui omitted (no
         # testnet gas to source from it).
         FLEET=$(cat <<'EOF'

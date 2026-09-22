@@ -968,10 +968,14 @@ pub(crate) async fn read_stellar_contract_address(
         .to_string())
 }
 
+/// `STELLAR_PRIVATE_KEY` wins over the explicit key. Callers pass the
+/// load-test `--private-key`, which is the EVM key. A hex EVM key would
+/// otherwise be silently used as an ed25519 seed and sign from a wallet
+/// nobody funded (observed after the 2026-09 key rotation).
 pub(crate) fn load_stellar_main_wallet(private_key: Option<&str>) -> Result<StellarWallet> {
-    let key = private_key
-        .map(String::from)
-        .or_else(|| env::var("STELLAR_PRIVATE_KEY").ok())
+    let key = env::var("STELLAR_PRIVATE_KEY")
+        .ok()
+        .or_else(|| private_key.map(String::from))
         .ok_or_else(|| {
             eyre::eyre!(
                 "Stellar main wallet required. Set STELLAR_PRIVATE_KEY to either an S... secret key \

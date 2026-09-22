@@ -90,14 +90,14 @@ jobs:
           # every inbound message has sat at `approved/gas_used=0` since.
           # Re-add HL↔Stellar (and Stellar↔Solana / HL↔Stellar in GMP below)
           # once that off-chain service is back up.
-          # Monad-3 ↔ Hedera: a working testnet AXE family (tokenId 0xbcbec67e,
-          # home monad-3, remote-registered on hedera) is recorded in
+          # Monad-3 ↔ Hedera: the canonical testnet AXE v3 (tokenId 0x7ad51200,
+          # home avalanche, remote-registered on hedera) is recorded in
           # testnet.json for both chains. Monad-3 reuses its 18-dec balance;
           # Hedera reuses its HTS 6-dec balance (a one-time TokenManager
           # approval is set on the workflow wallet, like mainnet). Both
           # directions verified end-to-end (voted→hub→routed→approved→executed).
-          # Hyperliquid ↔ Solana: a testnet AXE family (tokenId 0x63e3c40e,
-          # home solana, 9 decimals both sides) is registered on both chains
+          # Hyperliquid ↔ Solana: the same testnet AXE v3 (tokenId 0x7ad51200,
+          # 18 decimals on HL, 6 on Solana) is registered on both chains
           # and recorded in testnet.json; both wallets hold supply (Solana
           # native + HL seeded by a solana->hyperliquid transfer). Both
           # directions verified — source + on-chain delivery confirmed (axe's
@@ -105,7 +105,7 @@ jobs:
           # transfer itself executes).
           # Legacy (consensus-EVM) routes: Avalanche and ethereum-sepolia are
           # consensus chains (no VotingVerifier) on testnet. The canonical
-          # testnet AXE (tokenId 0xbcbec67e, home monad-3) is registered on
+          # testnet AXE v3 (tokenId 0x7ad51200, home avalanche) is registered on
           # both legacy chains' ITS edges (recorded in testnet.json) and the
           # cron wallet holds AXE supply on Avalanche (seeded from monad-3).
           # Avalanche is the legacy *source* (sub-2s finality). Bidirectional
@@ -149,10 +149,10 @@ jobs:
           # at "approved" with gas_used 0); restored once the executor came
           # back (inbound-to-Stellar executing again as of 2026-06-11).
           # Legacy (consensus-EVM) routes mirror testnet: the canonical mainnet
-          # AXE (tokenId 0xbe1d7843, home xrpl-evm, salt axe_AXE_mainnet_v2) is
+          # AXE v3 (tokenId 0xb2d19ee9, home avalanche, salt axe_AXE_mainnet_v3) is
           # registered on the Avalanche + Ethereum legacy ITS edges (recorded
-          # in mainnet.json, address 0x54BEdCF8…) and the cron wallet holds AXE
-          # on Avalanche (seeded from xrpl-evm). Avalanche is the legacy
+          # in mainnet.json, address 0x2CD018Af…) and the cron wallet holds AXE
+          # on Avalanche (its home chain). Avalanche is the legacy
           # *source* (sub-2s finality); bidirectional Avalanche↔Monad keeps its
           # source-side AXE topped up. All three verified end-to-end on mainnet
           # via the config-token path (the exact path CI uses — no local salt
