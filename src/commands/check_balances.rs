@@ -351,38 +351,72 @@ async fn probe_all(network: Network, config: &ChainsConfig) -> Vec<BalanceRow> {
 /// Unlike the CLI, this reports shortfalls rather than failing: an agent needs
 /// to see which wallet is short so it can say why a flow would fail, and an
 /// error carrying only a count cannot express that.
-pub(crate) async fn resolve(network: Network) -> Result<serde_json::Value> {
+pub(crate) async fn resolve(network: Network) -> Result<BalanceReport> {
     let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path).await?;
     let rows = probe_all(network, &config).await;
 
-    let underfunded: Vec<&BalanceRow> = rows.iter().filter(|r| r.is_fatal()).collect();
+    let underfunded = rows.iter().filter(|r| r.is_fatal()).count();
 
-    Ok(serde_json::json!({
-        "network": network.to_string(),
-        "config": config_path.display().to_string(),
-        "wallets": rows.iter().map(balance_row_json).collect::<Vec<_>>(),
-        "summary": {
-            "checked": rows.len(),
-            "underfunded": underfunded.len(),
-            "ready": underfunded.is_empty(),
+    Ok(BalanceReport {
+        network: network.to_string(),
+        config: config_path.display().to_string(),
+        wallets: rows.iter().map(WalletRow::from_probe).collect(),
+        summary: BalanceSummary {
+            checked: rows.len(),
+            underfunded,
+            ready: underfunded == 0,
         },
-    }))
+    })
+}
+
+/// The wallet balance check, as data.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BalanceReport {
+    pub network: String,
+    pub config: String,
+    pub wallets: Vec<WalletRow>,
+    pub summary: BalanceSummary,
+}
+
+/// The verdict over all wallets.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BalanceSummary {
+    pub checked: usize,
+    /// Wallets short by enough to block a run.
+    pub underfunded: usize,
+    pub ready: bool,
 }
 
 /// One wallet row, with the verdicts an agent would otherwise have to derive.
-fn balance_row_json(row: &BalanceRow) -> serde_json::Value {
-    serde_json::json!({
-        "chain": row.chain_key,
-        "chain_type": row.kind.label(),
-        "asset": row.token_symbol,
-        "address": row.address,
-        "balance": row.balance,
-        "threshold": row.threshold,
-        "underfunded": row.is_underfunded(),
-        "blocking": row.is_fatal(),
-        "note": row.note,
-    })
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct WalletRow {
+    pub chain: String,
+    pub chain_type: &'static str,
+    pub asset: String,
+    pub address: Option<String>,
+    pub balance: Option<f64>,
+    pub threshold: f64,
+    pub underfunded: bool,
+    pub blocking: bool,
+    /// The probe error, empty when the balance was read.
+    pub note: String,
+}
+
+impl WalletRow {
+    fn from_probe(row: &BalanceRow) -> Self {
+        Self {
+            chain: row.chain_key.clone(),
+            chain_type: row.kind.label(),
+            asset: row.token_symbol.clone(),
+            address: row.address.clone(),
+            balance: row.balance,
+            threshold: row.threshold,
+            underfunded: row.is_underfunded(),
+            blocking: row.is_fatal(),
+            note: row.note.clone(),
+        }
+    }
 }
 
 pub async fn run(network: Network) -> Result<()> {

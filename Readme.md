@@ -98,6 +98,7 @@ axelar-contract-deployments (it writes back into the config) — see
 - [Supported routes](docs/routes.md) — which chain pairs and protocols work, per network
 - [Testing & load testing](docs/load-testing.md) — single messages, burst/sustained modes, examples, per-chain keys
 - [Load-test coverage matrix](docs/load-test-coverage.md) — dispatcher support by chain type
+- [Intents](docs/intents.md) — RFQ routes, quotes, and the flows that spend on them
 - [Decoding](docs/decode.md) — calldata, transactions, on-chain activity
 - [Monitoring](docs/monitoring.md) — verifiers, votes, ITS ownership
 - [Governance proposals](docs/governance.md) — `axe propose` catalog, flags, relay flow

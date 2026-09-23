@@ -320,7 +320,33 @@ fn sorted_verifiers<'a>(known_verifiers: &[(&'a str, &'a str)]) -> Vec<(&'a str,
 ///
 /// Shared by `--json` and the MCP server so both front ends report exactly
 /// the same shape and cannot drift apart.
-fn verifiers_json(known_verifiers: &[(&str, &str)], verifier_set: &VerifierSet) -> Vec<Value> {
+/// One known verifier's standing on a chain.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct VerifierEntry {
+    pub name: String,
+    pub address: String,
+    pub active: bool,
+    pub registered: bool,
+    /// The active weight, or "-" when the verifier is not in the active set.
+    pub weight: String,
+    pub pre_registration_only: bool,
+}
+
+/// The active verifier set for a chain.
+///
+/// Shared by `--json` and the MCP server so both front ends report exactly
+/// the same shape and cannot drift apart.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct VerifiersReport {
+    pub network: String,
+    pub chain: String,
+    pub verifiers: Vec<VerifierEntry>,
+}
+
+fn verifier_entries(
+    known_verifiers: &[(&str, &str)],
+    verifier_set: &VerifierSet,
+) -> Vec<VerifierEntry> {
     sorted_verifiers(known_verifiers)
         .into_iter()
         .map(|(address, name)| {
@@ -332,16 +358,16 @@ fn verifiers_json(known_verifiers: &[(&str, &str)], verifier_set: &VerifierSet) 
                 .pre_registered
                 .iter()
                 .any(|registered| registered == address);
-            json!({
-                "name": name,
-                "address": address,
-                "active": active.is_some(),
-                "registered": active.is_some() || registered,
-                "weight": active.map(|verifier| verifier.weight.as_str()).unwrap_or("-"),
-                "pre_registration_only": verifier_set.pre_registration_only,
-            })
+            VerifierEntry {
+                name: name.to_string(),
+                address: address.to_string(),
+                active: active.is_some(),
+                registered: active.is_some() || registered,
+                weight: active.map_or_else(|| "-".to_string(), |verifier| verifier.weight.clone()),
+                pre_registration_only: verifier_set.pre_registration_only,
+            }
         })
-        .collect::<Vec<_>>()
+        .collect()
 }
 
 fn verifier_status(
@@ -465,13 +491,13 @@ async fn query(
 }
 
 /// The active verifier set for a chain, as data.
-pub(crate) async fn resolve(network: Network, chain: &str) -> Result<Value> {
+pub(crate) async fn resolve(network: Network, chain: &str) -> Result<VerifiersReport> {
     let (chain_axelar_id, known_verifiers, verifier_set) = query(network, chain).await?;
-    Ok(json!({
-        "network": network.to_string(),
-        "chain": chain_axelar_id,
-        "verifiers": verifiers_json(known_verifiers, &verifier_set),
-    }))
+    Ok(VerifiersReport {
+        network: network.to_string(),
+        chain: chain_axelar_id,
+        verifiers: verifier_entries(known_verifiers, &verifier_set),
+    })
 }
 
 pub async fn run(network: Network, chain: String, json_mode: bool) -> Result<()> {
@@ -484,7 +510,7 @@ pub async fn run(network: Network, chain: String, json_mode: bool) -> Result<()>
     }
 
     if json_mode {
-        let entries = verifiers_json(known_verifiers, &verifier_set);
+        let entries = verifier_entries(known_verifiers, &verifier_set);
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }

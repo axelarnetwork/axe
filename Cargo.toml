@@ -81,7 +81,16 @@ sui-sdk-types = { version = "0.3", features = ["serde", "hash"] }
 bech32 = "0.11"
 bcs = "0.1"
 blake2 = "0.10"
-rmcp = { version = "3.1.4", features = ["transport-io"] }
+rmcp = { version = "3.1.4", features = ["transport-io", "transport-streamable-http-server"] }
+# The HTTP endpoint is served with hyper directly: rmcp exposes it as a tower
+# service, and a bearer-token check in front of it needs no router.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+# Duplicates stdout for the stdio protocol so prints can be sent to stderr.
+nix = { version = "0.30", features = ["fs"] }
 schemars = "1.2.2"
 
 [dev-dependencies]

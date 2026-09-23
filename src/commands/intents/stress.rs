@@ -26,7 +26,34 @@ use crate::ui;
 
 pub use self::types::StressArgs;
 
-pub async fn run(args: StressArgs) -> Result<()> {
+/// What a stress run did.
+///
+/// The report comes back even when deposits failed. The CLI turns a failure
+/// into a non-zero exit, but a detached caller needs the numbers either way:
+/// the deposits that did land were paid for, and a run that reported only
+/// "one failed" would leave no record of the other hundred and ninety-nine.
+pub struct StressOutcome {
+    pub report: serde_json::Value,
+    /// Deposits that failed or are still unconfirmed.
+    pub failed: u64,
+    /// Deposits that reached broadcast, which is what the run spent.
+    pub broadcast: u64,
+}
+
+impl StressOutcome {
+    /// The CLI's verdict: a run with failed deposits fails the process.
+    pub fn into_result(self) -> Result<()> {
+        if self.failed > 0 {
+            return Err(eyre!(
+                "{} deposits failed or remain unconfirmed",
+                self.failed
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub async fn run(args: StressArgs) -> Result<StressOutcome> {
     let telemetry = Arc::new(StressTelemetry::default());
     let startup = IntentActivity::new("Loading intent configuration…", !args.json);
     ui::count_warnings(
@@ -40,7 +67,7 @@ async fn run_stress(
     args: StressArgs,
     telemetry: Arc<StressTelemetry>,
     startup: &ProgressBar,
-) -> Result<()> {
+) -> Result<StressOutcome> {
     if args.runtime.network != Network::Testnet {
         return Err(eyre!("intent stress is testnet-only"));
     }
@@ -93,13 +120,12 @@ async fn run_stress(
     .await;
     progress.finish_and_clear();
     report::render(&run, &limits, args.json)?;
-    if run.state.failed > 0 {
-        return Err(eyre!(
-            "{} deposits failed or remain unconfirmed",
-            run.state.failed
-        ));
-    }
-    Ok(())
+
+    Ok(StressOutcome {
+        report: report::as_json(&run, &limits),
+        failed: run.state.failed,
+        broadcast: run.state.broadcast,
+    })
 }
 
 fn resolve_limits(args: &StressArgs, routes: &[LegPlan]) -> Result<StressLimits> {

@@ -7,6 +7,37 @@ use super::super::types::format_units;
 use super::types::{StressLimits, StressRun};
 use crate::ui;
 
+/// The run as data: what `--json` prints, and what a detached run records.
+pub(super) fn as_json(run: &StressRun, limits: &StressLimits) -> serde_json::Value {
+    let elapsed = run.state.started.elapsed();
+    let rate = |count| {
+        if elapsed.is_zero() {
+            0.0
+        } else {
+            count as f64 / elapsed.as_secs_f64()
+        }
+    };
+    let volume = format_units(
+        U256::from(run.state.confirmed).saturating_mul(limits.amount),
+        limits.decimals,
+    );
+
+    json!({
+        "stop_reason": run.stop_reason,
+        "elapsed_seconds": elapsed.as_secs_f64(),
+        "broadcast": run.state.broadcast, "confirmed": run.state.confirmed,
+        "skipped": run.state.skipped, "failed": run.state.failed,
+        "attempts": run.state.attempts, "committed_attempts": run.state.committed,
+        "peak_active": run.state.peak_active, "recovery_warnings": run.warnings,
+        "broadcast_per_second": rate(run.state.broadcast),
+        "confirmed_per_second": rate(run.state.confirmed),
+        "deposited_input": volume, "symbol": limits.symbol,
+        "max_volume": limits.max_volume.map(|cap| format_units(cap, limits.decimals)),
+        "max_native_spend_per_chain": limits.max_native_spend.map(|cap| format_units(cap, 18)),
+        "sources": run.sources, "deposits": run.records,
+    })
+}
+
 pub(super) fn render(run: &StressRun, limits: &StressLimits, json_output: bool) -> Result<()> {
     let elapsed = run.state.started.elapsed();
     let rate = |count| {
@@ -26,23 +57,7 @@ pub(super) fn render(run: &StressRun, limits: &StressLimits, json_output: bool) 
         .map(|record| record.deposit_latency_ms)
         .collect::<Vec<_>>();
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "stop_reason": run.stop_reason,
-                "elapsed_seconds": elapsed.as_secs_f64(),
-                "broadcast": run.state.broadcast, "confirmed": run.state.confirmed,
-                "skipped": run.state.skipped, "failed": run.state.failed,
-                "attempts": run.state.attempts, "committed_attempts": run.state.committed,
-                "peak_active": run.state.peak_active, "recovery_warnings": run.warnings,
-                "broadcast_per_second": rate(run.state.broadcast),
-                "confirmed_per_second": rate(run.state.confirmed),
-                "deposited_input": volume, "symbol": limits.symbol,
-                "max_volume": limits.max_volume.map(|cap| format_units(cap, limits.decimals)),
-                "max_native_spend_per_chain": limits.max_native_spend.map(|cap| format_units(cap, 18)),
-                "sources": run.sources, "deposits": run.records,
-            }))?
-        );
+        println!("{}", serde_json::to_string_pretty(&as_json(run, limits))?);
         return Ok(());
     }
     ui::section("deposit stress result");

@@ -303,7 +303,7 @@ struct OwnershipFields {
 ///
 /// Queries every deployment read-only and prints nothing, so the MCP server
 /// gets the same document `--json` produces.
-pub(crate) async fn resolve(network: Network) -> Result<Value> {
+pub(crate) async fn resolve(network: Network) -> Result<OwnershipReport> {
     let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path).await?;
     let entries = collect_its_entries(&config, network);
@@ -317,7 +317,7 @@ pub(crate) async fn resolve(network: Network) -> Result<Value> {
 
     let mut rows = query_entries(entries).await;
     sort_rows(&mut rows);
-    Ok(ownership_json(network, &config_path, &rows))
+    Ok(ownership_report(network, &config_path, &rows))
 }
 
 pub async fn run(network: Network, json_output: bool) -> Result<()> {
@@ -353,7 +353,7 @@ pub async fn run(network: Network, json_output: bool) -> Result<()> {
     if json_output {
         println!(
             "{}",
-            serde_json::to_string_pretty(&ownership_json(network, &config_path, &rows))?
+            serde_json::to_string_pretty(&ownership_report(network, &config_path, &rows))?
         );
     } else {
         let hyperlinks = spawn_blocking(terminal_hyperlinks_enabled)
@@ -911,21 +911,55 @@ fn render_summary(rows: &[OwnershipRow]) {
 /// The ownership rows and their summary, as data.
 ///
 /// Shared by `--json` and the MCP server so both front ends report exactly
-/// the same shape and cannot drift apart.
-fn ownership_json(network: Network, config_path: &std::path::Path, rows: &[OwnershipRow]) -> Value {
-    json!({
-        "network": network.to_string(),
-        "config": config_path.display().to_string(),
-        "rows": rows.iter().map(row_json).collect::<Vec<_>>(),
-        "summary": {
-            "rows": rows.len(),
-            "evm": count_kind(rows, ItsChainKind::Evm),
-            "solana": count_kind(rows, ItsChainKind::Solana),
-            "sui": count_kind(rows, ItsChainKind::Sui),
-            "stellar": count_kind(rows, ItsChainKind::Stellar),
-            "governance": governance_summary_json(rows),
+/// the same shape and cannot drift apart. The rows keep the nested JSON the
+/// `--json` output has always had; the summary is typed because it is what a
+/// caller reads without descending into a row.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OwnershipReport {
+    pub network: String,
+    pub config: String,
+    pub rows: Vec<Value>,
+    pub summary: OwnershipSummary,
+}
+
+/// Row counts by chain type, plus the governance verdict.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OwnershipSummary {
+    pub rows: usize,
+    pub evm: usize,
+    pub solana: usize,
+    pub sui: usize,
+    pub stellar: usize,
+    pub governance: GovernanceSummary,
+}
+
+/// How many chains have governance deployed, and how many of those own ITS.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GovernanceSummary {
+    pub deployed: usize,
+    pub not_deployed: usize,
+    pub owner_matches: usize,
+}
+
+fn ownership_report(
+    network: Network,
+    config_path: &std::path::Path,
+    rows: &[OwnershipRow],
+) -> OwnershipReport {
+    OwnershipReport {
+        network: network.to_string(),
+        config: config_path.display().to_string(),
+        rows: rows.iter().map(row_json).collect(),
+        summary: OwnershipSummary {
+            rows: rows.len(),
+            evm: count_kind(rows, ItsChainKind::Evm),
+            solana: count_kind(rows, ItsChainKind::Solana),
+            sui: count_kind(rows, ItsChainKind::Sui),
+            stellar: count_kind(rows, ItsChainKind::Stellar),
+            governance: governance_counts(rows),
         },
-    })
+    }
 }
 
 fn row_json(row: &OwnershipRow) -> Value {
@@ -1020,17 +1054,17 @@ fn governance_contract_json(row: &OwnershipRow, contract: &GovernanceContract) -
     })
 }
 
-fn governance_summary_json(rows: &[OwnershipRow]) -> Value {
+fn governance_counts(rows: &[OwnershipRow]) -> GovernanceSummary {
     let deployed = rows
         .iter()
         .filter(|row| row.governance.is_deployed())
         .count();
     let owner_matches = rows.iter().filter(|row| row.governance.is_owner()).count();
-    json!({
-        "deployed": deployed,
-        "notDeployed": rows.len() - deployed,
-        "ownerMatches": owner_matches,
-    })
+    GovernanceSummary {
+        deployed,
+        not_deployed: rows.len() - deployed,
+        owner_matches,
+    }
 }
 
 fn row_count_summary(rows: &[OwnershipRow]) -> String {

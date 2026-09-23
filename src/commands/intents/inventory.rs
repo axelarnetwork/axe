@@ -23,6 +23,24 @@ pub struct InventoryArgs {
 pub async fn inventory(args: InventoryArgs) -> Result<()> {
     let activity = IntentActivity::new("Loading solver inventory…", !args.json);
     let deployment = types::SolverDeployment::try_from(args.api.network)?;
+    let json = args.json;
+    let report = inventory_report(&args).await?;
+    drop(activity);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render::render(&report, deployment.low_inventory_threshold_usd());
+    }
+    Ok(())
+}
+
+/// The solver's holdings across the catalog's chains, without printing.
+///
+/// `json` on the arguments doubles as the quiet switch, as it does for the
+/// command: a caller that wants the report as data does not want the
+/// discovery commentary that goes with a terminal run.
+pub async fn inventory_report(args: &InventoryArgs) -> Result<types::InventoryReport> {
+    let deployment = types::SolverDeployment::try_from(args.api.network)?;
     let solver = deployment.address();
     let client = api_client(&args.api)?;
     let config = ChainsConfig::load(&args.config).await?;
@@ -50,7 +68,8 @@ pub async fn inventory(args: InventoryArgs) -> Result<()> {
         pricing::UsdPrices::unavailable()
     });
     let assets = read_wallet_assets(&chains, tokens, solver, feedback).await;
-    let report = types::InventoryReport::build(types::InventoryInputs {
+
+    Ok(types::InventoryReport::build(types::InventoryInputs {
         network: args.api.network,
         solver_address: solver,
         catalog,
@@ -58,12 +77,5 @@ pub async fn inventory(args: InventoryArgs) -> Result<()> {
         assets,
         price_source: prices.source,
         prices: prices.by_symbol,
-    });
-    drop(activity);
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        render::render(&report, deployment.low_inventory_threshold_usd());
-    }
-    Ok(())
+    }))
 }

@@ -78,7 +78,18 @@ pub struct QuoteRequest {
     pub recipient: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    ValueEnum,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OrderType {
     #[default]
@@ -86,7 +97,18 @@ pub enum OrderType {
     ExactOutput,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    ValueEnum,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum AssetType {
     #[default]
@@ -641,7 +663,7 @@ pub(super) struct PreparedDeposit {
     pub quote_latency_ms: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct LegResult {
     pub input_amount: U256,
     pub output_amount: U256,

@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use comfy_table::{Cell, ContentArrangement, Table};
 use eyre::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::commands::verifiers::lookup_name;
 use crate::config_source;
@@ -252,34 +252,55 @@ async fn fetch_block_timestamps(
     timestamps
 }
 
-/// The vote rows as data.
+/// One vote transaction by the verifier.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct VoteEntry {
+    pub height: u64,
+    pub tx_hash: String,
+    /// Block time, empty when the timestamp lookup failed.
+    pub time: String,
+    pub poll_id: String,
+    /// Raw per-message vote strings, as the chain reports them.
+    pub votes: Vec<String>,
+    pub summary: String,
+}
+
+/// One verifier's recent votes on a chain.
 ///
 /// Shared by `--json` and the MCP server so both front ends report exactly
 /// the same shape and cannot drift apart.
-fn votes_json(
-    verifier: &str,
-    display_name: Option<&str>,
-    voting_verifier: &str,
-    chain: &str,
-    rows: &[VoteRow],
-    timestamps: &std::collections::HashMap<u64, String>,
-) -> Value {
-    json!({
-        "verifier": verifier,
-        "name": display_name,
-        "voting_verifier": voting_verifier,
-        "chain": chain,
-        "votes": rows.iter().map(|row| {
-            json!({
-                "height": row.height,
-                "tx_hash": row.tx_hash,
-                "time": timestamps.get(&row.height).cloned().unwrap_or_default(),
-                "poll_id": row.poll_id,
-                "votes": row.votes,
-                "summary": vote_summary(&row.votes),
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct VotesReport {
+    pub verifier: String,
+    pub name: Option<String>,
+    pub voting_verifier: String,
+    pub chain: String,
+    pub votes: Vec<VoteEntry>,
+}
+
+fn votes_report(verifier: &str, report: &VoteReport) -> VotesReport {
+    VotesReport {
+        verifier: verifier.to_string(),
+        name: report.display_name.map(str::to_string),
+        voting_verifier: report.voting_verifier.clone(),
+        chain: report.chain_axelar_id.clone(),
+        votes: report
+            .rows
+            .iter()
+            .map(|row| VoteEntry {
+                height: row.height,
+                tx_hash: row.tx_hash.clone(),
+                time: report
+                    .timestamps
+                    .get(&row.height)
+                    .cloned()
+                    .unwrap_or_default(),
+                poll_id: row.poll_id.clone(),
+                votes: row.votes.clone(),
+                summary: vote_summary(&row.votes),
             })
-        }).collect::<Vec<_>>(),
-    })
+            .collect(),
+    }
 }
 
 fn print_vote_table(
@@ -396,16 +417,9 @@ pub(crate) async fn resolve(
     chain: &str,
     verifier: &str,
     limit: usize,
-) -> Result<Value> {
+) -> Result<VotesReport> {
     let report = gather(network, chain, verifier, limit).await?;
-    Ok(votes_json(
-        verifier,
-        report.display_name,
-        &report.voting_verifier,
-        &report.chain_axelar_id,
-        &report.rows,
-        &report.timestamps,
-    ))
+    Ok(votes_report(verifier, &report))
 }
 
 pub async fn run(
@@ -418,14 +432,7 @@ pub async fn run(
     let report = gather(network, &chain, &verifier, limit).await?;
 
     if json_mode {
-        let entries = votes_json(
-            &verifier,
-            report.display_name,
-            &report.voting_verifier,
-            &report.chain_axelar_id,
-            &report.rows,
-            &report.timestamps,
-        );
+        let entries = votes_report(&verifier, &report);
         println!("{}", serde_json::to_string_pretty(&entries)?);
         return Ok(());
     }

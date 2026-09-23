@@ -260,6 +260,25 @@ impl ChainsConfig {
             .get(chain_id)
             .ok_or_else(|| eyre::eyre!("chain '{chain_id}' not found in config"))
     }
+
+    /// Drop every chain outside `allowed`, by axelar id. An empty list allows
+    /// everything, so this is a no-op for anyone who has not restricted them.
+    ///
+    /// Narrowing the config is how a restriction reaches code that discovers
+    /// its own chains: a flow that resolves candidates against this map can
+    /// only find what is left in it. Matching accepts the map key or the
+    /// entry's `axelar_id`, since the two differ for some chains.
+    pub fn retain_chains(&mut self, allowed: &[String]) {
+        if allowed.is_empty() {
+            return;
+        }
+        self.chains.retain(|key, chain| {
+            let axelar_id = chain.axelar_id.as_deref().unwrap_or(key);
+            allowed
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(key) || a.eq_ignore_ascii_case(axelar_id))
+        });
+    }
 }
 
 impl ChainConfig {
@@ -369,6 +388,34 @@ mod tests {
       "someUnknownTopLevelKey": { "ignored": true }
     }
     "#;
+
+    #[test]
+    fn retaining_chains_keeps_only_what_was_allowed() {
+        let mut cfg = ChainsConfig::from_json_str(FIXTURE).expect("fixture parses");
+        cfg.retain_chains(&["Solana".to_owned()]);
+
+        assert!(
+            cfg.chains.contains_key("solana"),
+            "matched case-insensitively"
+        );
+        assert!(
+            !cfg.chains.contains_key("hedera"),
+            "a chain outside the list is gone, so nothing can discover a route on it"
+        );
+    }
+
+    #[test]
+    fn retaining_nothing_allows_everything() {
+        let mut cfg = ChainsConfig::from_json_str(FIXTURE).expect("fixture parses");
+        let before = cfg.chains.len();
+        cfg.retain_chains(&[]);
+
+        assert_eq!(
+            cfg.chains.len(),
+            before,
+            "an empty allowlist is no restriction"
+        );
+    }
 
     #[test]
     fn parses_typed_fields() {

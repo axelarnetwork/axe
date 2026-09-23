@@ -140,11 +140,45 @@ pub enum Commands {
     /// drive it. The network is fixed for the life of the server: pass
     /// `--network` or set `AXE_NETWORK`.
     Mcp {
-        /// Allow the server to be pinned to mainnet. Without this, starting
-        /// against mainnet is refused: the flows spend real funds, so that
-        /// decision is made once by a human outside the conversation.
+        #[command(subcommand)]
+        action: Option<McpCommands>,
+        /// Refuse to serve mainnet. Every network is served without it,
+        /// mainnet included; pass this to shut out the one where a flow
+        /// spends real funds. The decision is made once by a human outside
+        /// the conversation, since no tool argument can change the network.
         #[arg(long)]
-        allow_mainnet: bool,
+        deny_mainnet: bool,
+        /// The most transactions one load test started through the server
+        /// may send. Enforced by the server, so no tool argument can raise it.
+        #[arg(long, default_value_t = crate::mcp::policy::DEFAULT_MAX_TXS_PER_RUN)]
+        max_txs_per_run: u64,
+        /// The most transactions the server may send over its lifetime.
+        /// Unlimited when omitted.
+        #[arg(long)]
+        max_txs_total: Option<u64>,
+        /// A chain a load test may use as source or destination, by axelar
+        /// id. Repeat for several. Any chain when omitted.
+        #[arg(long = "allow-chain", value_name = "AXELAR_ID")]
+        allow_chains: Vec<String>,
+        /// Serve over HTTP on this address instead of stdio, for a client that
+        /// must not share this process's environment, such as an agent in a
+        /// sandbox. Requires `AXE_MCP_TOKEN`, which clients present as a
+        /// bearer token. Bind to an address only the intended client can
+        /// reach.
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<std::net::SocketAddr>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum McpCommands {
+    /// Print the tools and documentation resources the server offers, without
+    /// starting it. Needs no network.
+    List {
+        /// Print the catalogue as JSON, with each tool's full input schema.
+        /// This is what a client receives from tools/list.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -728,11 +762,11 @@ pub enum TestCommands {
 
         /// Express-asset base units (6 decimals) to send with --originate.
         /// Must stay inside the express registry's per-chain cap.
-        #[arg(long, default_value = "5000000")]
+        #[arg(long, default_value = crate::commands::express_originate::DEFAULT_AMOUNT)]
         amount: String,
 
         /// Native gas to attach to the --originate call, in wei.
-        #[arg(long, default_value = "350000000000000000")]
+        #[arg(long, default_value = crate::commands::express_originate::DEFAULT_GAS_VALUE_WEI)]
         gas_value: String,
 
         /// Override the AxelarApp proxy address used by --originate.

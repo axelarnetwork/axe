@@ -58,10 +58,7 @@ pub(super) struct PreparedQuote {
 
 pub async fn catalog(args: CatalogArgs) -> Result<()> {
     let activity = IntentActivity::new("Loading supported chains and assets…", !args.json);
-    let client = api_client(&args.api)?;
-    let (chains, tokens) = tokio::try_join!(client.chains(), client.tokens())?;
-    let tokens = filter_tokens(tokens.tokens, args.asset_type);
-    let response = merge_catalog(chains.chains, tokens, args.chain.as_deref())?;
+    let response = catalog_data(&args.api, args.chain.as_deref(), args.asset_type).await?;
     drop(activity);
     if args.json {
         println!("{}", serde_json::to_string_pretty(&response)?);
@@ -69,6 +66,48 @@ pub async fn catalog(args: CatalogArgs) -> Result<()> {
         render_catalog(&response);
     }
     Ok(())
+}
+
+/// The supported chains and their assets, without printing.
+pub async fn catalog_data(
+    api: &ApiArgs,
+    chain: Option<&str>,
+    asset_type: Option<AssetType>,
+) -> Result<CatalogResponse> {
+    let client = api_client(api)?;
+    let (chains, tokens) = tokio::try_join!(client.chains(), client.tokens())?;
+    let tokens = filter_tokens(tokens.tokens, asset_type);
+    merge_catalog(chains.chains, tokens, chain)
+}
+
+/// A quote and the request that produced it, as data.
+///
+/// The same three things `--json` prints, plus the two symbols, so a caller
+/// reading the quote does not have to resolve the token addresses itself.
+#[derive(Debug, serde::Serialize)]
+pub struct PlannedQuote {
+    pub request: QuoteRequest,
+    pub quote: Quote,
+    pub latency_ms: u64,
+    pub from_symbol: String,
+    pub to_symbol: String,
+}
+
+impl PlannedQuote {
+    pub(super) fn from_plan(plan: &LegPlan) -> Self {
+        Self {
+            request: plan.request.clone(),
+            quote: plan.quote.quote.clone(),
+            latency_ms: duration_ms(plan.quote.latency),
+            from_symbol: plan.from.symbol.clone(),
+            to_symbol: plan.to.symbol.clone(),
+        }
+    }
+}
+
+/// One quote's state, without printing.
+pub async fn status_data(api: &ApiArgs, quote_id: &str) -> Result<StatusResponse> {
+    checked_status(&api_client(api)?, quote_id).await
 }
 
 pub(super) fn filter_tokens(

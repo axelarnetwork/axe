@@ -52,6 +52,27 @@ impl BenchmarkTargets {
 }
 
 pub async fn benchmark_quotes(args: QuoteBenchmarkArgs) -> eyre::Result<()> {
+    let json = args.json;
+    let concurrency = args.concurrency;
+    let warmup = args.warmup;
+    let max_rps = args.max_rps;
+
+    let report = benchmark_quotes_report(args).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report_json(&report))?);
+    } else {
+        render_report(&report, concurrency, warmup, max_rps);
+    }
+    Ok(())
+}
+
+/// Run the quote benchmark and return its report as data, without printing.
+pub async fn benchmark_quotes_data(args: QuoteBenchmarkArgs) -> eyre::Result<serde_json::Value> {
+    let report = benchmark_quotes_report(args).await?;
+    Ok(report_json(&report))
+}
+
+async fn benchmark_quotes_report(args: QuoteBenchmarkArgs) -> eyre::Result<BenchmarkReport> {
     let activity = IntentActivity::new("Finding quote benchmark routes…", !args.json);
     let client = api_client(&args.api)?;
     let targets =
@@ -73,12 +94,7 @@ pub async fn benchmark_quotes(args: QuoteBenchmarkArgs) -> eyre::Result<()> {
         },
     )
     .await?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&report_json(&report))?);
-    } else {
-        render_report(&report, args.concurrency, args.warmup, args.max_rps);
-    }
-    Ok(())
+    Ok(report)
 }
 
 async fn run_warmup(

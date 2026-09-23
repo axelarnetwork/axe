@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eyre::{Result, WrapErr};
 use indicatif::ProgressBar;
@@ -14,10 +14,59 @@ use crate::ui;
 
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// Legs in one round trip: out and back.
+const INTENTS_PER_ROUND_TRIP: u64 = 2;
+
 pub struct TrafficArgs {
     pub runtime: IntentRuntimeArgs,
     pub wallet_bps: u16,
     pub asset_type: Option<AssetType>,
+    /// Stop after this long. `None` runs until interrupted, which is what the
+    /// CLI does.
+    pub duration: Option<Duration>,
+    /// Stop once this many intents have been sent. `None` means no limit.
+    pub max_intents: Option<u64>,
+}
+
+/// What stops a traffic run.
+///
+/// Both bounds are checked in the same two places -- before a cycle and
+/// before each round trip inside one -- so they travel together.
+#[derive(Clone, Copy, Default)]
+struct TrafficBounds {
+    max_intents: Option<u64>,
+    deadline: Option<Instant>,
+}
+
+impl TrafficBounds {
+    /// Whether the run should stop rather than start another round trip.
+    ///
+    /// A round trip is two intents, so a run with one left in its budget
+    /// starts nothing: it would owe a second leg it may not send.
+    fn reached(self, sent: u64) -> Option<&'static str> {
+        if self
+            .max_intents
+            .is_some_and(|max| sent.saturating_add(INTENTS_PER_ROUND_TRIP) > max)
+        {
+            return Some("intent limit");
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some("duration");
+        }
+        None
+    }
+}
+
+/// What a traffic run did, for a caller that was not watching the terminal.
+#[derive(Debug, serde::Serialize)]
+pub struct TrafficSummary {
+    pub intents: u64,
+    pub failures: u64,
+    pub elapsed_seconds: u64,
+    pub stopped_by: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +102,7 @@ struct TrafficStats {
     route_cursors: [usize; TRAFFIC_MODES.len()],
 }
 
-pub async fn run(args: TrafficArgs) -> Result<()> {
+pub async fn run(args: TrafficArgs) -> Result<TrafficSummary> {
     let startup = IntentActivity::new("Loading intent configuration…", true);
     let runtime = prepare_runtime(args.runtime).await?;
     startup.bar.set_message("Locking intent wallet…");
@@ -61,10 +110,21 @@ pub async fn run(args: TrafficArgs) -> Result<()> {
     drop(startup);
     render_strategy(args.wallet_bps, args.asset_type);
     let shutdown = Shutdown::install(DrainTarget::RoundTrip);
+    let bounds = TrafficBounds {
+        max_intents: args.max_intents,
+        deadline: args.duration.map(|duration| Instant::now() + duration),
+    };
     let mut stats = TrafficStats::default();
     let progress = traffic_progress();
     set_traffic_status(&progress, &stats, "starting");
-    while !shutdown.requested() {
+
+    let stopped_by = loop {
+        if shutdown.requested() {
+            break "interrupted";
+        }
+        if let Some(reason) = bounds.reached(stats.intents) {
+            break reason;
+        }
         match run_cycle(
             &runtime,
             args.wallet_bps,
@@ -72,6 +132,7 @@ pub async fn run(args: TrafficArgs) -> Result<()> {
             &shutdown,
             &mut stats,
             &progress,
+            bounds,
         )
         .await
         {
@@ -90,11 +151,17 @@ pub async fn run(args: TrafficArgs) -> Result<()> {
                 wait_before_retry(&shutdown).await;
             }
         }
-    }
+    };
 
     progress.finish_and_clear();
     render_stats(&stats, progress.elapsed());
-    Ok(())
+
+    Ok(TrafficSummary {
+        intents: stats.intents,
+        failures: stats.failures,
+        elapsed_seconds: progress.elapsed().as_secs(),
+        stopped_by,
+    })
 }
 
 async fn run_cycle(
@@ -104,10 +171,20 @@ async fn run_cycle(
     shutdown: &Shutdown,
     stats: &mut TrafficStats,
     progress: &ProgressBar,
+    bounds: TrafficBounds,
 ) -> Result<bool> {
     let mut found_routes = false;
     for (mode_index, mode) in traffic_modes(asset_type) {
         if shutdown.requested() {
+            break;
+        }
+        // A cycle runs one round trip per mode, so checking only between
+        // cycles would let a capped run finish the four it had started and
+        // land several intents past its limit -- and, since each leg waits on
+        // the fulfillment timeout, run far past its deadline too. A round trip
+        // is the atomic unit -- half of one leaves the funds on the wrong
+        // chain -- so the bounds are checked here, before one begins.
+        if bounds.reached(stats.intents).is_some() {
             break;
         }
         set_traffic_status(progress, stats, "discovering routes");

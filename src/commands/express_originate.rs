@@ -304,3 +304,76 @@ async fn ensure_allowance(
     }
     Ok(())
 }
+
+/// Express-asset base units to send when the caller does not say. Five units
+/// at the USDC family's six decimals, comfortably inside the registry's
+/// per-chain cap.
+pub const DEFAULT_AMOUNT: &str = "5000000";
+
+/// Native gas, in wei, to attach when the caller does not say.
+pub const DEFAULT_GAS_VALUE_WEI: &str = "350000000000000000";
+
+/// What a caller must choose to originate; everything else is resolved from
+/// the network's chains config or defaulted from the express registry.
+pub struct OriginateInputs {
+    pub source_chain: String,
+    pub destination_chain: String,
+    pub amount: String,
+    pub gas_value: String,
+    pub app_address: Option<String>,
+    pub symbol: Option<String>,
+    pub private_key: String,
+    pub source_rpc: Option<String>,
+}
+
+/// Build and send the AxelarApp express transfer, returning its source tx hash
+/// for the two-phase monitor to watch.
+pub async fn originate_from_config(
+    network: Network,
+    config: Option<&std::path::Path>,
+    inputs: OriginateInputs,
+) -> Result<String> {
+    let source_chain = inputs.source_chain;
+    let config_path = match config {
+        Some(path) => path.to_path_buf(),
+        None => crate::config_source::resolve(network, None)
+            .await?
+            .into_path(),
+    };
+    let chains = crate::config::ChainsConfig::load(&config_path).await?;
+    let chain = chains.chain(&source_chain)?;
+    let gateway: Address = chain
+        .contract_address(crate::config::ChainContract::AxelarGateway, &source_chain)?
+        .parse()?;
+
+    let rpc = inputs
+        .source_rpc
+        .or_else(|| chain.rpc.clone())
+        .ok_or_else(|| eyre!("no RPC for source chain '{source_chain}'"))?;
+
+    let signer: PrivateKeySigner = inputs.private_key.trim_start_matches("0x").parse()?;
+    let recipient = signer.address();
+
+    let hash = originate(
+        &signer,
+        OriginateArgs {
+            source_rpc_urls: vec![rpc],
+            source_gateway: gateway,
+            app_address: inputs
+                .app_address
+                .as_deref()
+                .unwrap_or_else(|| default_app_proxy(network))
+                .parse()?,
+            destination_chain: inputs.destination_chain,
+            symbols: inputs
+                .symbol
+                .map(|s| vec![s])
+                .unwrap_or_else(|| default_symbols(network)),
+            amount: inputs.amount.parse()?,
+            recipient,
+            gas_value_wei: inputs.gas_value.parse()?,
+        },
+    )
+    .await?;
+    Ok(format!("{hash:#x}"))
+}

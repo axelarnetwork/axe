@@ -36,6 +36,37 @@ impl DrainTarget {
     }
 }
 
+/// Watch for interrupts on a thread of this process's own.
+///
+/// Deliberately not `tokio::spawn`: that would tie the listener to whichever
+/// runtime happened to install first. Harmless for a CLI command, whose
+/// runtime lives as long as the process, but the MCP server builds a fresh
+/// current-thread runtime for each detached run and drops it when the run
+/// ends. The listener would die with the first run, and since the cell is a
+/// `OnceLock`, no later call would replace it -- leaving every later flow
+/// holding a `Shutdown` that nothing can ever request.
+fn watch_for_interrupts(shutdown: Arc<Shutdown>) {
+    let started = std::thread::Builder::new()
+        .name("axe-signals".to_owned())
+        .spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(shutdown.listen()),
+                Err(error) => ui::warn_stderr(&format!(
+                    "could not watch for interrupts ({error}); Ctrl-C will not drain gracefully"
+                )),
+            }
+        });
+
+    if let Err(error) = started {
+        ui::warn_stderr(&format!(
+            "could not start the interrupt watcher ({error}); Ctrl-C will not drain gracefully"
+        ));
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum InterruptAction {
     Drain,
@@ -53,10 +84,7 @@ impl Shutdown {
     pub fn install(target: DrainTarget) -> Arc<Self> {
         Arc::clone(PROCESS_SHUTDOWN.get_or_init(|| {
             let shutdown = Arc::new(Self::new(target));
-            let listener = Arc::clone(&shutdown);
-            tokio::spawn(async move {
-                listener.listen().await;
-            });
+            watch_for_interrupts(Arc::clone(&shutdown));
             shutdown
         }))
     }
