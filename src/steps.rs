@@ -8,6 +8,7 @@ pub mod deploy_upgradable;
 pub mod evm_compat;
 pub mod evm_deploy;
 pub mod predict_address;
+pub mod prover_admin;
 pub mod register_operators;
 pub mod transfer_ownership;
 pub mod wait_verifier_set;

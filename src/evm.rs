@@ -1,4 +1,10 @@
+pub mod artifact;
+pub mod finality;
 pub mod pipeline;
+pub mod rpc_retry;
+
+#[cfg(test)]
+mod test_rpc;
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;

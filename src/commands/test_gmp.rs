@@ -100,7 +100,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let deployer_address = signer.address();
     let provider = ProviderBuilder::new()
         .wallet(signer)
-        .connect_http(rpc_url.parse()?);
+        .connect_client(crate::evm::rpc_retry::client(&rpc_url)?);
 
     preflight::check_deployer_balance(&rpc_url, deployer_address, &target_json, &axelar_id).await?;
 
