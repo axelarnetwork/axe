@@ -394,6 +394,24 @@ fn u256_to_u64(value: U256) -> u64 {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn monitor_survives_connection_loss_after_submission() {
+        let body = r#"{"proposal":{"id":"645","status":"PROPOSAL_STATUS_PASSED"}}"#;
+        let (url, task) =
+            crate::http::tests::serve(vec![None, crate::http::tests::response("200 OK", body)])
+                .await;
+        monitor_proposal(url.as_str().trim_end_matches('/'), 645)
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.starts_with("GET /cosmos/gov/v1/proposals/645 "))
+        );
+    }
+
     #[test]
     fn set_pause_calldata_encodes_bool_and_selector() {
         let on = encode_set_pause(true);

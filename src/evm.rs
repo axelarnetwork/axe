@@ -4,7 +4,7 @@ pub mod pipeline;
 pub mod rpc_retry;
 
 #[cfg(test)]
-mod test_rpc;
+pub(crate) mod test_rpc;
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;

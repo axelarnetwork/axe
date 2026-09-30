@@ -28,6 +28,12 @@ pub struct ProposeArgs {
     /// After the proposal passes, relay it to the edge chain and execute it.
     #[arg(long)]
     pub relay: bool,
+    /// Resume this existing proposal without submitting a new proposal.
+    #[arg(long, conflicts_with = "new_proposal")]
+    pub proposal_id: Option<u64>,
+    /// Intentionally submit again instead of recovering a matching proposal.
+    #[arg(long)]
+    pub new_proposal: bool,
     /// Submit as a standard (non-expedited) gov proposal.
     #[arg(long)]
     pub standard: bool,
@@ -153,4 +159,11 @@ impl TargetContract {
             Self::Its => "InterchainTokenService",
         }
     }
+}
+
+/// Governance GMP emitted by the Axelar gov module.
+pub struct GovMessage {
+    pub message_id: String,
+    pub source_chain: String,
+    pub source_address: String,
 }

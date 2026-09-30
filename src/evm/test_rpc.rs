@@ -4,7 +4,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 /// None drops the connection after reading the request to simulate lost replies.
-pub(super) async fn serve(responses: Vec<Option<Value>>) -> (String, JoinHandle<Vec<Value>>) {
+pub(crate) async fn serve(responses: Vec<Option<Value>>) -> (String, JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
