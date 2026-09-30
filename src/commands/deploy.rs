@@ -15,6 +15,8 @@ use crate::steps;
 use crate::ui;
 use crate::utils::{artifact_paths_for_step, deployments_root};
 
+pub(super) mod configuration;
+
 pub struct DeployContext {
     pub axelar_id: String,
     pub state: State,
@@ -22,28 +24,7 @@ pub struct DeployContext {
     pub target_json: PathBuf,
 }
 
-fn load_its_environment(state: &mut State) {
-    if state.its_deployer_private_key.is_none()
-        && let Ok(value) = std::env::var("ITS_DEPLOYER_PRIVATE_KEY")
-    {
-        state.its_deployer_private_key = Some(value);
-        ui::info("loaded ITS_DEPLOYER_PRIVATE_KEY from env");
-    }
-    if state.its_salt.is_none()
-        && let Ok(value) = std::env::var("ITS_SALT")
-    {
-        ui::info(&format!("loaded ITS_SALT from env: {value}"));
-        state.its_salt = Some(value);
-    }
-    if state.its_proxy_salt.is_none()
-        && let Ok(value) = std::env::var("ITS_PROXY_SALT")
-    {
-        ui::info(&format!("loaded ITS_PROXY_SALT from env: {value}"));
-        state.its_proxy_salt = Some(value);
-    }
-}
-
-async fn check_deployment_balances(ctx: &DeployContext) -> Result<()> {
+async fn check_deployment_balances(ctx: &DeployContext, key_override: Option<&str>) -> Result<()> {
     let mut wallets = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (label, private_key) in [
@@ -61,7 +42,7 @@ async fn check_deployment_balances(ctx: &DeployContext) -> Result<()> {
             ctx.state.its_deployer_private_key.as_deref(),
         ),
     ] {
-        if let Some(private_key) = private_key
+        if let Some(private_key) = key_override.or(private_key)
             && let Ok(signer) = private_key.parse::<PrivateKeySigner>()
             && seen.insert(signer.address())
         {
@@ -231,7 +212,11 @@ pub async fn run(
     // Migrate: append any new steps added since this state was created
     migrate_steps(&mut state);
 
-    load_its_environment(&mut state);
+    configuration::load_missing_environment(&mut state, |name| std::env::var(name).ok());
+    configuration::validate_state(&mut state, private_key.as_deref())?;
+    crate::cosmos::read_axelar_config(&state.target_json).await?;
+    steps::prover_admin::validate(&mut state).await?;
+    steps::cosmos_tx::check_instantiate_permissions(&state).await?;
     save_state(&state).await?;
 
     let rpc_url = state.rpc_url.clone();
@@ -252,7 +237,8 @@ pub async fn run(
         target_json,
     };
 
-    check_deployment_balances(&ctx).await?;
+    check_deployment_balances(&ctx, private_key.as_deref()).await?;
+    steps::cosmos_tx::recover_failed_instantiation(&mut ctx).await?;
 
     loop {
         let Some((step_idx, step_ref)) = next_pending_step(&ctx.state) else {

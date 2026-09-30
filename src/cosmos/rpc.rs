@@ -367,7 +367,7 @@ pub(super) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
 
 pub async fn lcd_query_proposal(lcd: &str, proposal_id: u64) -> Result<Value> {
     let url = format!("{lcd}/cosmos/gov/v1/proposals/{proposal_id}");
-    let resp: Value = crate::http::client().get(&url).send().await?.json().await?;
+    let resp: Value = crate::http::get_json(url.parse()?).await?;
     resp.get("proposal")
         .cloned()
         .ok_or_else(|| eyre::eyre!("no 'proposal' field in response"))

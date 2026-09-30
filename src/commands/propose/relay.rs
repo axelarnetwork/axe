@@ -16,69 +16,80 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use cosmrs::crypto::secp256k1::SigningKey;
 use eyre::{Result, WrapErr};
-use serde_json::Value;
 
+use super::relay_message::find_governance_message;
 use crate::commands::test_helpers::{extract_event_attr, wait_for_proof};
 use crate::cosmos::{build_execute_msg_any, sign_and_broadcast_cosmos_tx};
 use crate::evm::{AxelarAmplifierGateway, AxelarServiceGovernance, broadcast_and_log};
-use crate::http;
 use crate::ui;
 
 use super::helpers::AsgInfo;
-use super::types::{ProposalType, ResolvedConfig};
+use super::types::{GovMessage, ProposalType, RelayPlan, ResolvedConfig};
 
-/// How many recent blocks to scan for the gov GMP, and how many times to
-/// re-poll (the exec block may not be indexed the instant the vote passes).
-const SCAN_DEPTH: u64 = 40;
-const FIND_ATTEMPTS: usize = 12;
-const FIND_INTERVAL: Duration = Duration::from_secs(5);
 const ETA_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// What the relay needs to know about the just-passed proposal.
-pub struct RelayPlan {
-    pub ptype: ProposalType,
-    pub target: Address,
-    pub calldata: Bytes,
-    pub payload: Bytes,
-}
-
-/// The governance GMP the gov module emitted via `AxelarnetGateway.call_contract`.
-struct GovMessage {
-    message_id: String,
-    source_chain: String,
-    source_address: String,
-}
+#[cfg(test)]
+mod tests;
 
 pub async fn relay(
     cfg: &ResolvedConfig,
     asg_info: &AsgInfo,
     plan: &RelayPlan,
-    signing_key: &SigningKey,
-    axelar_address: &str,
+    execution_time: chrono::DateTime<chrono::FixedOffset>,
+) -> Result<()> {
+    relay_with_provider(cfg, asg_info, plan, execution_time, || {
+        let signer = load_evm_signer()?;
+        let relayer = signer.address();
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(cfg.edge_rpc.parse().wrap_err("invalid edge rpc url")?);
+        Ok((provider, relayer))
+    })
+    .await
+}
+
+async fn relay_with_provider<P: Provider>(
+    cfg: &ResolvedConfig,
+    asg_info: &AsgInfo,
+    plan: &RelayPlan,
+    execution_time: chrono::DateTime<chrono::FixedOffset>,
+    connect: impl FnOnce() -> Result<(P, Address)>,
 ) -> Result<()> {
     ui::section("relay to edge chain");
     let payload_hash = keccak256(&plan.payload);
-
-    let msg = find_governance_message(&cfg.axelar_rpc, payload_hash).await?;
+    let msg = find_governance_message(cfg, payload_hash, execution_time).await?;
     ui::kv("message_id", &msg.message_id);
-
-    let execute_data = build_proof(cfg, signing_key, axelar_address, &msg).await?;
-
-    let signer = load_evm_signer()?;
-    let relayer = signer.address();
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(cfg.edge_rpc.parse().wrap_err("invalid edge rpc url")?);
-    ui::address("relayer", &relayer.to_string());
-    ensure_funded(&provider, relayer).await?;
-
+    let read_provider = ProviderBuilder::new().connect_http(cfg.edge_rpc.parse()?);
     let gateway = Address::from_str(&cfg.gateway_address)?;
     let asg_addr = Address::from_str(&cfg.asg_address)?;
-
-    submit_proof(&provider, gateway, &execute_data).await?;
-    assert_approved(&provider, gateway, asg_addr, &msg, payload_hash).await?;
-    consume_on_asg(&provider, asg_addr, &msg, &plan.payload).await?;
-
+    let consumed = AxelarAmplifierGateway::new(gateway, &read_provider)
+        .isMessageExecuted(msg.source_chain.clone(), msg.message_id.clone())
+        .call()
+        .await?;
+    if consumed && !pending_on_asg(&read_provider, asg_addr, plan).await? {
+        ui::info(
+            "governance message already consumed; no pending ASG approval/schedule (executed or cancelled); nothing to replay",
+        );
+        return Ok(());
+    }
+    let (provider, relayer) = connect()?;
+    ui::address("relayer", &relayer.to_string());
+    ensure_funded(&provider, relayer).await?;
+    if !consumed {
+        if !message_approved(&provider, gateway, asg_addr, &msg, payload_hash).await? {
+            let mnemonic = std::env::var("MNEMONIC")
+                .wrap_err("MNEMONIC not set — needed to construct the governance proof")?;
+            let (signing_key, submitter) = crate::cosmos::derive_axelar_wallet(&mnemonic)?;
+            let execute_data = build_proof(cfg, &signing_key, &submitter, &msg).await?;
+            submit_proof(&provider, gateway, &execute_data).await?;
+        } else {
+            ui::info("message already approved on edge gateway; skipping proof submission");
+        }
+        assert_approved(&provider, gateway, asg_addr, &msg, payload_hash).await?;
+        consume_on_asg(&provider, asg_addr, &msg, &plan.payload).await?;
+    } else {
+        ui::info("governance message already consumed; skipping proof and ASG.execute");
+    }
     match plan.ptype {
         ProposalType::Operator => {
             execute_operator(&provider, asg_addr, asg_info, relayer, plan).await
@@ -87,88 +98,38 @@ pub async fn relay(
     }
 }
 
-/// Scan recent `block_results` for the `wasm-contract_called` event whose
-/// `payload_hash` matches ours (gov runs in the EndBlocker — no tx to look up).
-async fn find_governance_message(rpc: &str, payload_hash: B256) -> Result<GovMessage> {
-    let want = format!("{payload_hash:x}");
-    let spinner = ui::wait_spinner("locating governance GMP in recent blocks...");
-    for _ in 0..FIND_ATTEMPTS {
-        let latest = latest_height(rpc).await?;
-        for height in (latest.saturating_sub(SCAN_DEPTH)..=latest).rev() {
-            if let Some(msg) = scan_block(rpc, height, &want).await? {
-                spinner.finish_and_clear();
-                ui::kv("exec block", &height.to_string());
-                return Ok(msg);
-            }
-        }
-        tokio::time::sleep(FIND_INTERVAL).await;
+async fn pending_on_asg<P: Provider>(provider: &P, asg: Address, plan: &RelayPlan) -> Result<bool> {
+    let contract = AxelarServiceGovernance::new(asg, provider);
+    match plan.ptype {
+        ProposalType::Operator => Ok(contract
+            .isOperatorProposalApproved(plan.target, plan.calldata.clone(), U256::ZERO)
+            .call()
+            .await?),
+        ProposalType::Timelock => Ok(contract
+            .getProposalEta(plan.target, plan.calldata.clone(), U256::ZERO)
+            .call()
+            .await?
+            != U256::ZERO),
     }
-    spinner.finish_and_clear();
-    Err(eyre::eyre!(
-        "could not find the governance GMP (wasm-contract_called, payload_hash 0x{want}) \
-         in the last {SCAN_DEPTH} blocks — the relayer may have already consumed it"
-    ))
 }
 
-async fn latest_height(rpc: &str) -> Result<u64> {
-    let resp: Value = http::client()
-        .get(format!("{}/status", rpc.trim_end_matches('/')))
-        .send()
-        .await?
-        .json()
-        .await?;
-    resp.pointer("/result/sync_info/latest_block_height")
-        .and_then(Value::as_str)
-        .and_then(|h| h.parse().ok())
-        .ok_or_else(|| eyre::eyre!("could not read latest_block_height from {rpc}/status"))
-}
-
-async fn scan_block(rpc: &str, height: u64, want_hash: &str) -> Result<Option<GovMessage>> {
-    let url = format!(
-        "{}/block_results?height={height}",
-        rpc.trim_end_matches('/')
-    );
-    let resp: Value = http::client().get(&url).send().await?.json().await?;
-    let events = resp
-        .pointer("/result/finalize_block_events")
-        .or_else(|| resp.pointer("/finalize_block_events"))
-        .and_then(Value::as_array);
-    let Some(events) = events else {
-        return Ok(None);
-    };
-    Ok(events
-        .iter()
-        .filter(|e| {
-            e.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|t| t.ends_with("contract_called"))
-        })
-        .find_map(|e| match_contract_called(e, want_hash)))
-}
-
-/// If this `contract_called` event's `payload_hash` matches, pull the fields
-/// the relay needs. Attributes are plain strings on CometBFT 0.38.
-fn match_contract_called(event: &Value, want_hash: &str) -> Option<GovMessage> {
-    let attrs = event.get("attributes").and_then(Value::as_array)?;
-    let get = |key: &str| -> Option<String> {
-        attrs
-            .iter()
-            .find(|a| a.get("key").and_then(Value::as_str) == Some(key))
-            .and_then(|a| a.get("value").and_then(Value::as_str))
-            .map(str::to_string)
-    };
-    let hash = get("payload_hash")?;
-    if !hash
-        .trim_start_matches("0x")
-        .eq_ignore_ascii_case(want_hash)
-    {
-        return None;
-    }
-    Some(GovMessage {
-        message_id: get("message_id")?,
-        source_chain: get("source_chain")?,
-        source_address: get("source_address")?,
-    })
+async fn message_approved<P: Provider>(
+    provider: &P,
+    gateway: Address,
+    asg: Address,
+    msg: &GovMessage,
+    payload_hash: B256,
+) -> Result<bool> {
+    Ok(AxelarAmplifierGateway::new(gateway, provider)
+        .isMessageApproved(
+            msg.source_chain.clone(),
+            msg.message_id.clone(),
+            msg.source_address.clone(),
+            asg,
+            payload_hash,
+        )
+        .call()
+        .await?)
 }
 
 async fn build_proof(

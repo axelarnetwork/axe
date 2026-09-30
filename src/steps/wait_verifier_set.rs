@@ -106,53 +106,31 @@ async fn wait_for_active_verifiers(lcd: &str, service_registry: &str, chain: &st
     }
 }
 
-struct VerifierSetUpdate<'a> {
-    admin_mnemonic: Option<&'a str>,
-    lcd: &'a str,
-    chain_id: &'a str,
-    fee_denom: &'a str,
-    gas_price: f64,
-    prover: &'a str,
-}
-
-async fn update_or_wait_for_verifier_set(request: VerifierSetUpdate<'_>) -> Result<()> {
-    if let Some(mnemonic) = request.admin_mnemonic {
-        ui::info("calling update_verifier_set with admin key...");
-        let (key, address) = derive_axelar_wallet(mnemonic)?;
-        let message =
-            build_execute_msg_any(&address, request.prover, &json!("update_verifier_set"))?;
-        sign_and_broadcast_cosmos_tx(
-            &key,
-            &address,
-            request.lcd,
-            request.chain_id,
-            request.fee_denom,
-            request.gas_price,
-            vec![message],
+async fn update_verifier_set(ctx: &DeployContext, prover: &str) -> Result<()> {
+    let mnemonic = ctx.state.admin_mnemonic.as_deref().ok_or_else(|| {
+        eyre::eyre!(
+            "missing MULTISIG_PROVER_MNEMONIC: rerun `axe deploy run` with the prover admin key"
         )
-        .await?;
-        ui::success("update_verifier_set tx succeeded!");
-        return Ok(());
-    }
-    ui::info("no admin mnemonic provided, waiting for manual update_verifier_set...");
-    ui::info("(provide MULTISIG_PROVER_MNEMONIC in .env to automate this)");
-    let spinner = ui::wait_spinner("waiting for verifier set...");
-    loop {
-        match lcd_cosmwasm_smart_query(request.lcd, request.prover, &json!("current_verifier_set"))
-            .await
-        {
-            Ok(data) if !data.is_null() && data.get("id").is_some() => {
-                let id = data["id"].as_str().unwrap_or("?");
-                spinner.finish_and_clear();
-                ui::success(&format!("verifier set found! id: {id}"));
-                return Ok(());
-            }
-            _ => tokio::time::sleep(VERIFIER_SET_POLL_INTERVAL).await,
-        }
-    }
+    })?;
+    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json).await?;
+    ui::info("calling update_verifier_set with admin key...");
+    let (key, address) = derive_axelar_wallet(mnemonic)?;
+    let message = build_execute_msg_any(&address, prover, &json!("update_verifier_set"))?;
+    sign_and_broadcast_cosmos_tx(
+        &key,
+        &address,
+        &lcd,
+        &chain_id,
+        &fee_denom,
+        gas_price,
+        vec![message],
+    )
+    .await?;
+    ui::success("update_verifier_set tx succeeded!");
+    Ok(())
 }
 
-pub async fn run(ctx: &DeployContext) -> Result<()> {
+pub async fn run(ctx: &mut DeployContext) -> Result<()> {
     let content = tokio::fs::read_to_string(&ctx.target_json).await?;
     let root: Value = serde_json::from_str(&content)?;
     let chain_axelar_id = root
@@ -179,7 +157,7 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         "/axelar/contracts/ServiceRegistry/address",
     )
     .await?;
-    let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json).await?;
+    let (lcd, _, _, _) = read_axelar_config(&ctx.target_json).await?;
     let env = ctx.state.env;
 
     // Check if verifier set already exists
@@ -213,13 +191,6 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         min_verifiers,
     )
     .await;
-    update_or_wait_for_verifier_set(VerifierSetUpdate {
-        admin_mnemonic: ctx.state.admin_mnemonic.as_deref(),
-        lcd: &lcd,
-        chain_id: &chain_id,
-        fee_denom: &fee_denom,
-        gas_price,
-        prover: &prover_addr,
-    })
-    .await
+    super::prover_admin::validate(&mut ctx.state).await?;
+    update_verifier_set(ctx, &prover_addr).await
 }

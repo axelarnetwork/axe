@@ -6,15 +6,24 @@
 //! and executes it (operator fast-path or time-lock) — see `relay.rs`.
 
 mod helpers;
+mod monitor;
+mod recovery;
+mod recovery_types;
 mod relay;
+mod relay_message;
+mod submission_guard;
 pub mod types;
 
+#[cfg(test)]
+mod test_support;
+
+use std::path::Path;
 use std::str::FromStr;
 
 use alloy::primitives::{Address, Bytes};
 use chrono::TimeZone;
 use cosmrs::crypto::secp256k1::SigningKey;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use owo_colors::OwoColorize;
 use serde_json::json;
 
@@ -28,7 +37,7 @@ use crate::types::Network;
 use crate::ui;
 
 use helpers::AsgInfo;
-use types::{ProposalType, ResolvedConfig};
+use types::{ProposalType, RelayPlan, ResolvedConfig};
 
 pub use types::ProposeArgs;
 
@@ -54,15 +63,66 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
     ));
 
     let asg = verify(&cfg).await?;
-    helpers::check_not_already_proposed(&cfg, args.proposal_type, target, calldata.clone()).await?;
-
-    // With --relay, refuse before submitting if the EVM relayer key is missing
-    // or unfunded on the edge chain — don't spend a proposal we can't relay.
+    let existing = recovery::find(&cfg, &args, target, &calldata).await?;
+    let (proposal_id, plan) = if let Some((proposal, payload)) = existing {
+        let id = proposal.number()?;
+        ui::kv(
+            "resuming existing proposal",
+            &format!("{id} ({})", proposal.status),
+        );
+        (
+            id,
+            RelayPlan {
+                ptype: args.proposal_type,
+                target,
+                calldata,
+                payload,
+            },
+        )
+    } else {
+        let Some(submitted) =
+            submit_new(&args, &cfg, &config, &asg, target, calldata, &action_label).await?
+        else {
+            return Ok(());
+        };
+        submitted
+    };
+    ui::info("Rerun this command to resume; it will reuse the existing proposal.");
+    monitor::wait_for_passed(&cfg.lcd, proposal_id).await?;
     if args.relay {
-        relay::preflight_relayer(&cfg).await?;
+        let proposal = recovery::load(&cfg.lcd, proposal_id).await?;
+        let execution_time = proposal.execution_time()?;
+        relay::relay(&cfg, &asg, &plan, execution_time)
+            .await
+            .wrap_err_with(|| {
+                format!("proposal {proposal_id} passed; rerun to resume its relay")
+            })?;
+    } else {
+        ui::info("proposal passed; not relaying (pass --relay to relay + execute).");
     }
+    Ok(())
+}
 
-    let eta = compute_eta(args.proposal_type, &args, &asg);
+async fn submit_new(
+    args: &ProposeArgs,
+    cfg: &ResolvedConfig,
+    config: &ChainsConfig,
+    asg: &AsgInfo,
+    target: Address,
+    calldata: Bytes,
+    action_label: &str,
+) -> Result<Option<(u64, RelayPlan)>> {
+    let marker = submission_guard::path(cfg, args.proposal_type, target, &calldata)?;
+    submission_guard::check(&marker, args.new_proposal).await?;
+    helpers::check_not_already_proposed(cfg, args.proposal_type, target, calldata.clone()).await?;
+    // Check both signers before confirmation or spending the deposit.
+    let mnemonic = std::env::var("MNEMONIC")
+        .map_err(|_| eyre::eyre!("MNEMONIC not set — needed to sign the gov proposal"))?;
+    let (signing_key, submitter) = derive_axelar_wallet(&mnemonic)?;
+    if args.relay {
+        relay::preflight_relayer(cfg).await?;
+    }
+    let eta = compute_eta(args.proposal_type, args, asg);
     let calldata_hex = format!("0x{}", alloy::hex::encode(&calldata));
     let payload = helpers::encode_governance_payload(
         args.proposal_type.command(),
@@ -70,13 +130,18 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
         calldata.clone(),
         eta,
     );
-
-    let target_label = helpers::target_name(&config, &args.chain, target);
-    if !confirm_submit(
-        &args,
-        &cfg,
-        &asg,
+    let plan = RelayPlan {
+        ptype: args.proposal_type,
         target,
+        calldata,
+        payload,
+    };
+    let target_label = helpers::target_name(config, &args.chain, plan.target);
+    if !confirm_submit(
+        args,
+        cfg,
+        asg,
+        plan.target,
         target_label.as_deref(),
         &calldata_hex,
         eta,
@@ -84,46 +149,28 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
     .await
     {
         ui::info("aborted — no proposal submitted");
-        return Ok(());
+        return Ok(None);
     }
-
-    let mnemonic = std::env::var("MNEMONIC")
-        .map_err(|_| eyre::eyre!("MNEMONIC not set — needed to sign the gov proposal"))?;
-    let (signing_key, submitter) = derive_axelar_wallet(&mnemonic)?;
     ui::address("submitter", &submitter);
-
-    let proposal_id = submit(
-        &cfg,
-        &args,
-        &action_label,
-        &payload,
+    let id = submit(
+        cfg,
+        args,
+        action_label,
+        &plan.payload,
         &signing_key,
         &submitter,
+        &marker,
     )
     .await?;
-    ui::kv("proposal submitted", &proposal_id.to_string());
+    ui::kv("proposal submitted", &id.to_string());
     ui::action_required(&[
         "Vote on the proposal:",
         &format!(
-            "./vote_{env}_proposal.sh {env}-nodes {proposal_id}",
-            env = vote_env(network)
+            "./scripts/vote_{env}_proposal.sh {env}-nodes {id}",
+            env = vote_env(args.network)
         ),
     ]);
-
-    helpers::monitor_proposal(&cfg.lcd, proposal_id).await?;
-
-    if args.relay {
-        let plan = relay::RelayPlan {
-            ptype: args.proposal_type,
-            target,
-            calldata,
-            payload,
-        };
-        relay::relay(&cfg, &asg, &plan, &signing_key, &submitter).await?;
-    } else {
-        ui::info("proposal passed; not relaying (pass --relay to relay + execute).");
-    }
-    Ok(())
+    Ok(Some((id, plan)))
 }
 
 async fn verify(cfg: &ResolvedConfig) -> Result<AsgInfo> {
@@ -150,6 +197,7 @@ async fn submit(
     payload: &[u8],
     signing_key: &SigningKey,
     submitter: &str,
+    marker: &Path,
 ) -> Result<u64> {
     let expedited = !args.standard;
     let deposit = if expedited {
@@ -190,6 +238,7 @@ async fn submit(
         expedited,
     )?;
 
+    submission_guard::claim(marker, args.new_proposal).await?;
     let tx_resp = sign_and_broadcast_cosmos_tx(
         signing_key,
         submitter,
