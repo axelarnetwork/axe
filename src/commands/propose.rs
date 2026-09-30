@@ -6,12 +6,16 @@
 //! and executes it (operator fast-path or time-lock) — see `relay.rs`.
 
 mod helpers;
+mod monitor;
 mod recovery;
 mod recovery_types;
 mod relay;
 mod relay_message;
 mod submission_guard;
 pub mod types;
+
+#[cfg(test)]
+mod test_support;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -33,7 +37,7 @@ use crate::types::Network;
 use crate::ui;
 
 use helpers::AsgInfo;
-use types::{ProposalType, ResolvedConfig};
+use types::{ProposalType, RelayPlan, ResolvedConfig};
 
 pub use types::ProposeArgs;
 
@@ -60,33 +64,31 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
 
     let asg = verify(&cfg).await?;
     let existing = recovery::find(&cfg, &args, target, &calldata).await?;
-    let mut plan = relay::RelayPlan {
-        ptype: args.proposal_type,
-        target,
-        calldata,
-        payload: Bytes::new(),
-    };
-    let proposal_id = if let Some((proposal, payload)) = existing {
+    let (proposal_id, plan) = if let Some((proposal, payload)) = existing {
         let id = proposal.number()?;
         ui::kv(
             "resuming existing proposal",
             &format!("{id} ({})", proposal.status),
         );
-        plan.payload = payload;
-        id
+        (
+            id,
+            RelayPlan {
+                ptype: args.proposal_type,
+                target,
+                calldata,
+                payload,
+            },
+        )
     } else {
-        let Some(id) = submit_new(&args, &cfg, &config, &asg, &mut plan, &action_label).await?
+        let Some(submitted) =
+            submit_new(&args, &cfg, &config, &asg, target, calldata, &action_label).await?
         else {
             return Ok(());
         };
-        id
+        submitted
     };
     ui::info("Rerun this command to resume; it will reuse the existing proposal.");
-    helpers::monitor_proposal(&cfg.lcd, proposal_id)
-        .await
-        .wrap_err_with(|| {
-            format!("proposal {proposal_id} already exists; rerun to resume (not resubmit)")
-        })?;
+    monitor::wait_for_passed(&cfg.lcd, proposal_id).await?;
     if args.relay {
         let proposal = recovery::load(&cfg.lcd, proposal_id).await?;
         let execution_time = proposal.execution_time()?;
@@ -106,18 +108,13 @@ async fn submit_new(
     cfg: &ResolvedConfig,
     config: &ChainsConfig,
     asg: &AsgInfo,
-    plan: &mut relay::RelayPlan,
+    target: Address,
+    calldata: Bytes,
     action_label: &str,
-) -> Result<Option<u64>> {
-    let marker = submission_guard::path(cfg, args.proposal_type, plan.target, &plan.calldata)?;
+) -> Result<Option<(u64, RelayPlan)>> {
+    let marker = submission_guard::path(cfg, args.proposal_type, target, &calldata)?;
     submission_guard::check(&marker, args.new_proposal).await?;
-    helpers::check_not_already_proposed(
-        cfg,
-        args.proposal_type,
-        plan.target,
-        plan.calldata.clone(),
-    )
-    .await?;
+    helpers::check_not_already_proposed(cfg, args.proposal_type, target, calldata.clone()).await?;
     // Check both signers before confirmation or spending the deposit.
     let mnemonic = std::env::var("MNEMONIC")
         .map_err(|_| eyre::eyre!("MNEMONIC not set — needed to sign the gov proposal"))?;
@@ -126,13 +123,19 @@ async fn submit_new(
         relay::preflight_relayer(cfg).await?;
     }
     let eta = compute_eta(args.proposal_type, args, asg);
-    let calldata_hex = format!("0x{}", alloy::hex::encode(&plan.calldata));
-    plan.payload = helpers::encode_governance_payload(
+    let calldata_hex = format!("0x{}", alloy::hex::encode(&calldata));
+    let payload = helpers::encode_governance_payload(
         args.proposal_type.command(),
-        plan.target,
-        plan.calldata.clone(),
+        target,
+        calldata.clone(),
         eta,
     );
+    let plan = RelayPlan {
+        ptype: args.proposal_type,
+        target,
+        calldata,
+        payload,
+    };
     let target_label = helpers::target_name(config, &args.chain, plan.target);
     if !confirm_submit(
         args,
@@ -167,7 +170,7 @@ async fn submit_new(
             env = vote_env(args.network)
         ),
     ]);
-    Ok(Some(id))
+    Ok(Some((id, plan)))
 }
 
 async fn verify(cfg: &ResolvedConfig) -> Result<AsgInfo> {

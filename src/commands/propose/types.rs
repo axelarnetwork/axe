@@ -1,7 +1,23 @@
 //! Types for `axe propose` — submit an AxelarServiceGovernance proposal to an
 //! edge chain's ASG via the Axelar hub (gov proposal → AxelarnetGateway GMP).
 
+use alloy::primitives::{Address, Bytes};
 use clap::{Args, ValueEnum};
+
+/// A complete governance call and its encoded payload, ready for relaying.
+pub struct RelayPlan {
+    pub ptype: ProposalType,
+    pub target: Address,
+    pub calldata: Bytes,
+    pub payload: Bytes,
+}
+
+/// A terminal governance result, separate from errors while reading its state.
+pub enum ProposalOutcome {
+    Passed,
+    Rejected(eyre::Report),
+    Failed(eyre::Report),
+}
 
 /// `axe propose <network> <chain>` — submit an AxelarServiceGovernance proposal.
 #[derive(Debug, Args)]

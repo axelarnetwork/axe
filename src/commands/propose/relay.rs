@@ -24,23 +24,36 @@ use crate::evm::{AxelarAmplifierGateway, AxelarServiceGovernance, broadcast_and_
 use crate::ui;
 
 use super::helpers::AsgInfo;
-use super::types::{GovMessage, ProposalType, ResolvedConfig};
+use super::types::{GovMessage, ProposalType, RelayPlan, ResolvedConfig};
 
 const ETA_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// What the relay needs to know about the just-passed proposal.
-pub struct RelayPlan {
-    pub ptype: ProposalType,
-    pub target: Address,
-    pub calldata: Bytes,
-    pub payload: Bytes,
-}
+#[cfg(test)]
+mod tests;
 
 pub async fn relay(
     cfg: &ResolvedConfig,
     asg_info: &AsgInfo,
     plan: &RelayPlan,
     execution_time: chrono::DateTime<chrono::FixedOffset>,
+) -> Result<()> {
+    relay_with_provider(cfg, asg_info, plan, execution_time, || {
+        let signer = load_evm_signer()?;
+        let relayer = signer.address();
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(cfg.edge_rpc.parse().wrap_err("invalid edge rpc url")?);
+        Ok((provider, relayer))
+    })
+    .await
+}
+
+async fn relay_with_provider<P: Provider>(
+    cfg: &ResolvedConfig,
+    asg_info: &AsgInfo,
+    plan: &RelayPlan,
+    execution_time: chrono::DateTime<chrono::FixedOffset>,
+    connect: impl FnOnce() -> Result<(P, Address)>,
 ) -> Result<()> {
     ui::section("relay to edge chain");
     let payload_hash = keccak256(&plan.payload);
@@ -59,11 +72,7 @@ pub async fn relay(
         );
         return Ok(());
     }
-    let signer = load_evm_signer()?;
-    let relayer = signer.address();
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(cfg.edge_rpc.parse().wrap_err("invalid edge rpc url")?);
+    let (provider, relayer) = connect()?;
     ui::address("relayer", &relayer.to_string());
     ensure_funded(&provider, relayer).await?;
     if !consumed {
