@@ -31,3 +31,10 @@ if printf '%s\n' "$added_comments" | LC_ALL=C grep -n '[^	 -~]'; then
     echo "Rust comments must use plain ASCII text."
     exit 1
 fi
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -n "$staged" ] && printf '%s\n' "$staged" | tr '\n' '\0' |
+    xargs -0 grep -nEI '\bS[A-Z2-7]{55}\b|suiprivkey1[a-z0-9]+|\bs(Ed)?[1-9A-HJ-NP-Za-km-z]{27,30}\b'; then
+    echo "Possible key material in staged files. Move it outside the repo."
+    exit 1
+fi
