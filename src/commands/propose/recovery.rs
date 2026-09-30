@@ -103,7 +103,9 @@ pub async fn find(
         let mut url: reqwest::Url =
             format!("{}/cosmos/gov/v1/proposals", cfg.lcd.trim_end_matches('/')).parse()?;
         url.query_pairs_mut()
-            .append_pair("pagination.limit", "100")
+            // Historical code-upload proposals can exceed the LCD's 10 MiB
+            // gRPC response limit when fetched in batches of 100.
+            .append_pair("pagination.limit", "20")
             .append_pair("pagination.reverse", "true")
             .append_pair("pagination.key", &next_key);
         let page: ProposalPage = http::get_json(url)
