@@ -56,7 +56,7 @@ What's left:
 
 ## Per-environment chain availability
 
-Whether a pair works also depends on whether both chains are deployed on the chosen environment. For the exact per-network roster of all 28 wired chains (the EVM "many" expanded out), see [routes.md §1](routes.md#1-the-23-wired-chains-by-type).
+Whether a pair works also depends on whether both chains are deployed on the chosen environment. For the exact per-network roster of all 29 wired chains (the EVM "many" expanded out), see [routes.md §1](routes.md#1-the-29-wired-chains-by-type).
 
 | Env | EVM chains | Solana | Stellar | Sui | XRPL | XRPL-EVM | Notes |
 |---|---|---|---|---|---|---|---|

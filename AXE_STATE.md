@@ -15,13 +15,13 @@ truth, in priority order:
 1. The dispatch match in `src/commands/load_test.rs` — defines the
    **supported route surface** (which `(protocol, test-type)` pairs run vs. bail).
 2. The wired chain set in `.github/actions/run-loadtest/action.yml` `CHAIN_MAP`
-   (28 chains) — the chains the harness can target.
+   (29 chains) — the chains the harness can target.
 3. The on-chain results in `axe-load-test-logs/*.json` — the **validated** truth.
 
 Companion docs: per-pair dispatcher matrices in
 [`docs/routes.md`](docs/routes.md) and chain-type coverage in
 [`docs/load-test-coverage.md`](docs/load-test-coverage.md). Both are
-reconciled with the 28-chain `CHAIN_MAP` (2026-08-25).
+reconciled with the 29-chain `CHAIN_MAP` (2026-09-30).
 
 ---
 
@@ -42,12 +42,14 @@ legacy-chain support is load-bearing for mainnet.
 
 ## 2. Supported route surface (from the dispatcher)
 
-The 28 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Berachain,
+The 29 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Berachain,
 Binance, Blast, Celo, Ethereum, Filecoin, Flow, Hedera, Hyperliquid, Immutable,
-Kava, Linea, Mantle, Monad, Moonbeam, Optimism, Plume, Polygon, Scroll, Solana,
-Stellar, Sui, XRPL, XRPL EVM. Arc/Berachain/Celo/Flow/Plume exist only on
-stagenet / devnet-amplifier — see [`docs/routes.md`](docs/routes.md) for the
-per-network roster. Purged (gone from the repo): Fantom, Centrifuge.
+Kava, Linea, Mantle, Monad, Moonbeam, Optimism, Plume, Polygon, Robinhood,
+Scroll, Solana, Stellar, Sui, XRPL, XRPL EVM. Berachain/Celo/Flow/Plume exist
+only on stagenet / devnet-amplifier; Arc (`arc-8`) and Robinhood (`robinhood`)
+are testnet-only amplifier EVM chains (Arc also on devnet-amplifier as `arc-2`)
+— see [`docs/routes.md`](docs/routes.md) for the per-network roster. Purged (gone
+from the repo): Fantom, Centrifuge.
 
 Chain-type level, what the dispatcher runs (✅) vs. bails on (see §6 for why):
 
