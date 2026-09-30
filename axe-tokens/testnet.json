@@ -7,6 +7,13 @@
         }
       }
     },
+    "arc-8": {
+      "contracts": {
+        "SenderReceiver": {
+          "address": "0x74460Ec62D96B97be6780ae763640C9E1F770bfe"
+        }
+      }
+    },
     "avalanche": {
       "contracts": {
         "SenderReceiver": {
@@ -102,6 +109,13 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xD0EfDC90Bdb5127A407dABa673eC1a42a6869A19"
+        }
+      }
+    },
+    "robinhood": {
+      "contracts": {
+        "SenderReceiver": {
+          "address": "0x74460Ec62D96B97be6780ae763640C9E1F770bfe"
         }
       }
     },
