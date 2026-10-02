@@ -8,11 +8,15 @@ use alloy::{
     rpc::types::{Filter, Log, TransactionRequest},
     signers::local::PrivateKeySigner,
     sol,
+    transports::TransportResult,
 };
 use eyre::Result;
 
 use crate::commands::deploy::DeployContext;
 use crate::ui;
+
+#[cfg(test)]
+mod tests;
 
 // ABI bindings for the TestRpcCompatibility contract
 sol! {
@@ -156,6 +160,13 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
         ));
         return summarise(&checks);
     }
+    if checks
+        .iter()
+        .any(|check| matches!(check.outcome, CheckOutcome::Warn(_)))
+        && !ui::confirm("Continue with contract tests despite the node health warning?").await
+    {
+        eyre::bail!("EVM compatibility check cancelled before contract tests");
+    }
 
     println!();
     ui::info("Phase 2: Contract lifecycle");
@@ -220,20 +231,9 @@ async fn run_chain_identity_checks<P: Provider>(provider: &P) -> (Vec<Check>, Op
     }
 
     // 2. eth_syncing
-    match provider
-        .raw_request::<_, serde_json::Value>("eth_syncing".into(), ())
-        .await
-    {
-        Ok(serde_json::Value::Bool(false)) => {
-            checks.push(Check::pass("eth_syncing", true, "synced".into()));
-        }
-        Ok(_) => checks.push(Check::fail(
-            "eth_syncing",
-            true,
-            "node is still syncing".into(),
-        )),
-        Err(e) => checks.push(Check::fail("eth_syncing", true, format!("{e}"))),
-    }
+    checks.push(check_sync_status(
+        provider.raw_request("eth_syncing".into(), ()).await,
+    ));
 
     // 3. eth_blockNumber
     let block_number = match provider.get_block_number().await {
@@ -252,6 +252,24 @@ async fn run_chain_identity_checks<P: Provider>(provider: &P) -> (Vec<Check>, Op
     };
 
     (checks, block_number)
+}
+
+fn check_sync_status(result: TransportResult<serde_json::Value>) -> Check {
+    match result {
+        Ok(serde_json::Value::Bool(false)) => Check::pass("eth_syncing", true, "synced".into()),
+        Ok(_) => Check::fail("eth_syncing", true, "node is still syncing".into()),
+        Err(error)
+            if error
+                .as_error_resp()
+                .is_some_and(|error| error.code == -32601) =>
+        {
+            Check::warn(
+                "eth_syncing",
+                "RPC does not expose this method; sync status could not be checked".into(),
+            )
+        }
+        Err(error) => Check::fail("eth_syncing", true, error.to_string()),
+    }
 }
 
 async fn run_block_health_checks<P: Provider>(provider: &P) -> Vec<Check> {

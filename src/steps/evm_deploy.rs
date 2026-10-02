@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
+use crate::evm::artifact::read_artifact_runtime_hash;
 use crate::evm::{ConstAddressDeployer, get_salt_from_key, read_artifact_bytecode};
 use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
@@ -24,6 +25,7 @@ pub async fn run(
     salt: &Option<String>,
 ) -> Result<()> {
     let bytecode_raw = read_artifact_bytecode(artifact_path).await?;
+    let predeploy_codehash = read_artifact_runtime_hash(artifact_path).await?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
     let deployer_addr = signer.address();
@@ -85,7 +87,6 @@ pub async fn run(
 
     ui::address("deployed at", &format!("{addr}"));
 
-    let predeploy_codehash = keccak256(&bytecode_raw);
     let deployed_code = provider.get_code_at(addr).await?;
     let codehash = keccak256(&deployed_code);
 

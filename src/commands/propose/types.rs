@@ -1,7 +1,23 @@
 //! Types for `axe propose` — submit an AxelarServiceGovernance proposal to an
 //! edge chain's ASG via the Axelar hub (gov proposal → AxelarnetGateway GMP).
 
+use alloy::primitives::{Address, Bytes};
 use clap::{Args, ValueEnum};
+
+/// A complete governance call and its encoded payload, ready for relaying.
+pub struct RelayPlan {
+    pub ptype: ProposalType,
+    pub target: Address,
+    pub calldata: Bytes,
+    pub payload: Bytes,
+}
+
+/// A terminal governance result, separate from errors while reading its state.
+pub enum ProposalOutcome {
+    Passed,
+    Rejected(eyre::Report),
+    Failed(eyre::Report),
+}
 
 /// `axe propose <network> <chain>` — submit an AxelarServiceGovernance proposal.
 #[derive(Debug, Args)]
@@ -28,6 +44,12 @@ pub struct ProposeArgs {
     /// After the proposal passes, relay it to the edge chain and execute it.
     #[arg(long)]
     pub relay: bool,
+    /// Resume this existing proposal without submitting a new proposal.
+    #[arg(long, conflicts_with = "new_proposal")]
+    pub proposal_id: Option<u64>,
+    /// Intentionally submit again instead of recovering a matching proposal.
+    #[arg(long)]
+    pub new_proposal: bool,
     /// Submit as a standard (non-expedited) gov proposal.
     #[arg(long)]
     pub standard: bool,
@@ -153,4 +175,11 @@ impl TargetContract {
             Self::Its => "InterchainTokenService",
         }
     }
+}
+
+/// Governance GMP emitted by the Axelar gov module.
+pub struct GovMessage {
+    pub message_id: String,
+    pub source_chain: String,
+    pub source_address: String,
 }
