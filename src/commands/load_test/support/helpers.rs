@@ -39,6 +39,7 @@ use crate::evm::{
 use crate::retry::{FALLBACK_ATTEMPTS, backoff_for_attempt, retry_all, retry_async};
 use crate::stellar::StellarWallet;
 use crate::sui::{SuiWallet, read_sui_chain_config};
+use crate::types::Network;
 use crate::ui;
 
 pub(crate) async fn ensure_sender_receiver_on_evm_chain(
@@ -1151,6 +1152,23 @@ async fn axe_overlay_field(
     let overlay = Path::new("axe-tokens").join(format!("{stem}.json"));
     let doc = load_overlay(&overlay).await?;
     overlay_contract(&doc, chain_axelar_id, "AXE").and_then(pick)
+}
+
+/// AXE `(address, decimals)` recorded for `chain_axelar_id` in this repo's
+/// `axe-tokens/<network>.json` overlay. For callers holding a network rather
+/// than a chains-config path (the wallet preflight).
+pub(crate) async fn overlay_axe_token(
+    network: Network,
+    chain_axelar_id: &str,
+) -> Option<(String, Option<u64>)> {
+    let overlay = Path::new("axe-tokens").join(format!("{network}.json"));
+    let doc = load_overlay(&overlay).await?;
+    let entry = overlay_contract(&doc, chain_axelar_id, "AXE")?;
+    let decimals = entry
+        .extra
+        .get("decimals")
+        .and_then(serde_json::Value::as_u64);
+    Some((entry.address.clone()?, decimals))
 }
 
 /// Companion to `read_pre_registered_axe_token`: returns the AXE

@@ -17,6 +17,7 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
 use eyre::{Result, WrapErr, eyre};
 use solana_sdk::signature::Signer;
 
+use crate::commands::load_test::overlay_axe_token;
 use crate::config::{ChainConfig, ChainsConfig};
 use crate::config_source;
 use crate::solana::{load_keypair, rpc_client};
@@ -82,6 +83,13 @@ enum Asset {
 /// equivalents) fall through to a fresh deploy, which on Stellar then hits the
 /// `TxBadSeq` sequence race. Whole AXE tokens.
 const AXE_MIN_WHOLE_TOKENS: f64 = 100.0;
+
+/// Native-gas floors for the testnet Arc <-> Robinhood route. Estimated
+/// 2026-09-30 per run: Arc pays ~0.03 USDC (Axelarscan ITS fee x1.5 plus
+/// source gas), Robinhood ~0.00005 ETH. Arc's floor is about three months of
+/// runs. Robinhood's also covers the 0.04 ETH a derived key is topped up to.
+const ARC_MIN_USDC: f64 = 5.0;
+const ROBINHOOD_MIN_ETH: f64 = 0.05;
 
 #[derive(Clone, Debug)]
 struct BalanceRow {
@@ -197,7 +205,7 @@ fn production_chain_targets(network: Network) -> Vec<ChainTarget> {
     // The Monad amplifier chain id differs by network: `monad` on mainnet,
     // `monad-3` on testnet (the active testnet deployment).
     let monad_key = monad_chain_key(network);
-    vec![
+    let mut targets = vec![
         ChainTarget {
             chain_key: "hyperliquid".to_string(),
             kind: ChainKind::Evm,
@@ -261,6 +269,27 @@ fn production_chain_targets(network: Network) -> Vec<ChainTarget> {
             kind: ChainKind::Evm,
             threshold_units: 0.5,
         },
+    ];
+    if network == Network::Testnet {
+        targets.extend(testnet_only_chain_targets());
+    }
+    targets
+}
+
+/// Testnet-only amplifier EVM chains in the cron fleet (Arc <-> Robinhood).
+fn testnet_only_chain_targets() -> Vec<ChainTarget> {
+    vec![
+        ChainTarget {
+            // Arc's native gas token is USDC (18 decimals on the EVM side).
+            chain_key: "arc-8".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: ARC_MIN_USDC,
+        },
+        ChainTarget {
+            chain_key: "robinhood".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: ROBINHOOD_MIN_ETH,
+        },
     ]
 }
 
@@ -309,6 +338,10 @@ fn axe_targets(network: Network) -> Vec<ChainTarget> {
                 // canonical AXE seeded from xrpl-evm. Same key on both.
                 axe("avalanche", ChainKind::Evm),
             ];
+            if network == Network::Testnet {
+                targets.push(axe("arc-8", ChainKind::Evm));
+                targets.push(axe("robinhood", ChainKind::Evm));
+            }
             // Stellar is a mainnet ITS AXE source (Stellar ↔ Hyperliquid); it
             // was removed from the testnet ITS cron, so only check on mainnet.
             if network == Network::Mainnet {
@@ -507,9 +540,35 @@ async fn probe_row(
     }
 }
 
+/// AXE token address and decimals for a chain: the chains-config
+/// `contracts.AXE` entry, else this repo's axe-tokens overlay (chains whose
+/// upstream config axe can't edit, e.g. arc-8 and robinhood on testnet).
+async fn axe_token(
+    chain: &ChainConfig,
+    chain_key: &str,
+    network: Network,
+) -> Result<(String, u32)> {
+    if let Some(axe) = chain.contracts.as_ref().and_then(|m| m.get("AXE")) {
+        let token = axe
+            .address
+            .clone()
+            .ok_or_else(|| eyre!("contracts.AXE.address missing for {chain_key}"))?;
+        let decimals = axe
+            .extra
+            .get("decimals")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(18) as u32;
+        return Ok((token, decimals));
+    }
+    let (token, decimals) = overlay_axe_token(network, chain_key)
+        .await
+        .ok_or_else(|| eyre!("no contracts.AXE entry for {chain_key}"))?;
+    Ok((token, decimals.unwrap_or(18) as u32))
+}
+
 /// Read the cron wallet's AXE-token balance (whole tokens) on `target`'s chain.
-/// Resolves the token address + decimals from the chain's `contracts.AXE`
-/// config entry, then queries per chain kind. Read-only on every path.
+/// Resolves the token address + decimals via [`axe_token`], then queries per
+/// chain kind. Read-only on every path.
 async fn probe_axe(
     config: &ChainsConfig,
     target: &ChainTarget,
@@ -519,20 +578,8 @@ async fn probe_axe(
         .chains
         .get(&target.chain_key)
         .ok_or_else(|| eyre!("chain '{}' not in {network} config", target.chain_key))?;
-    let axe = chain
-        .contracts
-        .as_ref()
-        .and_then(|m| m.get("AXE"))
-        .ok_or_else(|| eyre!("no contracts.AXE entry for {}", target.chain_key))?;
-    let token = axe
-        .address
-        .as_deref()
-        .ok_or_else(|| eyre!("contracts.AXE.address missing for {}", target.chain_key))?;
-    let decimals = axe
-        .extra
-        .get("decimals")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(18) as u32;
+    let (token, decimals) = axe_token(chain, &target.chain_key, network).await?;
+    let token = token.as_str();
     let candidates = rpc_candidates(&target.chain_key, network, chain)?;
     let mut last_err = None;
     for (i, rpc_url) in candidates.iter().enumerate() {
@@ -617,6 +664,7 @@ fn token_units(raw: alloy::primitives::U256, decimals: u32) -> f64 {
 fn rpc_env_prefix(chain_key: &str) -> String {
     let base = match chain_key {
         "monad-3" => "monad",
+        "arc-8" | "arc-2" => "arc",
         "eth-sepolia" | "ethereum-sepolia" => "ethereum",
         "xrpl-evm-devnet" => "xrpl-evm",
         "sui-2" => "sui",
@@ -908,6 +956,22 @@ mod tests {
     }
 
     #[test]
+    fn arc_and_robinhood_are_testnet_only() {
+        let keys = |network| -> Vec<String> {
+            chain_targets(network)
+                .into_iter()
+                .chain(axe_targets(network))
+                .map(|t| t.chain_key)
+                .collect()
+        };
+        let testnet = keys(Network::Testnet);
+        assert_eq!(testnet.iter().filter(|k| *k == "arc-8").count(), 2);
+        assert_eq!(testnet.iter().filter(|k| *k == "robinhood").count(), 2);
+        let mainnet = keys(Network::Mainnet);
+        assert!(!mainnet.iter().any(|k| k == "arc-8" || k == "robinhood"));
+    }
+
+    #[test]
     fn stagenet_and_devnet_use_their_own_chain_ids() {
         // Stagenet: no Stellar deployment; Monad is plain `monad`; Solana is
         // the `solana-stagenet-3` deployment.
@@ -1081,6 +1145,8 @@ mod rpc_candidate_tests {
             ("avalanche-fuji", "AVALANCHE"),
             ("eth-sepolia", "ETHEREUM"),
             ("hyperliquid", "HYPERLIQUID"),
+            ("arc-8", "ARC"),
+            ("robinhood", "ROBINHOOD"),
         ] {
             assert_eq!(rpc_env_prefix(key), expected, "for chain key {key}");
         }
