@@ -215,7 +215,7 @@ impl RunId {
         let now = u64::try_from(now).unwrap_or(u64::MAX);
 
         let previous = LAST_RUN_MILLIS
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
                 Some(now.max(last.saturating_add(1)))
             })
             .unwrap_or(now);

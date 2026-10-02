@@ -67,10 +67,10 @@ pub(super) async fn has_pending_proposal(ctx: &DeployContext, lcd: &str) -> Resu
             ui::info(&format!("reusing pending instantiation proposal {id}"));
             Ok(true)
         }
-        _ => eyre::bail!(
+        _ => Err(eyre::eyre!(
             "instantiation proposal {id} is {} but the expected deployment was not found: {}. No replacement proposal was submitted",
             proposal.status,
             proposal.failed_reason
-        ),
+        )),
     }
 }

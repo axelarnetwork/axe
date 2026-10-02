@@ -46,14 +46,14 @@ pub(super) fn verify(
     };
 
     if !has_gateway {
-        match gateway {
-            GatewayRequirement::Xrpl { .. } => eyre::bail!(
+        return Err(match gateway {
+            GatewayRequirement::Xrpl { .. } => eyre::eyre!(
                 "destination chain '{destination}' has no Cosmos Gateway (or XrplGateway) in the config — verification would fail."
             ),
-            GatewayRequirement::Required | GatewayRequirement::AmplifierOnly => eyre::bail!(
+            GatewayRequirement::Required | GatewayRequirement::AmplifierOnly => eyre::eyre!(
                 "destination chain '{destination}' has no Cosmos Gateway in the config — verification would fail."
             ),
-        }
+        });
     }
 
     if config
