@@ -222,6 +222,7 @@ async fn rerun_finds_existing_proposal_after_pagination() {
     assert_eq!(recovered.0.number().unwrap(), 645);
     let requests = task.await.unwrap();
     assert!(requests.iter().all(|r| r.starts_with("GET ")));
+    assert!(requests.iter().all(|r| r.contains("pagination.limit=20&")));
     assert!(requests[1].contains("pagination.key=next%2Bcursor%3D"));
 }
 
