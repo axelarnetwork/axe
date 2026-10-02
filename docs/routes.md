@@ -13,7 +13,7 @@ This mirrors [AXE_STATE.md](../AXE_STATE.md) §2. See
 [load-test-coverage.md](load-test-coverage.md) for per-cell verified-on-chain
 status, env-var requirements, and the outstanding Sui work.
 
-## 1. The 28 wired chains, by type
+## 1. The 29 wired chains, by type
 
 The authoritative wired set is the `CHAIN_MAP` in
 [`.github/actions/run-loadtest/action.yml`](../.github/actions/run-loadtest/action.yml).
@@ -22,7 +22,7 @@ The `✓` columns mark the networks each chain is configured for.
 | Chain | Type | mainnet | testnet | stagenet | devnet-amplifier |
 |---|---|:---:|:---:|:---:|:---:|
 | Arbitrum    | EVM     | ✓ | ✓ | ✓ |   |
-| Arc         | EVM     |   |   |   | ✓ |
+| Arc         | EVM     |   | ✓ |   | ✓ |
 | Avalanche   | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Base        | EVM     | ✓ | ✓ | ✓ |   |
 | Berachain   | EVM     |   |   | ✓ | ✓ |
@@ -43,6 +43,7 @@ The `✓` columns mark the networks each chain is configured for.
 | Optimism    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Plume       | EVM     |   |   | ✓ | ✓ |
 | Polygon     | EVM     | ✓ | ✓ | ✓ |   |
+| Robinhood   | EVM     |   | ✓ |   |   |
 | Scroll      | EVM     | ✓ | ✓ |   |   |
 | XRPL EVM    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Solana      | Solana  | ✓ | ✓ | ✓ | ✓ |

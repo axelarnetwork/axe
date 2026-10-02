@@ -255,7 +255,7 @@ pub(crate) fn decode_bytes(data: &[u8], indent: &str) -> Result<()> {
             hex::encode(&data[..4])
         );
     }
-    bail!("could not decode data, not recognized")
+    Err(eyre::eyre!("could not decode data, not recognized"))
 }
 
 pub(crate) fn decode_log(

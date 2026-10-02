@@ -43,7 +43,7 @@ pub async fn run(txid: &str, config: Option<&Path>, chain_filter: Option<&str>) 
         let mut rpcs = solana_rpcs_from_configs(config, chain_filter).await;
         match chain_filter {
             Some(filter) if rpcs.is_empty() => {
-                bail!("no SVM chain '{filter}' found in the resolved config(s)")
+                bail!("no SVM chain '{filter}' found in the resolved config(s)");
             }
             Some(_) => {}
             None => rpcs.extend(
@@ -315,10 +315,10 @@ async fn fetch_tx(
         return Ok((name, tx, receipt));
     }
 
-    bail!(
+    Err(eyre::eyre!(
         "transaction not found on any chain (tried {} RPCs)",
         rpcs.len()
-    )
+    ))
 }
 
 /// SVM RPC candidates from the explicit config, or from every resolvable

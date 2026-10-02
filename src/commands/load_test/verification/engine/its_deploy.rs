@@ -296,10 +296,10 @@ fn ensure_not_timed_out(
         return Ok(());
     }
     spinner.finish_and_clear();
-    eyre::bail!(
+    Err(eyre::eyre!(
         "remote deploy timed out after {}s at phase {phase:?}",
         timeout.as_secs()
-    )
+    ))
 }
 
 /// Wait for an ITS remote deploy message to propagate through the hub pipeline

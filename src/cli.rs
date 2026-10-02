@@ -28,9 +28,9 @@ pub struct Cli {
 pub fn resolve_network(flag: Option<Network>, config: Option<&std::path::Path>) -> Result<Network> {
     let from_config = config.and_then(crate::commands::load_test::detect_network_from_config);
     match (flag, from_config) {
-        (Some(f), Some(c)) if f != c => eyre::bail!(
+        (Some(f), Some(c)) if f != c => Err(eyre::eyre!(
             "--network {f} contradicts the config file ({c}); pass a matching --config or drop one"
-        ),
+        )),
         (Some(f), _) => Ok(f),
         (None, Some(c)) => Ok(c),
         (None, None) => Ok(Network::Testnet),
@@ -42,9 +42,9 @@ pub fn resolve_network(flag: Option<Network>, config: Option<&std::path::Path>) 
 /// Contradicting values are a hard error.
 pub fn network_or_default(arg: Option<Network>, global: Option<Network>) -> Result<Network> {
     match (arg, global) {
-        (Some(a), Some(g)) if a != g => {
-            eyre::bail!("network argument {a} contradicts --network {g}; drop one")
-        }
+        (Some(a), Some(g)) if a != g => Err(eyre::eyre!(
+            "network argument {a} contradicts --network {g}; drop one"
+        )),
         (Some(a), _) => Ok(a),
         (None, Some(g)) => Ok(g),
         (None, None) => Ok(Network::Testnet),

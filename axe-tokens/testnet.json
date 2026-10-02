@@ -7,6 +7,17 @@
         }
       }
     },
+    "arc-8": {
+      "contracts": {
+        "AXE": {
+          "address": "0xff7E33738ca7361B57062eaFB3f9dD2D34293203",
+          "tokenId": "0x7ad51200f49ebfc24aeaf79490ed545f1d803e1cf4ba8fb09db88640b9781cb0"
+        },
+        "SenderReceiver": {
+          "address": "0x74460Ec62D96B97be6780ae763640C9E1F770bfe"
+        }
+      }
+    },
     "avalanche": {
       "contracts": {
         "SenderReceiver": {
@@ -102,6 +113,17 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xD0EfDC90Bdb5127A407dABa673eC1a42a6869A19"
+        }
+      }
+    },
+    "robinhood": {
+      "contracts": {
+        "AXE": {
+          "address": "0xf06E269534734d90F474AC8706069da096a83c65",
+          "tokenId": "0x7ad51200f49ebfc24aeaf79490ed545f1d803e1cf4ba8fb09db88640b9781cb0"
+        },
+        "SenderReceiver": {
+          "address": "0x74460Ec62D96B97be6780ae763640C9E1F770bfe"
         }
       }
     },

@@ -93,12 +93,14 @@ mod xrpl_sender;
 // - `ensure_sender_receiver_on_evm_chain` is used by `commands::test_gmp`
 //   (the `test_gmp --config` flow deploys / reuses a SenderReceiver on the
 //   destination EVM chain).
+// - `overlay_axe_token` is used by `commands::check_balances` to find AXE
+//   on chains recorded only in the axe-tokens overlay.
 // - `make_executable_payload` / `memo_program_id` are used by
 //   `commands::test_gmp::source` to build the Solana-side memo payload.
 // - `resolve_from_config` is used by `main.rs` to resolve a chains-config
 //   JSON into a `ResolvedConfig` before dispatching to `run`.
 pub(crate) use gmp_payload::{make_executable_payload, memo_program_id};
-pub(crate) use helpers::ensure_sender_receiver_on_evm_chain;
+pub(crate) use helpers::{ensure_sender_receiver_on_evm_chain, overlay_axe_token};
 pub(crate) use resolve::resolve_from_config;
 
 // Re-export helpers/resolve names through `load_test` so the per-pair

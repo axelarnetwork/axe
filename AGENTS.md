@@ -166,9 +166,15 @@ These seven rails cover EVM, Solana, Sui, Stellar, and XRPL source/destination a
 
 ### Before reporting an edit as done
 
-After any Rust edit, run both of these and resolve every diagnostic before handing back:
+After any Rust edit, run these and resolve every diagnostic before handing back.
+Run them on CI's toolchain, not whatever stable happens to be installed: CI
+installs the latest stable (`dtolnay/rust-toolchain@stable`) and
+`rust-toolchain.toml` only says `stable`, so a stale local toolchain misses
+lints CI enforces. Run `rustup update stable` first and check that
+`rustc --version` matches the version in the latest CI log.
 
 - `cargo fmt --all --check`
+- `cargo clippy --locked --all-targets -- -D warnings -A clippy::too_many_lines` (CI's exact command, from `.github/workflows/ci.yml`)
 - `cargo clippy --locked --all-targets -- -D warnings`
 - `cargo clippy --locked --bin axe -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic`
 - `cargo test --locked --all-targets --quiet`

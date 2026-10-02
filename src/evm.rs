@@ -237,9 +237,9 @@ impl EvmEndpoints {
                         .connect_client(RpcClient::new(Http::new(url.parse()?), false));
                     match provider.fill(tx).await? {
                         SendableTx::Envelope(envelope) => Ok(envelope),
-                        SendableTx::Builder(_) => {
-                            eyre::bail!("wallet filler did not produce a signed envelope")
-                        }
+                        SendableTx::Builder(_) => Err(eyre::eyre!(
+                            "wallet filler did not produce a signed envelope"
+                        )),
                     }
                 }
             },
