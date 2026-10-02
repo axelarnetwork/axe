@@ -114,6 +114,13 @@ jobs:
           # path CI uses — no local salt cache):
           #   Avalanche→Monad legacy→amp 39.6s, Avalanche→Ethereum legacy→legacy
           #   61.6s, Monad→Avalanche amp→legacy.
+          # Arc ↔ Robinhood: testnet-only amplifier EVM chains. The canonical
+          # testnet AXE v3 was remote-deployed to both from Avalanche and
+          # seeded there; the tokens are recorded in axe-tokens/testnet.json
+          # because upstream chains-config has no AXE entry for either chain.
+          # Robinhood's finalized head lags ~16 min (Orbit L2 settling on
+          # Sepolia), so its first leg reaches the hub ~21 min after the send:
+          # that route gets a longer verification window and job timeout.
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
@@ -123,7 +130,9 @@ jobs:
             {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"},
             {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
             {"name":"Monad -> Avalanche","src":"Monad","dst":"Avalanche","notes":"amp->legacy ITS"},
-            {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"}
+            {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"},
+            {"name":"Arc -> Robinhood","src":"Arc","dst":"Robinhood","notes":"evm->evm ITS"},
+            {"name":"Robinhood -> Arc","src":"Robinhood","dst":"Arc","notes":"evm->evm ITS","inactivity_secs":"2400","timeout_minutes":50}
           ]}'
           # GMP fleet: Stellar → Solana → Sui → Hyperliquid → Stellar 4-cycle.
           # Strict 1×src + 1×dst per chain. Every leg is wired in axe (sol→sui
@@ -199,12 +208,14 @@ jobs:
       # check-balances reaches the EVM RPCs via the chains-config's `rpc`
       # field by default; per-chain secret overrides apply the same way they
       # do for `test-route` (same naming convention).
+      ARC_TESTNET_RPC:             ${{ secrets.ARC_TESTNET_RPC }}
       HEDERA_MAINNET_RPC:          ${{ secrets.HEDERA_MAINNET_RPC }}
       HEDERA_TESTNET_RPC:          ${{ secrets.HEDERA_TESTNET_RPC }}
       HYPERLIQUID_MAINNET_RPC:     ${{ secrets.HYPERLIQUID_MAINNET_RPC }}
       HYPERLIQUID_TESTNET_RPC:     ${{ secrets.HYPERLIQUID_TESTNET_RPC }}
       MONAD_MAINNET_RPC:           ${{ secrets.MONAD_MAINNET_RPC }}
       MONAD_TESTNET_RPC:           ${{ secrets.MONAD_TESTNET_RPC }}
+      ROBINHOOD_TESTNET_RPC:       ${{ secrets.ROBINHOOD_TESTNET_RPC }}
       SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
       SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
       STELLAR_MAINNET_RPC:         ${{ secrets.STELLAR_MAINNET_RPC }}
@@ -292,21 +303,24 @@ jobs:
     # ~10 min of CI on routes that would all fail mid-tx).
     needs: [setup, preflight]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A route may raise both budgets via `timeout_minutes` / `inactivity_secs`
+    # in its matrix entry (e.g. a source chain with slow finality).
+    timeout-minutes: ${{ matrix.timeout_minutes || 30 }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     env:
-      # Keep axe's verification window under the 30-min job timeout: a stall
+      # Keep axe's verification window under the job timeout: a stall
       # then ends as an honest failure with a written report, phase counts,
       # and the GMP-API final recheck - instead of a SIGKILLed "cancelled"
       # job with no diagnostics (see engine.rs inactivity_timeout).
-      AXE_VERIFY_INACTIVITY_SECS: "1200"
+      AXE_VERIFY_INACTIVITY_SECS: ${{ matrix.inactivity_secs || '1200' }}
       # Per-chain private RPC overrides (same block as the other workflows).
       # Pattern: <CHAIN_DISPLAY_UPPER>_<NETWORK_UPPER>_RPC.
       ARBITRUM_MAINNET_RPC:        ${{ secrets.ARBITRUM_MAINNET_RPC }}
       ARBITRUM_TESTNET_RPC:        ${{ secrets.ARBITRUM_TESTNET_RPC }}
       ARBITRUM_STAGENET_RPC:       ${{ secrets.ARBITRUM_STAGENET_RPC }}
+      ARC_TESTNET_RPC:             ${{ secrets.ARC_TESTNET_RPC }}
       AVALANCHE_MAINNET_RPC:       ${{ secrets.AVALANCHE_MAINNET_RPC }}
       AVALANCHE_TESTNET_RPC:       ${{ secrets.AVALANCHE_TESTNET_RPC }}
       AVALANCHE_STAGENET_RPC:      ${{ secrets.AVALANCHE_STAGENET_RPC }}
@@ -326,6 +340,7 @@ jobs:
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
       OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
       OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
+      ROBINHOOD_TESTNET_RPC:       ${{ secrets.ROBINHOOD_TESTNET_RPC }}
       SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
       SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
       SOLANA_STAGENET_RPC:         ${{ secrets.SOLANA_STAGENET_RPC }}

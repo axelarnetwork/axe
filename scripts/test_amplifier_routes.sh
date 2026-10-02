@@ -73,6 +73,7 @@ mkdir -p "$RESULTS_DIR"
 CHAIN_MAP=$(cat <<'EOF'
 {
   "Arbitrum":    {"mainnet": "arbitrum",   "testnet": "arbitrum-sepolia", "stagenet": "arbitrum-sepolia"},
+  "Arc":         {"testnet": "arc-8", "devnet-amplifier": "arc-2"},
   "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche",  "devnet-amplifier": "avalanche-fuji"},
   "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
   "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
@@ -80,6 +81,7 @@ CHAIN_MAP=$(cat <<'EOF'
   "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
   "Monad":       {"mainnet": "monad",      "testnet": "monad-3",          "stagenet": "monad"},
   "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia"},
+  "Robinhood":   {"testnet": "robinhood"},
   "Solana":      {"mainnet": "solana",     "testnet": "solana",           "stagenet": "solana-stagenet-3", "devnet-amplifier": "solana-18"},
   "Stellar":     {"mainnet": "stellar",    "testnet": "stellar-2026-q1-2"},
   "Sui":         {"mainnet": "sui",        "testnet": "sui",              "stagenet": "sui", "devnet-amplifier": "sui-2"},
@@ -93,6 +95,7 @@ EOF
 CHAIN_TYPES=$(cat <<'EOF'
 {
   "Arbitrum":    "evm",
+  "Arc":         "evm",
   "Avalanche":   "evm",
   "Base":        "evm",
   "Ethereum":    "evm",
@@ -100,6 +103,7 @@ CHAIN_TYPES=$(cat <<'EOF'
   "Hyperliquid": "evm",
   "Monad":       "evm",
   "Optimism":    "evm",
+  "Robinhood":   "evm",
   "Solana":      "sol",
   "Stellar":     "stellar",
   "Sui":         "sui",
@@ -164,7 +168,9 @@ case "$NETWORK/$PROTOCOL" in
   {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera"},
   {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad"},
   {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana"},
-  {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"}
+  {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid"},
+  {"name":"Arc -> Robinhood","src":"Arc","dst":"Robinhood"},
+  {"name":"Robinhood -> Arc","src":"Robinhood","dst":"Arc"}
 ]
 EOF
 )
