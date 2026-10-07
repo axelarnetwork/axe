@@ -9,5 +9,5 @@ pub(super) const DEFAULT_VV_BLOCK_EXPIRY: u64 = 50;
 pub(crate) struct RewardPoolSettings {
     pub epoch_blocks: u64,
     pub participation_threshold: [u64; 2],
-    pub rewards_per_epoch_uaxl: u64,
+    pub rewards_per_epoch_base_units: u64,
 }

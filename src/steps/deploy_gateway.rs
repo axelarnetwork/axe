@@ -14,8 +14,12 @@ use serde_json::{Value, json};
 use crate::commands::deploy::DeployContext;
 use crate::evm::{encode_gateway_setup_params, read_artifact_bytecode};
 use crate::state::save_state;
+use crate::types::Network;
 use crate::ui;
 use crate::utils::{compute_domain_separator, update_target_json};
+
+#[cfg(test)]
+mod tests;
 
 struct GatewayDeploymentRecord {
     proxy: alloy::primitives::Address,
@@ -44,7 +48,10 @@ async fn write_gateway_config(ctx: &DeployContext, record: &GatewayDeploymentRec
         "domainSeparator".into(),
         json!(format!("{}", record.domain_separator)),
     );
-    data.insert("minimumRotationDelay".into(), json!(3600));
+    data.insert(
+        "minimumRotationDelay".into(),
+        json!(ctx.state.env.gateway_rotation_delay_seconds()),
+    );
     data.insert(
         "operator".into(),
         json!(
@@ -123,7 +130,8 @@ pub async fn run(
     // --- Tx 1: Deploy implementation (recover from the journal if already deployed) ---
     let (impl_addr, impl_codehash) = {
         ui::info("deploying AxelarAmplifierGateway implementation...");
-        let code = gateway_implementation_code(impl_artifact, domain_separator).await?;
+        let code =
+            gateway_implementation_code(impl_artifact, domain_separator, ctx.state.env).await?;
         let mut tx = TransactionRequest::default().with_deploy_code(code);
         tx.nonce = deployment_nonce;
         let receipt = deployment_evm::send(&provider, tx, "gateway implementation").await?;
@@ -207,10 +215,16 @@ pub async fn run(
     .await
 }
 
-async fn gateway_implementation_code(artifact: &str, domain_separator: B256) -> Result<Bytes> {
-    // Keep the original gateway constructor parameters: 15 retained signer sets
-    // and a minimum of one hour between rotations.
-    let constructor = (U256::from(15), domain_separator, U256::from(3600));
+async fn gateway_implementation_code(
+    artifact: &str,
+    domain_separator: B256,
+    network: Network,
+) -> Result<Bytes> {
+    let constructor = (
+        U256::from(15),
+        domain_separator,
+        U256::from(network.gateway_rotation_delay_seconds()),
+    );
     let mut code = read_artifact_bytecode(artifact).await?;
     code.extend_from_slice(&constructor.abi_encode());
     Ok(Bytes::from(code))

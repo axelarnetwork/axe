@@ -128,6 +128,16 @@ pub enum Network {
 }
 
 impl Network {
+    /// Gateway rotation delays verified on deployed gateways on 2026-10-07.
+    pub const fn gateway_rotation_delay_seconds(self) -> u64 {
+        match self {
+            Self::Mainnet => 86_400,
+            Self::Testnet => 3_600,
+            Self::Stagenet => 300,
+            Self::DevnetAmplifier => 0,
+        }
+    }
+
     pub const fn deployment_uses_governance(self) -> bool {
         !matches!(self, Self::DevnetAmplifier)
     }

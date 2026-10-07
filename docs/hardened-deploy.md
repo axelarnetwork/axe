@@ -111,6 +111,16 @@ payment to each pool, not its ongoing per-epoch reward rate. Gas budgets
 are enforced spending limits, not guarantees about future gas prices. A run
 stops if a transaction would exceed its budget.
 
+Reward previews use the configured denomination: `uaxl` with an AXL conversion,
+or the exact base denomination such as devnet's `uamplifier`. Existing pools can
+be topped up through `add_rewards` without recreating them or changing their parameters.
+
+Gateway minimum signer rotation delays are fixed per network: mainnet `86400`
+seconds, testnet `3600`, stagenet `300`, and devnet-amplifier `0`. Axe shows the
+delay before approval, uses it in the constructor and saved config, and checks
+it on-chain after deployment and on resume. These values match the live gateways
+queried on 2026-10-07. This change does not upgrade existing gateways.
+
 ## Run, stop and resume
 
 Build this checkout first and ensure `axe` resolves to this binary, rather than

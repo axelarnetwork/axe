@@ -2,8 +2,12 @@ use eyre::Result;
 
 use super::{session, types::Plan};
 use crate::commands::deploy::DeployContext;
+use crate::cosmos::read_axelar_config;
 use crate::state::Step;
 use crate::ui;
+
+#[cfg(test)]
+mod tests;
 
 pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
     let plan = session::current()?.plan.clone();
@@ -28,7 +32,13 @@ pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
     }
     show_authority(&plan, &step.name);
     if step.name == "RegisterDeployment" {
-        show_reward_pool_settings(ctx);
+        show_reward_pool_settings(ctx).await?;
+    }
+    if step.name == "AxelarGateway" {
+        ui::kv(
+            "Minimum signer rotation delay",
+            &format!("{} seconds", ctx.state.env.gateway_rotation_delay_seconds()),
+        );
     }
     if !ui::confirm("Proceed with this step?").await {
         return Err(session::pause(
@@ -38,9 +48,9 @@ pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
     Ok(())
 }
 
-fn show_reward_pool_settings(ctx: &DeployContext) {
+async fn show_reward_pool_settings(ctx: &DeployContext) -> Result<()> {
     let settings = crate::steps::cosmos_tx::reward_pool_settings(ctx.state.env.as_str());
-    let rewards = settings.rewards_per_epoch_uaxl;
+    let (_, _, denom, _) = read_axelar_config(&ctx.target_json).await?;
     let [numerator, denominator] = settings.participation_threshold;
     ui::section("Reward settings for both pools");
     ui::kv(
@@ -53,11 +63,7 @@ fn show_reward_pool_settings(ctx: &DeployContext) {
     );
     ui::kv(
         "Rewards per epoch, per pool",
-        &format!(
-            "{}.{:06} AXL ({rewards} uaxl)",
-            rewards / 1_000_000,
-            rewards % 1_000_000
-        ),
+        &reward_amount_label(settings.rewards_per_epoch_base_units, &denom),
     );
     ui::kv(
         "Required participation",
@@ -70,6 +76,19 @@ fn show_reward_pool_settings(ctx: &DeployContext) {
     ui::info(
         "REWARD_AMOUNT is a separate initial deposit into each pool, sent later in AddRewards.",
     );
+    Ok(())
+}
+
+fn reward_amount_label(amount: u64, denom: &str) -> String {
+    if denom == "uaxl" {
+        format!(
+            "{}.{:06} AXL ({amount} uaxl)",
+            amount / 1_000_000,
+            amount % 1_000_000
+        )
+    } else {
+        format!("{amount} {denom}")
+    }
 }
 
 fn description(name: &str) -> &'static str {

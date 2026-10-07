@@ -21,6 +21,7 @@ sol! {
         function epoch() external view returns (uint256);
         function signersHashByEpoch(uint256 epoch) external view returns (bytes32);
         function operator() external view returns (address);
+        function minimumRotationDelay() external view returns (uint256);
     }
 }
 
@@ -80,6 +81,15 @@ pub async fn gateway(ctx: &DeployContext) -> Result<()> {
     let block = super::confirmations::observation_block(&provider).await?;
     let block_id = alloy::eips::BlockId::hash_canonical(block.header.hash);
     let gateway = ManagedContract::new(address, &provider);
+    eyre::ensure!(
+        gateway
+            .minimumRotationDelay()
+            .block(block_id)
+            .call()
+            .await?
+            == U256::from(ctx.state.env.gateway_rotation_delay_seconds()),
+        "gateway minimum signer rotation delay differs from the network preset"
+    );
     let initial = initial_set(ctx).await?;
     let epoch = gateway.epoch().block(block_id).call().await?;
     eyre::ensure!(

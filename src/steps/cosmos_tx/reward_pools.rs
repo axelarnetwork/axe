@@ -14,7 +14,7 @@ use crate::cosmos::{
 use crate::ui;
 
 pub(crate) fn reward_pool_settings(env: &str) -> RewardPoolSettings {
-    let (epoch_blocks, participation_threshold, rewards_per_epoch_uaxl) = match env {
+    let (epoch_blocks, participation_threshold, rewards_per_epoch_base_units) = match env {
         "devnet-amplifier" => (100, [7, 10], 100),
         "mainnet" => (47_250, [8, 10], 5_553_500_000),
         _ => (600, [7, 10], 100),
@@ -22,7 +22,7 @@ pub(crate) fn reward_pool_settings(env: &str) -> RewardPoolSettings {
     RewardPoolSettings {
         epoch_blocks,
         participation_threshold,
-        rewards_per_epoch_uaxl,
+        rewards_per_epoch_base_units,
     }
 }
 
@@ -39,7 +39,7 @@ pub(crate) fn reward_pool_messages(
                 "params": {
                     "epoch_duration": settings.epoch_blocks.to_string(),
                     "participation_threshold": settings.participation_threshold.map(|value| value.to_string()),
-                    "rewards_per_epoch": settings.rewards_per_epoch_uaxl.to_string()
+                    "rewards_per_epoch": settings.rewards_per_epoch_base_units.to_string()
                 },
                 "pool_id": {
                     "chain_name": chain,
