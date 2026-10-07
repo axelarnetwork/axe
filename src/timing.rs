@@ -67,14 +67,6 @@ pub const DEST_CHAIN_POLL_ATTEMPTS: usize = 30;
 pub const EXPRESS_POLL_INTERVAL: Duration = DEST_CHAIN_POLL_INTERVAL;
 
 // ---------------------------------------------------------------------------
-// Verifier-set rotation
-// ---------------------------------------------------------------------------
-
-/// Cadence for `wait_verifier_set` while polling the multisig prover for
-/// the new verifier set after a rotation has been kicked off on cosmos.
-pub const VERIFIER_SET_POLL_INTERVAL: Duration = Duration::from_secs(30);
-
-// ---------------------------------------------------------------------------
 // Cosmos governance proposal polling
 // ---------------------------------------------------------------------------
 

@@ -4,7 +4,6 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProverConfig {
     pub address: Option<String>,
-    pub admin_address: Option<String>,
 }
 
 #[derive(Deserialize)]

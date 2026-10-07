@@ -1,9 +1,10 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 
 use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
-use crate::evm::{Operators, broadcast_and_log};
+use crate::evm::Operators;
 use crate::ui;
 use crate::utils::read_contract_address;
 
@@ -26,8 +27,12 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
             continue;
         }
         ui::info(&format!("adding operator: {op}"));
-        let pending = operators.addOperator(*op).send().await?;
-        broadcast_and_log(pending, "tx").await?;
+        let request = operators.addOperator(*op).into_transaction_request();
+        deployment_evm::send(&provider, request, &format!("register operator {op}")).await?;
+        eyre::ensure!(
+            operators.isOperator(*op).call().await?,
+            "operator registration did not take effect"
+        );
     }
 
     Ok(())

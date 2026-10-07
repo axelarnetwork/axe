@@ -38,6 +38,9 @@ pub(crate) fn validate_init_environment(lookup: impl Fn(&str) -> Option<String>)
 }
 
 pub(crate) fn load_missing_environment(state: &mut State, lookup: impl Fn(&str) -> Option<String>) {
+    if state.mnemonic.is_empty() {
+        state.mnemonic = lookup("MNEMONIC").unwrap_or_default();
+    }
     for (name, destination) in [
         ("DEPLOYER_PRIVATE_KEY", &mut state.deployer_private_key),
         (
@@ -69,7 +72,7 @@ pub(crate) fn load_missing_environment(state: &mut State, lookup: impl Fn(&str) 
     }
 }
 
-pub(crate) fn validate_state(state: &mut State, key_override: Option<&str>) -> Result<()> {
+pub(crate) fn validate_state(state: &mut State) -> Result<()> {
     let mut errors = Vec::new();
     if !reqwest::Url::parse(&state.rpc_url)
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
@@ -108,11 +111,11 @@ pub(crate) fn validate_state(state: &mut State, key_override: Option<&str>) -> R
             state.its_deployer_private_key.as_deref(),
         ),
     ] {
-        validate_key(name, key_override.or(key), &mut errors);
+        validate_key(name, key, &mut errors);
     }
     let gateway = validate_key(
         "GATEWAY_DEPLOYER_PRIVATE_KEY",
-        key_override.or(state.gateway_deployer_private_key.as_deref()),
+        state.gateway_deployer_private_key.as_deref(),
         &mut errors,
     );
     if let (Some(saved), Some(derived)) = (state.gateway_deployer, gateway)

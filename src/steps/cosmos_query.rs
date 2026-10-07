@@ -68,11 +68,10 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         gw["address"] = json!(gateway_address);
     }
 
-    tokio::fs::write(
+    crate::commands::deploy::hardened::storage::atomic_config_write(
         &ctx.target_json,
-        serde_json::to_string_pretty(&root)? + "\n",
-    )
-    .await?;
+        (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+    )?;
     ui::success(&format!("updated {}", ctx.target_json.display()));
 
     Ok(())

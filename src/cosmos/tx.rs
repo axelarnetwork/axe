@@ -21,21 +21,21 @@ use crate::ui;
 /// generous buffer.
 const GAS_MULTIPLIER: f64 = 3.0;
 
-struct CosmosTxSignInput<'a> {
-    chain_id: &'a str,
-    account_number: u64,
-    sequence: u64,
-    gas_limit: u64,
-    fee_amount: u128,
-    fee_denom: &'a str,
-    messages: Vec<cosmrs::Any>,
+pub(crate) struct CosmosTxSignInput<'a> {
+    pub(crate) chain_id: &'a str,
+    pub(crate) account_number: u64,
+    pub(crate) sequence: u64,
+    pub(crate) gas_limit: u64,
+    pub(crate) fee_amount: u128,
+    pub(crate) fee_denom: &'a str,
+    pub(crate) messages: Vec<cosmrs::Any>,
 }
 
-fn build_and_sign_cosmos_tx(
+pub(crate) fn build_and_sign_cosmos_tx(
     signing_key: &SigningKey,
-    input: CosmosTxSignInput<'_>,
+    input: &CosmosTxSignInput<'_>,
 ) -> Result<Vec<u8>> {
-    let tx_body = tx::Body::new(input.messages, "", 0u32);
+    let tx_body = tx::Body::new(input.messages.clone(), "", 0u32);
     let signer_info = SignerInfo::single_direct(Some(signing_key.public_key()), input.sequence);
     let fee = Fee::from_amount_and_gas(
         cosmrs::Coin {
@@ -141,6 +141,19 @@ pub async fn sign_and_broadcast_cosmos_tx(
     gas_price: f64,
     messages: Vec<cosmrs::Any>,
 ) -> Result<Value> {
+    crate::commands::deploy::hardened::session::guard_send()?;
+    if crate::commands::deploy::hardened::session::active() {
+        return crate::commands::deploy::hardened::cosmos::send(
+            signing_key,
+            address,
+            lcd,
+            chain_id,
+            fee_denom,
+            gas_price,
+            messages,
+        )
+        .await;
+    }
     let (account_number, sequence) = lcd_query_account(lcd, address).await?;
     ui::kv(
         "account",
@@ -149,7 +162,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
 
     let sim_tx = build_and_sign_cosmos_tx(
         signing_key,
-        CosmosTxSignInput {
+        &CosmosTxSignInput {
             chain_id,
             account_number,
             sequence,
@@ -170,7 +183,7 @@ pub async fn sign_and_broadcast_cosmos_tx(
 
     let tx_bytes = build_and_sign_cosmos_tx(
         signing_key,
-        CosmosTxSignInput {
+        &CosmosTxSignInput {
             chain_id,
             account_number,
             sequence,

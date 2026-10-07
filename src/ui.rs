@@ -108,14 +108,30 @@ pub fn section(title: &str) {
     println!("\n{} {} {}", "--".dimmed(), title.bold(), "--".dimmed());
 }
 
-/// Print an action-required block in yellow
+/// Print an action-required block with bold, spaced numbered steps.
 pub fn action_required(lines: &[&str]) {
     println!();
     println!("  {}", "ACTION REQUIRED:".yellow().bold());
     for line in lines {
-        println!("  {}", line.yellow());
+        let numbered_step = line.split_once(". ").is_some_and(|(number, _)| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if numbered_step {
+            println!("\n  {}", line.yellow().bold());
+        } else {
+            println!("  {}", line.yellow());
+        }
     }
     println!();
+}
+
+/// Deployment requires per-step approvals. Redirected stdin cannot approve writes.
+pub fn require_interactive_deployment() -> eyre::Result<()> {
+    eyre::ensure!(
+        io::stdin().is_terminal(),
+        "deploy init/run require an interactive terminal for y/n approvals. Run axe directly in a terminal (use ssh -t remotely); redirected or piped stdin is unsupported. No deployment actions were started"
+    );
+    Ok(())
 }
 
 /// Ask the user to confirm an action on stdin.

@@ -12,6 +12,95 @@ use crate::ui;
 // source: axelar-skills/verifiers.md
 
 const TESTNET_VERIFIERS: &[(&str, &str)] = &[
+    // Axelar-operated testnet fleet, identified by the fleet operator.
+    (
+        "axelar12nyeyah0j5ypfywgdd90046jgfl32tycrhlpg6",
+        "Axelar testnet",
+    ),
+    (
+        "axelar13vewqf8exnav577qfdxpf60707yyazsq2hncmx",
+        "Axelar testnet",
+    ),
+    (
+        "axelar13y07nxqadv3r7fq5hftz2p9rg5f9sgdpn76sf5",
+        "Axelar testnet",
+    ),
+    (
+        "axelar14cteftrsu7pgx60ey4grpn66kk9def5t55asqa",
+        "Axelar testnet",
+    ),
+    (
+        "axelar15305m5uwgxt92x2k5dj4ttsx0t8kh5pmfekxth",
+        "Axelar testnet",
+    ),
+    (
+        "axelar16yf68y6g0pc64xvrn8e29mlnrarvpn74krgehp",
+        "Axelar testnet",
+    ),
+    (
+        "axelar17jjksd07c9934svqyjdkqzpmdqkjkadj5ulcpd",
+        "Axelar testnet",
+    ),
+    (
+        "axelar19cgyqs2welwaff6fyfyjdnnmv3lkxt9ntmg62s",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1a3qp4377kjfl3znelj6wayels428uapddpe4mp",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1c07q2f6v8znle7eu08hu4fvtssxxv44tu7h3fm",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1dz6u2vy7gjyexy5zraqqqzkf4wffm75tsqn50z",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1ha0xrd2ex6p4zj0962tc3dx4cm0e3m5qmuq20h",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1kamfmz2crw8eqcrvq8pj7pxj6l5rugvsd7cqke",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1l9txetl2jlne8s2h2ksv83wudvd3da3dv66fpq",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1mcnjp5j8txr8acj2dp9v2zprwzxv3fmdy0fmsp",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1mp0w0fdynzaguy909gf3ltsglnu892k555q6sm",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1nqtlh9xmcp9d5nyl3wc77w4gwz72a8yt3kmzkf",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1qtykdxw26wq9zz7pmeslqnznf0qyy3auddytn9",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1t4dpjj6p0mgwwlxzvqqwv4w3ejs4laxz7eqxuv",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1yxvh503g35quq3yacm4m8l6jurjwhqpejly30j",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1zsq3fhmvmauev086aryquatd3jrh2mvl7wyrga",
+        "Axelar testnet",
+    ),
+    (
+        "axelar1zxsdfexpy9lehz3fh6xjnvrpe6ze4fqzn06d55",
+        "Axelar testnet",
+    ),
     ("axelar12umz2ds9gvtnkkmcwhukl7lm5asxjc9533dkj8", "Bharvest"),
     ("axelar12uqmh4qkax6ct0dr67c0ffurplwhrv7h5t9x42", "Qubelabs"),
     (
@@ -175,6 +264,9 @@ pub fn lookup_name(network: Network, addr: &str) -> Option<&'static str> {
         .find(|(a, _)| *a == addr)
         .map(|(_, name)| *name)
 }
+
+#[cfg(test)]
+mod tests;
 
 async fn resolve_chain_axelar_id(config_path: &Path, chain_input: &str) -> Result<String> {
     let content = tokio::fs::read_to_string(config_path).await?;

@@ -6,9 +6,8 @@
 //! types here close to the JSON they serialize to — the schema *is* the
 //! type.
 //!
-//! The on-disk format is **not a stable contract**: when the type definition
-//! changes in a way that breaks deserialization, users are expected to run
-//! `axe deploy reset` and re-init.
+//! Hardened state and transaction journals are versioned and must be preserved
+//! across resumes. Resetting cannot undo on-chain actions.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +17,10 @@ use eyre::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{ChainKey, Network};
-use crate::ui;
 use StepKind as K;
+
+pub mod credentials;
+pub mod loading;
 
 // ---------------------------------------------------------------------------
 // Top-level State
@@ -31,7 +32,12 @@ pub struct State {
     pub axelar_id: ChainKey,
     pub rpc_url: String,
     pub target_json: PathBuf,
+    #[serde(default)]
     pub mnemonic: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardened_plan: Option<crate::commands::deploy::hardened::types::Plan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardened_fingerprint: Option<alloy::primitives::B256>,
     pub env: Network,
     pub cosm_salt: String,
 
@@ -203,8 +209,6 @@ pub enum StepKind {
 // ---------------------------------------------------------------------------
 
 /// Returns the canonical ordered set of steps that a fresh deployment runs.
-/// `migrate_steps` appends any new entries here onto an existing state file
-/// so partial deployments pick up newly-added stages without manual surgery.
 pub fn default_steps() -> Vec<Step> {
     let new_owner = alloy::primitives::address!("49845e5d9985d8dc941462293ed38EEfF18B0eAE");
     let mut steps = vec![
@@ -236,18 +240,6 @@ pub fn default_steps() -> Vec<Step> {
             "WaitRegisterProposal",
             K::CosmosPoll {
                 proposal_key: "register".into(),
-            },
-        ),
-        pending_step(
-            "CreateRewardPools",
-            K::CosmosTx {
-                proposal_key: "rewardPools".into(),
-            },
-        ),
-        pending_step(
-            "WaitRewardPoolsProposal",
-            K::CosmosPoll {
-                proposal_key: "rewardPools".into(),
             },
         ),
         pending_step(
@@ -345,8 +337,9 @@ pub fn state_path(axelar_id: &str) -> Result<PathBuf> {
 
 /// Read and deserialize the state file into a typed `State`.
 pub async fn read_state(axelar_id: &str) -> Result<State> {
-    let path = state_path(axelar_id)?;
-    read_state_at(&path).await
+    loading::read(axelar_id, None)
+        .await?
+        .ok_or_else(|| eyre::eyre!("no deployment state for {axelar_id}"))
 }
 
 pub async fn read_state_at(path: &Path) -> Result<State> {
@@ -361,16 +354,40 @@ pub async fn read_state_at(path: &Path) -> Result<State> {
 
 /// Serialize and write the state file. The path is derived from
 /// `state.axelar_id` so callers don't need to track it.
+pub fn deployment_state_path(state: &State) -> Result<PathBuf> {
+    if state.hardened_plan.is_some() {
+        Ok(crate::commands::deploy::hardened::storage::directory(state)?.join("state.json"))
+    } else {
+        state_path(state.axelar_id.as_str())
+    }
+}
+
 pub async fn save_state(state: &State) -> Result<()> {
-    let path = state_path(state.axelar_id.as_str())?;
-    save_state_at(state, &path).await
+    save_state_at(state, &deployment_state_path(state)?).await
 }
 
 pub async fn save_state_at(state: &State, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(path, serde_json::to_string_pretty(state)? + "\n").await?;
+    let mut value = serde_json::to_value(state)?;
+    for field in [
+        "mnemonic",
+        "adminMnemonic",
+        "deployerPrivateKey",
+        "gatewayDeployerPrivateKey",
+        "gasServiceDeployerPrivateKey",
+        "itsDeployerPrivateKey",
+    ] {
+        value
+            .as_object_mut()
+            .ok_or_else(|| eyre::eyre!("invalid state object"))?
+            .remove(field);
+    }
+    crate::commands::deploy::hardened::storage::atomic_write(
+        path,
+        &serde_json::to_vec_pretty(&value)?,
+    )?;
     Ok(())
 }
 
@@ -392,23 +409,6 @@ pub fn mark_step_completed(state: &mut State, idx: usize) {
     state.steps[idx].status = StepStatus::Completed;
 }
 
-/// Append any default steps (by name) that aren't already in `state.steps`,
-/// so existing partial deployments pick up newly-introduced stages.
-pub fn migrate_steps(state: &mut State) {
-    let existing_names: std::collections::HashSet<String> =
-        state.steps.iter().map(|s| s.name.clone()).collect();
-    let mut added = 0;
-    for default_step in default_steps() {
-        if !existing_names.contains(&default_step.name) {
-            state.steps.push(default_step);
-            added += 1;
-        }
-    }
-    if added > 0 {
-        ui::info(&format!("migrated state: added {added} new step(s)"));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Step accessors — keep call sites concise without forcing match arms.
 // ---------------------------------------------------------------------------
@@ -420,30 +420,6 @@ impl Step {
             StepKind::CosmosTx { proposal_key } | StepKind::CosmosPoll { proposal_key } => {
                 Some(proposal_key.as_str())
             }
-            _ => None,
-        }
-    }
-
-    /// Returns the implementation address recorded by a `DeployGateway` or
-    /// `DeployUpgradable` step, or `None` if not yet deployed (or the wrong
-    /// step kind).
-    pub fn implementation_address(&self) -> Option<Address> {
-        match &self.kind {
-            StepKind::DeployGateway {
-                implementation_address,
-            }
-            | StepKind::DeployUpgradable {
-                implementation_address,
-                ..
-            } => *implementation_address,
-            _ => None,
-        }
-    }
-
-    /// Returns the proxy address recorded by a `DeployUpgradable` step.
-    pub fn proxy_address(&self) -> Option<Address> {
-        match &self.kind {
-            StepKind::DeployUpgradable { proxy_address, .. } => *proxy_address,
             _ => None,
         }
     }
@@ -588,6 +564,8 @@ mod tests {
             axelar_id: ChainKey::new("test-chain"),
             rpc_url: "https://example.com/rpc".into(),
             target_json: PathBuf::from("/tmp/target.json"),
+            hardened_plan: None,
+            hardened_fingerprint: None,
             mnemonic: "abandon abandon abandon".into(),
             env: Network::Testnet,
             cosm_salt: "cosmsalt".into(),
@@ -632,41 +610,8 @@ mod tests {
             .parse()
             .unwrap();
         step.set_implementation_address(addr).unwrap();
-        assert_eq!(step.implementation_address(), Some(addr));
-    }
-
-    /// `migrate_steps` should append unknown defaults onto an existing list
-    /// without disturbing the pre-existing entries.
-    #[test]
-    fn migrate_appends_only() {
-        let mut state = State {
-            axelar_id: ChainKey::new("c"),
-            rpc_url: "u".into(),
-            target_json: PathBuf::from("/x"),
-            mnemonic: "m".into(),
-            env: Network::Testnet,
-            cosm_salt: "s".into(),
-            admin_mnemonic: None,
-            deployer_private_key: None,
-            gateway_deployer_private_key: None,
-            gateway_deployer: None,
-            gas_service_deployer_private_key: None,
-            its_deployer_private_key: None,
-            its_salt: None,
-            its_proxy_salt: None,
-            predicted_gateway_address: None,
-            sender_receiver_address: None,
-            proposals: BTreeMap::new(),
-            steps: vec![Step {
-                name: "EvmCompatibilityCheck".into(),
-                status: StepStatus::Completed,
-                kind: StepKind::EvmCompat,
-            }],
-        };
-        let original_first = state.steps[0].clone();
-        migrate_steps(&mut state);
-        assert!(state.steps.len() > 1);
-        assert_eq!(state.steps[0].name, original_first.name);
-        assert_eq!(state.steps[0].status, StepStatus::Completed);
+        assert!(matches!(step.kind, StepKind::DeployGateway {
+            implementation_address: Some(saved)
+        } if saved == addr));
     }
 }

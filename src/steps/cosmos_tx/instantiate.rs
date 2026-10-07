@@ -1,7 +1,5 @@
 //! `InstantiateChainContracts` step. Asks Coordinator to instantiate the
-//! per-chain Gateway / VotingVerifier / MultisigProver trio. On non-devnet
-//! networks the message is wrapped in a governance proposal and the user
-//! has to vote it through.
+//! per-chain Gateway / VotingVerifier / MultisigProver trio via governance.
 
 use std::path::Path;
 
@@ -10,11 +8,10 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use super::StepTxContext;
-use super::defaults::{DEFAULT_PROPOSAL_DEPOSIT_UAXL, DEFAULT_VV_BLOCK_EXPIRY};
+use super::defaults::DEFAULT_VV_BLOCK_EXPIRY;
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{
-    build_execute_msg_any, build_submit_proposal_any, extract_proposal_id, lcd_fetch_code_id,
-    read_axelar_config, read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
+    build_execute_msg_any, lcd_fetch_code_id, read_axelar_config, read_axelar_contract_field,
 };
 use crate::evm::get_salt_from_key;
 use crate::state::{State, StepStatus};
@@ -23,7 +20,6 @@ use crate::utils::compute_domain_separator;
 
 mod permissions;
 mod reconcile;
-pub(super) mod recovery;
 mod types;
 
 use types::{ChainCodeIds, ChainContractAddresses, InstantiatePlan};
@@ -74,9 +70,7 @@ async fn fetch_chain_code_ids(target_json: &Path, lcd: &str) -> Result<ChainCode
 }
 
 async fn read_code_hash(target_json: &Path, contract: &str) -> Result<String> {
-    let pointer = format!("/axelar/contracts/{contract}/storeCodeProposalCodeHash");
-
-    read_axelar_contract_field(target_json, &pointer).await
+    crate::commands::deploy::hardened::inputs::cosmos_code_hash(target_json, contract).await
 }
 
 pub async fn check_instantiate_permissions(state: &State) -> Result<()> {
@@ -104,6 +98,22 @@ pub async fn check_instantiate_permissions(state: &State) -> Result<()> {
             deployment.chain_name == chain,
             "deployment name is already used by another chain"
         );
+
+        let path =
+            crate::commands::deploy::hardened::storage::directory(state)?.join("journal.json");
+        eyre::ensure!(
+            path.exists(),
+            "existing Coordinator deployment has no journal; adoption is unsupported"
+        );
+        let journal: crate::commands::deploy::hardened::types::Journal =
+            serde_json::from_slice(&tokio::fs::read(path).await?)?;
+        eyre::ensure!(
+            journal
+                .actions
+                .contains_key("InstantiateChainContracts/cosmos"),
+            "existing Coordinator deployment has no recorded hardened submission"
+        );
+
         return Ok(());
     }
     permissions::check(&lcd, &coordinator, &codes).await
@@ -151,10 +161,12 @@ async fn build_instantiate_plan(
         "{}-{}-{}-{}",
         tx.chain_axelar_id, codes.gateway, codes.verifier, codes.prover
     );
-    let admin_address = crate::steps::prover_admin::planned_address(
-        ctx.state.env,
-        prover.get("adminAddress").and_then(Value::as_str),
-    )?;
+    let admin_address = &ctx
+        .state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?
+        .prover_admin;
     let execute_msg = json!({
         "instantiate_chain_contracts": {
             "deployment_name": deployment_name,
@@ -270,11 +282,10 @@ async fn save_instantiate_plan(
             }),
         );
     }
-    tokio::fs::write(
+    crate::commands::deploy::hardened::storage::atomic_config_write(
         &ctx.target_json,
-        serde_json::to_string_pretty(&root)? + "\n",
-    )
-    .await?;
+        (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -285,23 +296,15 @@ pub(super) async fn run_instantiate(ctx: &mut DeployContext, tx: StepTxContext<'
     ));
     let addresses = read_chain_contract_addresses(ctx).await?;
     let codes = fetch_chain_code_ids(&ctx.target_json, tx.lcd).await?;
-    let mut plan = build_instantiate_plan(ctx, &tx, &addresses, codes).await?;
-    if reconcile::reuse_existing(
-        ctx,
-        tx.lcd,
-        &addresses.coordinator,
-        tx.chain_axelar_id,
-        &mut plan,
-    )
-    .await?
-    {
-        save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
-        complete_instantiate_wait(ctx);
-        return Ok(());
-    }
-    if recovery::has_pending_proposal(ctx, tx.lcd).await? {
-        return Ok(());
-    }
+    let plan = build_instantiate_plan(ctx, &tx, &addresses, codes).await?;
+
+    eyre::ensure!(
+        reconcile::find_deployment(tx.lcd, &addresses.coordinator, &plan.deployment_name)
+            .await?
+            .is_none(),
+        "an existing Coordinator deployment has no recorded submission; adoption is unsupported"
+    );
+
     permissions::check(tx.lcd, &addresses.coordinator, &plan.codes).await?;
     reconcile::check_addresses_available(tx.lcd, &addresses.coordinator, &plan).await?;
     save_instantiate_plan(ctx, tx.chain_axelar_id, &plan).await?;
@@ -319,74 +322,12 @@ async fn submit_instantiate(
         "execute msg: {}",
         ui::truncated_json(&json_str, 3)
     ));
-    let sender = if tx.use_governance {
-        &addresses.governance
+    let sender = if ctx.state.env.deployment_uses_governance() {
+        addresses.governance.as_str()
     } else {
         tx.axelar_address
     };
     let inner_msg = build_execute_msg_any(sender, &addresses.coordinator, &plan.execute_msg)?;
-    let messages = if tx.use_governance {
-        let deposit_amount = read_axelar_contract_field(
-            &ctx.target_json,
-            "/axelar/govProposalExpeditedDepositAmount",
-        )
-        .await
-        .unwrap_or_else(|_| DEFAULT_PROPOSAL_DEPOSIT_UAXL.to_string());
-        let title = format!("Instantiate chain contracts for {}", tx.chain_axelar_id);
-        let summary = format!(
-            "Instantiate Gateway, VotingVerifier and MultisigProver contracts for {} via Coordinator",
-            tx.chain_axelar_id
-        );
-        vec![build_submit_proposal_any(
-            tx.axelar_address,
-            vec![inner_msg],
-            &title,
-            &summary,
-            &deposit_amount,
-            tx.fee_denom,
-            true,
-        )?]
-    } else {
-        vec![inner_msg]
-    };
-    let tx_resp = sign_and_broadcast_cosmos_tx(
-        tx.signing_key,
-        tx.axelar_address,
-        tx.lcd,
-        tx.chain_id,
-        tx.fee_denom,
-        tx.gas_price,
-        messages,
-    )
-    .await?;
-    if tx.use_governance {
-        let proposal_id = extract_proposal_id(&tx_resp)?;
-        ui::kv("proposal submitted", &proposal_id.to_string());
-        ui::action_required(&[
-            "Vote on the proposal:",
-            &format!(
-                "./vote_{}_proposal.sh {}-nodes {proposal_id}",
-                tx.env, tx.env
-            ),
-        ]);
-        ctx.state
-            .proposals
-            .insert(tx.proposal_key.to_string(), proposal_id);
-    } else {
-        ui::success("direct execution completed");
-        complete_instantiate_wait(ctx);
-    }
-
-    Ok(())
-}
-
-fn complete_instantiate_wait(ctx: &mut DeployContext) {
-    if let Some(step) = ctx
-        .state
-        .steps
-        .iter_mut()
-        .find(|step| step.name == "WaitInstantiateProposal")
-    {
-        step.status = StepStatus::Completed;
-    }
+    let title = format!("Instantiate chain contracts for {}", tx.chain_axelar_id);
+    super::submission::submit(ctx, tx, vec![inner_msg], &title).await
 }

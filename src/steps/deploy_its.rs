@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use std::path::{Path, PathBuf};
 
 use alloy::{
@@ -13,12 +14,11 @@ use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
 use crate::evm::artifact::read_artifact_runtime_hash;
 use crate::evm::{
-    ConstAddressDeployer, Create3Deployer, broadcast_and_log, get_salt_from_key,
-    read_artifact_bytecode,
+    ConstAddressDeployer, Create3Deployer, get_salt_from_key, read_artifact_bytecode,
 };
 use crate::state::{Step, save_state};
 use crate::ui;
-use crate::utils::{deployments_root, read_contract_address, update_target_json};
+use crate::utils::{read_contract_address, update_target_json};
 
 const INTERCHAIN_PROXY_ARTIFACT: &str = "proxies/InterchainProxy.sol/InterchainProxy.json";
 
@@ -34,6 +34,8 @@ async fn proxy_predeploy_codehash(artifact_base: &Path) -> Result<FixedBytes<32>
 struct ItsDeploymentPlan {
     step: Step,
     deployer: Address,
+    service_owner: Address,
+    factory_owner: Address,
     const_deployer: Address,
     create3_deployer: Address,
     gateway: Address,
@@ -163,7 +165,7 @@ async fn prepare_its_plan<P: Provider>(
         "ITS salt",
         &format!("'ITS {its_salt_key}', proxy salt: 'ITS {proxy_salt_key}'"),
     );
-    let artifact_base = deployments_root(&ctx.target_json)?
+    let artifact_base = crate::commands::deploy::hardened::inputs::root(&ctx.state)?
         .join("node_modules/@axelar-network/interchain-token-service/artifacts/contracts");
     let predeploy_codehash = proxy_predeploy_codehash(&artifact_base).await?;
     let create3 = Create3Deployer::new(create3_deployer, provider);
@@ -177,7 +179,14 @@ async fn prepare_its_plan<P: Provider>(
         .await?;
     ui::address("predicted ITS proxy", &format!("{its_proxy}"));
     ui::address("predicted Factory proxy", &format!("{factory_proxy}"));
+    let deployment = ctx
+        .state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
     Ok(ItsDeploymentPlan {
+        service_owner: deployment.its_owner,
+        factory_owner: deployment.factory_owner,
         step,
         deployer,
         const_deployer,
@@ -353,7 +362,7 @@ async fn deploy_its_service<P: Provider>(
         )
             .abi_encode_params(),
     );
-    let constructor_args = (implementation, plan.deployer, setup_params).abi_encode_params();
+    let constructor_args = (implementation, plan.service_owner, setup_params).abi_encode_params();
     let proxy = deploy_via_create3(
         &Create3Deployer::new(plan.create3_deployer, provider),
         provider,
@@ -364,7 +373,7 @@ async fn deploy_its_service<P: Provider>(
         plan.its_proxy,
     )
     .await?;
-    assert_eq!(proxy, plan.its_proxy);
+    eyre::ensure!(proxy == plan.its_proxy, "ITS proxy address mismatch");
     Ok(ItsServiceDeployment {
         implementation,
         proxy,
@@ -402,12 +411,15 @@ async fn deploy_its_factory<P: Provider>(
         provider,
         "InterchainTokenFactoryProxy",
         read_artifact_bytecode(&plan.artifact(INTERCHAIN_PROXY_ARTIFACT)).await?,
-        (implementation, plan.deployer, Bytes::new()).abi_encode_params(),
+        (implementation, plan.factory_owner, Bytes::new()).abi_encode_params(),
         plan.factory_salt,
         plan.factory_proxy,
     )
     .await?;
-    assert_eq!(proxy, plan.factory_proxy);
+    eyre::ensure!(
+        proxy == plan.factory_proxy,
+        "factory proxy address mismatch"
+    );
     Ok(ItsFactoryDeployment {
         implementation,
         proxy,
@@ -438,7 +450,7 @@ async fn save_its_deployment(
             "implementation": format!("{}", service.implementation),
             "address": format!("{}", service.proxy),
             "predeployCodehash": format!("{}", plan.predeploy_codehash),
-            "owner": format!("{}", plan.deployer),
+            "owner": format!("{}", plan.service_owner),
         }),
     )
     .await?;
@@ -451,6 +463,7 @@ async fn save_its_deployment(
             "deployer": format!("{}", plan.deployer),
             "implementation": format!("{}", factory.implementation),
             "address": format!("{}", factory.proxy),
+            "owner": format!("{}", plan.factory_owner),
         }),
     )
     .await?;
@@ -526,36 +539,21 @@ async fn deploy_via_create2<P: Provider>(
         ));
     }
 
-    // Check if already deployed at the correct predicted address
-    let existing_code = provider.get_code_at(predicted).await?;
-    if !existing_code.is_empty() {
-        ui::info(&format!("{name}: already deployed at {predicted}"));
-        return Ok(predicted);
-    }
-
     ui::info(&format!("{name}: deploying via CREATE2..."));
-    let pending = const_deployer
+    let request = const_deployer
         .deploy_call(deploy_bytes, salt)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.as_revert_data()
-                .is_some_and(|data| data.starts_with(&[0x41, 0x02, 0xe8, 0x3a]))
-            {
-                eyre::eyre!("{name}: ConstAddressDeployer.FailedDeploy() — constructor reverted. \
-                    This usually means the constructor args are invalid or stale (e.g. deployer key changed). \
-                    Try resetting the ITS step state.")
-            } else {
-                eyre::eyre!("{name}: send failed: {e}")
-            }
-        })?;
-    broadcast_and_log(pending, &format!("{name}: tx")).await?;
+        .into_transaction_request();
+    deployment_evm::send(&provider, request, name).await.map_err(|error| {
+        if error.to_string().contains("4102e83a") || error.to_string().contains("FailedDeploy") {
+            eyre::eyre!("{name}: FailedDeploy() — constructor reverted; check constructor arguments and the recorded deployer")
+        } else { error }
+    })?;
     ui::kv(&format!("{name} deployed at"), &format!("{predicted}"));
     Ok(predicted)
 }
 
 /// Deploy a contract via CREATE3 using Create3Deployer.
-/// Checks on-chain code at the predicted address to skip if already deployed.
+/// Uses the transaction journal to recover a previous deployment.
 async fn deploy_via_create3<P: Provider>(
     create3: &Create3Deployer::Create3DeployerInstance<P>,
     provider: P,
@@ -565,30 +563,18 @@ async fn deploy_via_create3<P: Provider>(
     salt: FixedBytes<32>,
     predicted: Address,
 ) -> Result<Address> {
-    let existing_code = provider.get_code_at(predicted).await?;
-    if !existing_code.is_empty() {
-        ui::info(&format!("{name}: already deployed at {predicted}"));
-        return Ok(predicted);
-    }
-
     let mut deploy_code = proxy_bytecode;
     deploy_code.extend_from_slice(&constructor_args);
 
     ui::info(&format!("{name}: deploying via CREATE3..."));
-    let pending = create3
+    let request = create3
         .deploy_call(Bytes::from(deploy_code), salt)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.as_revert_data()
-                .is_some_and(|data| data.starts_with(&[0x41, 0x02, 0xe8, 0x3a]))
-            {
-                eyre::eyre!("{name}: FailedDeploy() — constructor reverted")
-            } else {
-                eyre::eyre!("{name}: send failed: {e}")
-            }
-        })?;
-    broadcast_and_log(pending, &format!("{name}: tx")).await?;
+        .into_transaction_request();
+    deployment_evm::send(&provider, request, name).await.map_err(|error| {
+        if error.to_string().contains("4102e83a") || error.to_string().contains("FailedDeploy") {
+            eyre::eyre!("{name}: FailedDeploy() — constructor reverted; check constructor arguments and the recorded deployer")
+        } else { error }
+    })?;
     ui::kv(&format!("{name} deployed at"), &format!("{predicted}"));
     Ok(predicted)
 }

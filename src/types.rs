@@ -128,6 +128,18 @@ pub enum Network {
 }
 
 impl Network {
+    pub const fn deployment_uses_governance(self) -> bool {
+        !matches!(self, Self::DevnetAmplifier)
+    }
+
+    /// ServiceRegistry service used by this network's verifier contracts.
+    pub const fn verifier_service_name(self) -> &'static str {
+        match self {
+            Self::DevnetAmplifier => "validators",
+            Self::Mainnet | Self::Testnet | Self::Stagenet => "amplifier",
+        }
+    }
+
     pub const ALL: [Network; 4] = [
         Self::Mainnet,
         Self::Testnet,

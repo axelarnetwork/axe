@@ -27,7 +27,10 @@ pub async fn update_target_json(
         })?;
 
     contracts.insert(contract_name.to_string(), contract_data);
-    tokio::fs::write(target_json, serde_json::to_string_pretty(&root)? + "\n").await?;
+    crate::commands::deploy::hardened::storage::atomic_config_write(
+        target_json,
+        (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+    )?;
     ui::success(&format!(
         "updated {contract_name} in {}",
         target_json.display()
@@ -54,7 +57,10 @@ pub async fn patch_target_json(
     for (k, v) in patches {
         contract.insert(k.clone(), v.clone());
     }
-    tokio::fs::write(target_json, serde_json::to_string_pretty(&root)? + "\n").await?;
+    crate::commands::deploy::hardened::storage::atomic_config_write(
+        target_json,
+        (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+    )?;
     Ok(())
 }
 

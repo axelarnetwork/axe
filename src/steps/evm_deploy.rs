@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{
     network::TransactionBuilder,
     primitives::{Bytes, keccak256},
@@ -22,7 +23,6 @@ pub async fn run(
     step_kind: &str,
     private_key: &str,
     artifact_path: &str,
-    salt: &Option<String>,
 ) -> Result<()> {
     let bytecode_raw = read_artifact_bytecode(artifact_path).await?;
     let predeploy_codehash = read_artifact_runtime_hash(artifact_path).await?;
@@ -35,7 +35,7 @@ pub async fn run(
 
     let (addr, deploy_method, salt_used) = if step_kind == "deploy-create" {
         let tx = TransactionRequest::default().with_deploy_code(Bytes::from(bytecode_raw.clone()));
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let receipt = deployment_evm::send(&provider, tx, step_name).await?;
         ui::tx_hash("tx hash", &format!("{}", receipt.transaction_hash));
         let addr = receipt
             .contract_address
@@ -49,7 +49,7 @@ pub async fn run(
             ChainContract::ConstAddressDeployer,
         )
         .await?;
-        let salt_string = salt.clone().unwrap_or_else(|| ctx.state.cosm_salt.clone());
+        let salt_string = ctx.state.cosm_salt.clone();
         let salt_bytes = get_salt_from_key(&salt_string);
 
         // For contracts with constructor args (e.g. Operators(address owner)),
@@ -73,14 +73,10 @@ pub async fn run(
             .await?;
         ui::address("predicted address", &format!("{addr}"));
 
-        let pending = const_deployer
+        let request = const_deployer
             .deploy_call(deploy_bytes, salt_bytes)
-            .send()
-            .await?;
-        let tx_hash = *pending.tx_hash();
-        ui::tx_hash("tx submitted", &format!("{tx_hash}"));
-        ui::info("waiting for confirmation...");
-        pending.get_receipt().await?;
+            .into_transaction_request();
+        deployment_evm::send(&provider, request, step_name).await?;
 
         (addr, "create2", Some(salt_string))
     };

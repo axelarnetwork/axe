@@ -6,7 +6,7 @@ use owo_colors::OwoColorize;
 use serde::Deserialize;
 
 use crate::cli::resolve_axelar_id;
-use crate::state::{StepStatus, next_pending_step, read_state};
+use crate::state::{StepStatus, next_pending_step};
 use crate::ui;
 
 /// Slice of the target chains-config JSON read by the status command.
@@ -27,9 +27,18 @@ struct TargetContract {
     address: Option<String>,
 }
 
-pub async fn run(axelar_id: Option<String>) -> Result<()> {
+pub async fn run(
+    axelar_id: Option<String>,
+    network: Option<crate::types::Network>,
+    votes: bool,
+) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
-    let state = read_state(&axelar_id).await?;
+    let state = crate::state::loading::read(&axelar_id, network)
+        .await?
+        .ok_or_else(|| eyre::eyre!("no deployment state"))?;
+    if !state.proposals.is_empty() {
+        crate::commands::deploy::hardened::governance::status(&state, votes).await?;
+    }
 
     ui::section(&format!("Status: {axelar_id}"));
     ui::kv("environment", state.env.as_str());

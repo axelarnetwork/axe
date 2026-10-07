@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{providers::ProviderBuilder, signers::local::PrivateKeySigner};
 use eyre::Result;
 use serde_json::{Map, json};
@@ -33,15 +34,24 @@ pub async fn run(ctx: &DeployContext, step: &Step, private_key: &str) -> Result<
     ui::info(&format!(
         "transferring {contract_name} ownership to {new_owner}"
     ));
-    let tx_hash = ownable
-        .transferOwnership(new_owner)
-        .send()
-        .await?
-        .watch()
-        .await?;
-    ui::tx_hash("tx hash", &format!("{tx_hash}"));
+    let current = ownable.owner().call().await?;
+    if current != new_owner {
+        let signer: PrivateKeySigner = private_key.parse()?;
+        eyre::ensure!(
+            current == signer.address(),
+            "{contract_name}: unexpected current owner {current}"
+        );
+        let request = ownable
+            .transferOwnership(new_owner)
+            .into_transaction_request();
+        deployment_evm::send(&provider, request, "transfer ownership").await?;
+    }
 
     let current_owner = ownable.owner().call().await?;
+    eyre::ensure!(
+        current_owner == new_owner,
+        "ownership transfer postcondition failed"
+    );
     ui::address("verified owner", &format!("{current_owner}"));
 
     let mut patches = Map::new();
