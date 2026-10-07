@@ -128,6 +128,15 @@ pub enum Network {
 }
 
 impl Network {
+    /// Standard voting and signing fractions observed on live contracts on 2026-10-07.
+    pub const fn verifier_threshold(self) -> [u64; 2] {
+        match self {
+            Self::Mainnet => [2, 3],
+            Self::Testnet | Self::Stagenet => [51, 100],
+            Self::DevnetAmplifier => [6, 10],
+        }
+    }
+
     /// Gateway rotation delays verified on deployed gateways on 2026-10-07.
     pub const fn gateway_rotation_delay_seconds(self) -> u64 {
         match self {

@@ -2,6 +2,18 @@ use eyre::Result;
 
 use super::types::Plan;
 use crate::state::{Step, StepKind, StepStatus, default_steps};
+use crate::types::Network;
+
+pub(super) fn validate_network_thresholds(plan: &Plan, network: Network) -> Result<()> {
+    let expected = network.verifier_threshold();
+    eyre::ensure!(
+        plan.voting_threshold == expected && plan.signing_threshold == expected,
+        "new {network} deployments require voting and signing thresholds {}/{}; custom thresholds are only retained for saved deployments",
+        expected[0],
+        expected[1]
+    );
+    Ok(())
+}
 
 pub fn steps(plan: &Plan) -> Result<Vec<Step>> {
     let mut steps = default_steps();

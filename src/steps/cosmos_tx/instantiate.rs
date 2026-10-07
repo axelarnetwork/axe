@@ -119,7 +119,7 @@ pub async fn check_instantiate_permissions(state: &State) -> Result<()> {
     permissions::check(&lcd, &coordinator, &codes).await
 }
 
-fn contract_admin(env: &str) -> &'static str {
+pub(crate) fn contract_admin(env: &str) -> &'static str {
     match env {
         "devnet-amplifier" => "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
         "testnet" => "axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp",

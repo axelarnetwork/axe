@@ -53,11 +53,50 @@ GATEWAY_OPERATOR=0x...
 EVM_GAS_BUDGET=50000000000000000
 COSMOS_FEE_BUDGET=100000000
 REWARD_AMOUNT=100000000
-VOTING_THRESHOLD=2/3
-SIGNING_THRESHOLD=2/3
 BLOCK_EXPIRY=50
 CONFIRMATION_HEIGHT=1
 ```
+
+These settings control different parts of deployment:
+
+| Setting | Meaning | Example |
+| --- | --- | --- |
+| Voting threshold (network preset) | Fraction of verifier voting weight that must agree on a source-chain event. This is not governance proposal voting. | `2/3` needs agreement from 7 of 10 equally weighted verifiers. |
+| Signing threshold (network preset) | Fraction of signer weight needed to sign a proof accepted by the EVM gateway. | `2/3` needs signatures from 7 of 10 equally weighted signers. |
+| `REWARD_AMOUNT` | Initial deposit into each of the verification and signing reward pools, in the configured denomination's base units. Pools can be topped up later. | On testnet/mainnet, `100000000` means 100 AXL per pool, 200 AXL total, plus transaction fees. |
+
+New deployments use fixed voting and signing thresholds from `Network::verifier_threshold`:
+
+| Network | Voting threshold | Signing threshold |
+| --- | --- | --- |
+| Mainnet | `2/3` | `2/3` |
+| Testnet | `51/100` | `51/100` |
+| Stagenet | `51/100` | `51/100` |
+| Devnet-amplifier | `6/10` | `6/10` |
+
+These presets were checked against live contracts on 2026-10-07: all 11 configured
+mainnet chains used `2/3`, 18 of 19 testnet chains used `51/100`, all 12 stagenet
+chains used `51/100`, and 9 of 11 devnet chains used `6/10`. Both voting and signing
+values were queried. Testnet Unichain used `2/3`. The devnet exceptions were
+`xrpl-evm-devnet` (`1/1`) and `xrpl-dev` (`2/3`).
+
+`VOTING_THRESHOLD` and `SIGNING_THRESHOLD` are no longer read from `.env` and can
+be removed. New JSON plans must also match the network presets. Resuming an existing
+deployment preserves its saved voting and signing thresholds exactly, including
+custom values such as Unichain's `2/3`. The approval preview displays the actual
+saved values. `REWARD_AMOUNT` remains a required operator-selected funding amount.
+
+Before approving Cosmos contract setup or proposal 1, axe summarizes the actual
+voting/signing thresholds, voting window, source confirmation setting, governance
+authority, prover operational admin and Cosmos upgrade admin. Pool creation shows
+the reward policy, funding shows the amount per pool and total before fees, and
+gateway deployment shows the signer rotation delay and operator. These summaries
+appear before the step's y/n prompt, in addition to the transaction payload preview.
+
+The network's reward participation threshold determines which verifiers qualify
+for rewards. It is separate from the voting and signing thresholds above.
+The network's rewards per epoch determine the ongoing allocation from each pool.
+`REWARD_AMOUNT` only funds that balance and does not change the allocation rate.
 
 No verifier roster is required in `.env`. `EXPECTED_INITIAL_VERIFIERS` is no
 longer read and can be removed. At activation, axe discovers eligible verifiers

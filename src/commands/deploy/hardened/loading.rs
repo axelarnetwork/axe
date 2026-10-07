@@ -10,9 +10,16 @@ pub async fn prepare(chain: &str, network: Option<Network>, options: &Options) -
         validate_supported_state(state)?;
     }
     super::session::require_hardening();
+    let env = existing
+        .as_ref()
+        .map(|state| state.env)
+        .or(network)
+        .or_else(|| std::env::var("ENV").ok().and_then(|env| env.parse().ok()))
+        .ok_or_else(|| eyre::eyre!("specify --network or ENV"))?;
     let supplied = match &options.plan {
         Some(path) => serde_json::from_slice::<super::types::Plan>(&tokio::fs::read(path).await?)?,
         None => super::environment::load(
+            env,
             existing
                 .as_ref()
                 .and_then(|state| state.hardened_plan.as_ref()),
@@ -20,12 +27,9 @@ pub async fn prepare(chain: &str, network: Option<Network>, options: &Options) -
         )?,
     };
     super::plan::validate(&supplied)?;
-    let env = existing
-        .as_ref()
-        .map(|state| state.env)
-        .or(network)
-        .or_else(|| std::env::var("ENV").ok().and_then(|env| env.parse().ok()))
-        .ok_or_else(|| eyre::eyre!("specify --network or ENV"))?;
+    if existing.is_none() {
+        super::plan::validate_network_thresholds(&supplied, env)?;
+    }
     if options.activate {
         let state = existing.as_ref().ok_or_else(|| {
             eyre::eyre!("--activate is only valid at or after the verifier checkpoint")
@@ -67,7 +71,7 @@ pub async fn initialize(network: Option<Network>) -> Result<()> {
         .ok_or_else(|| eyre::eyre!("specify --network or ENV"))?;
     validate_initial_network(&chain, env)?;
     super::session::require_hardening();
-    let plan = super::environment::load(None, |name| std::env::var(name).ok())?;
+    let plan = super::environment::load(env, None, |name| std::env::var(name).ok())?;
     crate::commands::init::run(plan).await
 }
 

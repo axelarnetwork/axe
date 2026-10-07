@@ -5,11 +5,12 @@ use eyre::Result;
 
 use super::{plan, types::Plan};
 use crate::cosmos::derive_axelar_wallet;
+use crate::types::Network;
 
 #[cfg(test)]
 mod tests;
 
-const FIELDS: [&str; 15] = [
+const FIELDS: [&str; 13] = [
     "CHAIN_ID",
     "AXELAR_CHAIN_ID",
     "GATEWAY_OWNER",
@@ -21,14 +22,16 @@ const FIELDS: [&str; 15] = [
     "EVM_GAS_BUDGET",
     "COSMOS_FEE_BUDGET",
     "REWARD_AMOUNT",
-    "VOTING_THRESHOLD",
-    "SIGNING_THRESHOLD",
     "BLOCK_EXPIRY",
     "CONFIRMATION_HEIGHT",
 ];
 
 /// Preserve saved JSON-plan runs, but never silently ignore a partial .env plan.
-pub(super) fn load(saved: Option<&Plan>, lookup: impl Fn(&str) -> Option<String>) -> Result<Plan> {
+pub(super) fn load(
+    network: Network,
+    saved: Option<&Plan>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Plan> {
     let values: BTreeMap<_, _> = FIELDS
         .iter()
         .filter_map(|name| lookup(name).map(|value| (*name, value.trim().to_owned())))
@@ -71,8 +74,9 @@ pub(super) fn load(saved: Option<&Plan>, lookup: impl Fn(&str) -> Option<String>
         evm_gas_budget: value("EVM_GAS_BUDGET").into(),
         cosmos_fee_budget: value("COSMOS_FEE_BUDGET").into(),
         reward_amount: value("REWARD_AMOUNT").into(),
-        voting_threshold: threshold("VOTING_THRESHOLD", value("VOTING_THRESHOLD"))?,
-        signing_threshold: threshold("SIGNING_THRESHOLD", value("SIGNING_THRESHOLD"))?,
+        voting_threshold: saved.map_or(network.verifier_threshold(), |plan| plan.voting_threshold),
+        signing_threshold: saved
+            .map_or(network.verifier_threshold(), |plan| plan.signing_threshold),
         block_expiry: parse("BLOCK_EXPIRY", value("BLOCK_EXPIRY"))?,
         confirmation_height: parse("CONFIRMATION_HEIGHT", value("CONFIRMATION_HEIGHT"))?,
     };
@@ -106,14 +110,4 @@ fn derive_prover_admin(lookup: &impl Fn(&str) -> Option<String>) -> Result<Strin
 
 fn parse<T: FromStr>(name: &str, value: &str) -> Result<T> {
     value.parse().map_err(|_| eyre::eyre!("invalid {name}"))
-}
-
-fn threshold(name: &str, value: &str) -> Result<[u64; 2]> {
-    let (numerator, denominator) = value
-        .split_once('/')
-        .ok_or_else(|| eyre::eyre!("{name} must be a fraction, for example 2/3"))?;
-    Ok([
-        parse(name, numerator.trim())?,
-        parse(name, denominator.trim())?,
-    ])
 }
