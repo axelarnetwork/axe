@@ -439,7 +439,7 @@ deployments and replacement of rejected proposals are unsupported.
 ## Rehearsal acceptance
 
 **This acceptance checklist has not been executed end to end on live testnet.**
-Offline tests and the local Anvil gateway test do not establish mainnet readiness.
+Offline tests do not establish mainnet readiness.
 
 Before using this on mainnet, run a fresh testnet deployment and record evidence:
 
@@ -489,16 +489,5 @@ Offline Rust regression tests cover journal persistence, policy/step drift,
 proposal payload matching, key stripping, locking, sequence safety, cached
 confirmations, replacement execution invariants, original-transaction wins,
 delayed finality, lost task context, verifier snapshots, LCD balance request paths
-and Cosmos CheckTx fee recovery. The local gateway deployment test uses real
-installed gateway artifacts:
-
-```bash
-python3 scripts/test-hardened-gateway.py \
-  ../axelar-contract-deployments/node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts
-```
-
-It starts and stops its own Anvil node and requires `anvil` and `cast` on PATH.
-It checks that the original two gateway CREATE transactions initialize the
-approved 2-of-3 signer set, exact signer hash, owner and operator, without any
-pause or upgrade transactions. Passing these local tests does not replace the
-live testnet rehearsal above.
+and Cosmos CheckTx fee recovery. Passing these tests does not replace the live
+testnet rehearsal above.
