@@ -128,7 +128,7 @@ async fn execute(ctx: &mut DeployContext, activate: bool) -> Result<()> {
             false
         };
         if !recovered {
-            super::preview::approve(ctx, &step).await?;
+            super::preview::show(ctx, &step).await?;
         }
         let key = signer_for(ctx, &step.name)?;
         let defaults = artifact_paths_for_step(&step.name, &super::inputs::root(&ctx.state)?);
@@ -156,12 +156,6 @@ async fn execute(ctx: &mut DeployContext, activate: bool) -> Result<()> {
         super::evidence::capture(ctx).await?;
         mark_step_completed(&mut ctx.state, index);
         save_state(&ctx.state).await?;
-        if ctx.state.env.deployment_uses_governance()
-            && matches!(step.kind, StepKind::CosmosTx { .. })
-            && step.name != "AddRewards"
-        {
-            return Err(super::handoff::submitted(&ctx.state, &step));
-        }
     }
     eyre::ensure!(
         ctx.state

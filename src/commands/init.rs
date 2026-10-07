@@ -149,7 +149,7 @@ pub async fn run(plan: crate::commands::deploy::hardened::types::Plan) -> Result
     crate::steps::prover_admin::validate(&mut state).await?;
     crate::steps::cosmos_tx::check_instantiate_permissions(&state).await?;
     print_deployer_addresses(&state)?;
-    approve_initialization(&state).await?;
+    preview_initialization(&state)?;
     write_chain_config(&state, &chain_name, chain_id, &token_symbol, decimals).await?;
 
     ui::section("State");
@@ -219,7 +219,7 @@ async fn write_chain_config(
     Ok(())
 }
 
-async fn approve_initialization(state: &State) -> Result<()> {
+fn preview_initialization(state: &State) -> Result<()> {
     let plan = state
         .hardened_plan
         .as_ref()
@@ -229,9 +229,5 @@ async fn approve_initialization(state: &State) -> Result<()> {
     );
     ui::kv("configuration", &state.target_json.display().to_string());
     ui::info(&serde_json::to_string_pretty(plan)?);
-    eyre::ensure!(
-        ui::confirm("Initialize this deployment?").await,
-        "initialization declined; no deployment state written"
-    );
     Ok(())
 }

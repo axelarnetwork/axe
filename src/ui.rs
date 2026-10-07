@@ -125,7 +125,7 @@ pub fn action_required(lines: &[&str]) {
     println!();
 }
 
-/// Deployment requires per-step approvals. Redirected stdin cannot approve writes.
+/// Deployment requires transaction approvals. Redirected stdin cannot approve writes.
 pub fn require_interactive_deployment() -> eyre::Result<()> {
     eyre::ensure!(
         io::stdin().is_terminal(),

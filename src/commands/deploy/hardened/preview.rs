@@ -9,7 +9,7 @@ use crate::ui;
 #[cfg(test)]
 mod tests;
 
-pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
+pub async fn show(ctx: &DeployContext, step: &Step) -> Result<()> {
     let plan = session::current()?.plan.clone();
     ui::section(&step.name);
     ui::kv(
@@ -48,11 +48,6 @@ pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
             "Minimum signer rotation delay",
             &format!("{} seconds", ctx.state.env.gateway_rotation_delay_seconds()),
         );
-    }
-    if !ui::confirm("Proceed with this step?").await {
-        return Err(session::pause(
-            "Step declined. This step remains pending. Run the continue command when you are ready to review and approve it.",
-        ));
     }
     Ok(())
 }
@@ -204,22 +199,22 @@ fn description(name: &str) -> &'static str {
             "Write the approved verifier/prover settings and predicted gateway address to the local deployment configuration."
         }
         "InstantiateChainContracts" => {
-            "Batch 1: submit an expedited proposal to instantiate Gateway, VotingVerifier and MultisigProver. Display messages and live deposit before approval, then save and exit."
+            "Batch 1: submit an expedited proposal to instantiate Gateway, VotingVerifier and MultisigProver. Display messages and live deposit before approval, then save progress and proceed to the governance wait."
         }
         "WaitInstantiateProposal" | "WaitRegisterProposal" | "WaitItsHubRegistration" => {
-            "Check the saved proposal once. Continue only if it passed and its contents match the approved submission; otherwise save and exit."
+            "Monitor the saved proposal until voting ends. Continue only if it passed and matches the approved submission. Ctrl+C is safe while waiting; resume recovers the same proposal."
         }
         "SaveDeployedContracts" => {
             "Read the Coordinator deployment and save its three contract addresses locally, then verify their code and configuration."
         }
         "RegisterDeployment" => {
-            "Batch 2: register the deployment and create both reward pools atomically. Submit, save and exit."
+            "Batch 2: register the deployment and create both reward pools atomically. Submit, save progress and proceed to the governance wait."
         }
         "AddRewards" => {
             "Fund both reward pools with the plan's reward amount. These payments are journaled to prevent duplicate funding on resume."
         }
         "RegisterItsOnHub" => {
-            "Batch 3: register the deployed ITS edge with the ITS Hub. Submit the expedited proposal, save and exit."
+            "Batch 3: register the deployed ITS edge with the ITS Hub. Submit the expedited proposal, save progress and proceed to the governance wait."
         }
         "WaitForVerifierSet" => {
             "Discover eligible verifiers and check the service minimum, initialize the prover if needed, then review and approve its actual initial signer set. Known names are informational."

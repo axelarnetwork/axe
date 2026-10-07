@@ -69,13 +69,14 @@ state remain readable, but subsequent state saves strip credentials, including
 when a GMP test caches its SenderReceiver address. Keep credentials in `.env`
 or the environment for future runs. Status requires no credentials.
 
-`deploy init` and `deploy run` require interactive stdin for per-step y/n
-approvals. They reject redirected or piped stdin before initialization or RPC
-access. Run directly in a terminal, or allocate one with `ssh -t` remotely.
+`deploy init` and `deploy run` require interactive stdin for transaction and
+trust-change approvals. Read-only and local steps do not prompt. These commands
+reject redirected or piped stdin before initialization or RPC access. Run directly
+in a terminal, or allocate one with `ssh -t` remotely.
 If the RPC does not expose `eth_syncing` (JSON-RPC `-32601`, including that
-response wrapped in HTTP 403), axe warns that sync status is unknown and asks
-whether to continue with the contract tests. A syncing node, stale blocks,
-unrelated HTTP errors and failed deployment-critical checks still block the run.
+response wrapped in HTTP 403), axe warns that sync status is unknown and continues
+to the contract tests, with approval before each new transaction. A syncing node,
+stale blocks, unrelated HTTP errors and failed deployment-critical checks still block the run.
 There is no blanket compatibility-check bypass.
 Devnet uses the `validators` ServiceRegistry service; mainnet, testnet and
 stagenet use `amplifier`. Preflight queries that service before any transaction.

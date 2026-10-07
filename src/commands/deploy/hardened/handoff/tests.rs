@@ -1,30 +1,25 @@
-use super::{proposal_actions, resume_command, shell_word, verifier_actions};
+use super::{proposal_actions, resume_command, verifier_actions};
 use crate::{state::StepStatus, types::Network};
 
 #[test]
-fn resume_uses_the_running_binary_and_activation_only_when_ready() {
+fn resume_uses_axe_and_activation_only_when_ready() {
     let mut state = crate::commands::deploy::hardened::tests::initial_state();
-    let binary = "./target/release/axe";
-    assert!(resume_command(&state, binary).starts_with(binary));
-    assert!(!resume_command(&state, binary).contains("--activate"));
+    assert!(resume_command(&state).starts_with("axe --network "));
+    assert!(!resume_command(&state).contains("--activate"));
     for step in &mut state.steps {
         if step.name == "WaitForVerifierSet" {
             break;
         }
         step.status = StepStatus::Completed;
     }
-    assert!(resume_command(&state, binary).ends_with(" --activate"));
+    assert!(resume_command(&state).ends_with(" --activate"));
     for step in &mut state.steps {
         if step.name == "RegisterItsOnHub" {
             break;
         }
         step.status = StepStatus::Completed;
     }
-    assert!(resume_command(&state, binary).ends_with(" --activate"));
-    assert_eq!(
-        shell_word("/tmp/axe's build/axe"),
-        "'/tmp/axe'\\''s build/axe'"
-    );
+    assert!(resume_command(&state).ends_with(" --activate"));
 }
 
 #[test]

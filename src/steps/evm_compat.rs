@@ -164,13 +164,6 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
         ));
         return summarise(&checks);
     }
-    if checks
-        .iter()
-        .any(|check| matches!(check.outcome, CheckOutcome::Warn(_)))
-        && !ui::confirm("Continue with contract tests despite the node health warning?").await
-    {
-        eyre::bail!("EVM compatibility check cancelled before contract tests");
-    }
 
     println!();
     ui::info("Phase 2: Contract lifecycle");

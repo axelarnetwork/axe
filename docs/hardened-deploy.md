@@ -144,7 +144,7 @@ Reward-pool policy comes from `reward_pool_settings` in the checked-out axe code
 not the public plan: mainnet uses epoch duration `47250` Axelar blocks, participation threshold
 `8/10` and `5553500000` uaxl (5,553.5 AXL) of rewards per epoch per pool. These match
 both pools on all 11 registered mainnet Amplifier edge chains queried on 2026-10-07.
-The step approval summary and proposal preview
+The step summary and proposal preview
 show these values and postconditions check them. `REWARD_AMOUNT` is the initial
 payment to each pool, not its ongoing per-epoch reward rate. Gas budgets
 are enforced spending limits, not guarantees about future gas prices. A run
@@ -186,6 +186,12 @@ input stops the flow; dependent steps are not skipped.
 access and explain how to proceed if stdin is redirected. There is no unattended
 approval bypass. Status can be run without a terminal.
 
+Read-only checks, governance waits and local state/configuration steps run without
+y/n prompts. Step summaries still show settings and effects before each new EVM
+or Cosmos transaction asks for approval. Separate approvals remain for choosing
+the initial signer set, accepting protocol/rotation changes and explicit recovery
+actions; these change trusted inputs or which transactions can be sent.
+
 The original command had four proposal submissions. Registration now includes
 reward-pool creation, reducing the flow to three expedited proposal batches:
 
@@ -194,14 +200,16 @@ reward-pool creation, reducing the flow to three expedited proposal batches:
    governance execution.
 3. Register the ITS edge on the ITS Hub.
 
-Each proposal pause names the proposal to vote on. On testnet it prints
+Each proposal wait names the proposal to vote on. On testnet it prints
 `bash scripts/vote_testnet_proposal.sh "YOUR_VALIDATOR_NAMESPACE" <proposal-id>`:
 select your testnet kubectl context and replace the namespace placeholder before
 running it from the axe repo. The script votes Yes from each matching validator
-pod; axe only prints the command. Mainnet pauses instead direct you to coordinate
-with validator operators. Casting a vote does not end the voting period; resume
-after the proposal reaches PASSED. Only the applicable resume command is shown,
-using the executable you launched. `--activate` is added at the verifier checkpoint
+pod; axe only prints the command. Mainnet instructions instead direct you to coordinate
+with validator operators. Casting a vote does not end the voting period. Axe
+checks every 15 seconds and continues after PASSED. Each new transaction still
+requires approval.
+Ctrl+C is safe while waiting: progress is already saved. Only the applicable
+resume command is shown, using `axe`. `--activate` is added at the verifier checkpoint
 and retained for subsequent steps, not offered during the first two batches.
 
 Deployment pauses and errors end with a handoff showing the network and chain,
@@ -212,8 +220,9 @@ the background after it exits. Recovery flags mentioned in an error must be
 added to the continue command. Keep the state and journal after errors: a lost
 connection does not prove that a submitted transaction failed.
 
-Axe exits after submitting each proposal. Resume checks the recorded proposal
-once; pending governance exits again instead of waiting for the voting period.
+Axe saves each proposal submission before proceeding to its governance wait.
+You can leave it running or press Ctrl+C and resume later; it checks the same
+recorded proposal and never submits a replacement.
 Rejected, failed or changed proposals stop the flow without creating replacements.
 
 ```bash
@@ -428,8 +437,8 @@ Cosmos actions already submitted.
 Axe waits up to 30 minutes for inclusion and the selected confirmation target;
 Ctrl+C is safe throughout. Set
 `--evm-wait-seconds <seconds>` to change this bound (`0` pauses immediately when
-not ready). A timeout prints resume instructions. Governance votes still cause
-immediate pause-and-exit, regardless of this setting.
+not ready). A timeout prints resume instructions. Governance waits are separate:
+axe monitors voting until it ends or you stop it with Ctrl+C.
 
 For a dropped or underpriced EVM transaction, append
 `--bump-fees 'StepName/transaction label'`, using the exact action printed by axe.
@@ -495,7 +504,8 @@ Offline tests do not establish mainnet readiness.
 Before using this on mainnet, run a fresh testnet deployment and record evidence:
 
 1. Omit or mismatch each future signer and verify no transaction is submitted.
-2. Decline a step and a transaction, then resume; verify the action remains pending.
+2. Verify read-only and local steps proceed without confirmation. Decline a
+   transaction, then resume; verify it was not submitted and remains pending.
 3. Close the process during a broadcast and immediately after confirmation.
    Resume and check that hashes, addresses, proposal IDs and reward payments are unchanged.
 4. Close after each of the three proposal submissions. Resume while voting is

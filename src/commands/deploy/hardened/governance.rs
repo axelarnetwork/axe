@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use base64::Engine;
 use eyre::Result;
 use prost::Message;
@@ -56,16 +58,21 @@ pub async fn check(ctx: &DeployContext, key: &str) -> Result<()> {
         .get(key)
         .ok_or_else(|| eyre::eyre!("missing proposal for {key}"))?;
     let (lcd, _, _, _) = read_axelar_config(&ctx.target_json).await?;
-    let proposal = lcd_query_proposal(&lcd, *id).await?;
+    let mut proposal = lcd_query_proposal(&lcd, *id).await?;
     validate_identity(ctx, key, *id, &proposal, &lcd).await?;
     print_proposal(*id, &proposal);
+    if proposal["status"] == "PROPOSAL_STATUS_VOTING_PERIOD" {
+        super::handoff::proposal(&ctx.state, *id, proposal["voting_end_time"].as_str());
+        proposal = wait_until_voting_ends(&lcd, *id, proposal, Duration::from_secs(15)).await?;
+        validate_identity(ctx, key, *id, &proposal, &lcd).await?;
+        print_proposal(*id, &proposal);
+    }
     match proposal["status"].as_str() {
-        Some("PROPOSAL_STATUS_PASSED") => Ok(()),
-        Some("PROPOSAL_STATUS_VOTING_PERIOD") => {
-            super::handoff::proposal(&ctx.state, *id, proposal["voting_end_time"].as_str());
-            Err(pause(format!(
-                "Deployment paused until proposal {id} passes"
-            )))
+        Some("PROPOSAL_STATUS_PASSED") => {
+            ui::success(&format!(
+                "Proposal {id} passed and matches the approved submission. Continuing deployment."
+            ));
+            Ok(())
         }
         Some("PROPOSAL_STATUS_DEPOSIT_PERIOD") => Err(pause(format!(
             "Proposal {id} is still in its deposit period; inspect its deposit requirements before voting. No replacement was submitted"
@@ -78,6 +85,32 @@ pub async fn check(ctx: &DeployContext, key: &str) -> Result<()> {
             );
         }
     }
+}
+
+async fn wait_until_voting_ends(
+    lcd: &str,
+    id: u64,
+    mut proposal: Value,
+    interval: Duration,
+) -> Result<Value> {
+    let spinner = ui::wait_spinner(&format!(
+        "Waiting for proposal {id} to pass — checking every {}s; Ctrl+C is safe",
+        interval.as_secs()
+    ));
+    let result = async {
+        while proposal["status"] == "PROPOSAL_STATUS_VOTING_PERIOD" {
+            tokio::time::sleep(interval).await;
+            proposal = lcd_query_proposal(lcd, id).await?;
+            spinner.set_message(format!(
+                "Proposal {id}: last checked {}; Ctrl+C is safe",
+                chrono::Utc::now().format("%H:%M:%S UTC")
+            ));
+        }
+        Ok(proposal)
+    }
+    .await;
+    spinner.finish_and_clear();
+    result
 }
 
 fn print_proposal(id: u64, proposal: &Value) {

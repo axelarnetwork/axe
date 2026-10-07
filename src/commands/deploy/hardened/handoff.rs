@@ -1,5 +1,5 @@
 use crate::{
-    state::{State, Step, next_pending_step},
+    state::{State, next_pending_step},
     types::Network,
     ui,
 };
@@ -7,7 +7,7 @@ use eyre::Result;
 
 use super::verifiers::contract;
 
-pub(super) fn resume_command(state: &State, executable: &str) -> String {
+pub(super) fn resume_command(state: &State) -> String {
     let activate = next_pending_step(state).is_some_and(|(next, _)| {
         state
             .steps
@@ -16,16 +16,11 @@ pub(super) fn resume_command(state: &State, executable: &str) -> String {
             .is_some_and(|checkpoint| next >= checkpoint)
     });
     format!(
-        "{} --network {} deploy run --axelar-id {}{}",
-        shell_word(executable),
+        "axe --network {} deploy run --axelar-id {}{}",
         state.env,
         state.axelar_id,
         if activate { " --activate" } else { "" }
     )
-}
-
-pub(super) fn executable() -> String {
-    std::env::args().next().unwrap_or_else(|| "axe".into())
 }
 
 pub(super) fn stopped(state: &State, error: &eyre::Report, paused: bool) {
@@ -61,38 +56,16 @@ pub(super) fn stopped(state: &State, error: &eyre::Report, paused: bool) {
     ui::info(
         "On resume, axe checks recorded transactions before continuing unfinished steps. A connection error does not mean a submitted transaction failed.",
     );
-    let executable = executable();
     ui::info("CONTINUE THIS DEPLOYMENT (after the required action):");
-    println!("\n  {}\n", resume_command(state, &executable));
+    println!("\n  {}\n", resume_command(state));
     ui::info("CHECK PROGRESS (read-only):");
     println!(
-        "\n  {} --network {} deploy status --axelar-id {}\n",
-        shell_word(&executable),
-        state.env,
-        state.axelar_id
+        "\n  axe --network {} deploy status --axelar-id {}\n",
+        state.env, state.axelar_id
     );
     ui::info(
         "For proposal voters, add --votes to the status command. If recovery requires extra flags, add the flags shown in the error to the continue command.",
     );
-}
-
-pub(super) fn shell_word(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
-    {
-        value.into()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-pub(super) fn submitted(state: &State, step: &Step) -> eyre::Report {
-    if let Some(id) = step.proposal_key().and_then(|key| state.proposals.get(key)) {
-        proposal(state, *id, None);
-    }
-    super::session::pause("Deployment paused for governance. Progress saved; you can close axe.")
 }
 
 pub(super) fn proposal(state: &State, id: u64, voting_end: Option<&str>) {
@@ -102,7 +75,12 @@ pub(super) fn proposal(state: &State, id: u64, voting_end: Option<&str>) {
     }
     lines.extend([
         "Wait until the proposal status is PASSED. Casting a vote does not end the voting period.".into(),
-        "Then rerun the resume command below. Axe recovers this proposal; it does not submit another one.".into(),
+        "Axe checks every 15 seconds and continues when the proposal passes. You will be asked to approve each new transaction.".into(),
+        "Ctrl+C is safe while waiting. Progress and the proposal are saved; resuming will not submit another proposal.".into(),
+        "If you stop axe, continue this deployment with:".into(),
+        format!("  {}", resume_command(state)),
+        "Check progress and votes from another terminal:".into(),
+        format!("  axe --network {} deploy status --axelar-id {} --votes", state.env, state.axelar_id),
     ]);
     show(&lines);
 }
