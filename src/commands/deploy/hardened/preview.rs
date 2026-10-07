@@ -28,9 +28,7 @@ pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
     }
     show_authority(&plan, &step.name);
     if step.name == "RegisterDeployment" {
-        ui::info(
-            "Reward-pool epoch length, participation threshold and rewards per epoch use axe's network constants. Review their exact values in the transaction preview; REWARD_AMOUNT only sets the initial funding per pool.",
-        );
+        show_reward_pool_settings(ctx);
     }
     if !ui::confirm("Proceed with this step?").await {
         return Err(session::pause(
@@ -38,6 +36,40 @@ pub async fn approve(ctx: &DeployContext, step: &Step) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn show_reward_pool_settings(ctx: &DeployContext) {
+    let settings = crate::steps::cosmos_tx::reward_pool_settings(ctx.state.env.as_str());
+    let rewards = settings.rewards_per_epoch_uaxl;
+    let [numerator, denominator] = settings.participation_threshold;
+    ui::section("Reward settings for both pools");
+    ui::kv(
+        "Pools",
+        "Verification (VotingVerifier) and signing (Multisig)",
+    );
+    ui::kv(
+        "Epoch length",
+        &format!("{} Axelar blocks", settings.epoch_blocks),
+    );
+    ui::kv(
+        "Rewards per epoch, per pool",
+        &format!(
+            "{}.{:06} AXL ({rewards} uaxl)",
+            rewards / 1_000_000,
+            rewards % 1_000_000
+        ),
+    );
+    ui::kv(
+        "Required participation",
+        &format!("{numerator}/{denominator}"),
+    );
+    ui::info(
+        "Each pool's reward amount is shared among qualifying verifiers, not paid to each verifier.",
+    );
+    ui::info("These network settings will be submitted in the pool-creation messages below.");
+    ui::info(
+        "REWARD_AMOUNT is a separate initial deposit into each pool, sent later in AddRewards.",
+    );
 }
 
 fn description(name: &str) -> &'static str {

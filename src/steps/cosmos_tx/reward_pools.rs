@@ -5,6 +5,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use super::StepTxContext;
+use super::defaults::RewardPoolSettings;
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{
     build_execute_msg_any, build_execute_msg_any_with_funds, read_axelar_contract_field,
@@ -12,24 +13,33 @@ use crate::cosmos::{
 };
 use crate::ui;
 
+pub(crate) fn reward_pool_settings(env: &str) -> RewardPoolSettings {
+    let (epoch_blocks, participation_threshold, rewards_per_epoch_uaxl) = match env {
+        "devnet-amplifier" => (100, [7, 10], 100),
+        "mainnet" => (47_250, [8, 10], 5_553_500_000),
+        _ => (600, [7, 10], 100),
+    };
+    RewardPoolSettings {
+        epoch_blocks,
+        participation_threshold,
+        rewards_per_epoch_uaxl,
+    }
+}
+
 pub(crate) fn reward_pool_messages(
     env: &str,
     chain: &str,
     voting_verifier: &str,
     multisig: &str,
 ) -> [Value; 2] {
-    let (epoch_duration, participation_threshold, rewards_per_epoch) = match env {
-        "devnet-amplifier" => ("100", json!(["7", "10"]), "100"),
-        "mainnet" => ("14845", json!(["8", "10"]), "3424660000"),
-        _ => ("600", json!(["7", "10"]), "100"),
-    };
+    let settings = reward_pool_settings(env);
     let create = |contract: &str| {
         json!({
             "create_pool": {
                 "params": {
-                    "epoch_duration": epoch_duration,
-                    "participation_threshold": participation_threshold,
-                    "rewards_per_epoch": rewards_per_epoch
+                    "epoch_duration": settings.epoch_blocks.to_string(),
+                    "participation_threshold": settings.participation_threshold.map(|value| value.to_string()),
+                    "rewards_per_epoch": settings.rewards_per_epoch_uaxl.to_string()
                 },
                 "pool_id": {
                     "chain_name": chain,

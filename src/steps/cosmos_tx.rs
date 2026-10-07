@@ -10,7 +10,7 @@ mod reward_pools;
 mod submission;
 
 pub use instantiate::check_instantiate_permissions;
-pub(crate) use reward_pools::reward_pool_messages;
+pub(crate) use reward_pools::{reward_pool_messages, reward_pool_settings};
 
 use eyre::Result;
 use serde_json::Value;

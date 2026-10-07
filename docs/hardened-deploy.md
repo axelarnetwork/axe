@@ -101,10 +101,12 @@ The live deposit is displayed separately from fees. Stale chains-config deposit
 values cannot override the chain's requirement; a deposit is escrowed funding,
 not the transaction fee. The flow only reuses it after a passed proposal and an
 actual refund.
-Reward-pool policy comes from `reward_pool_messages` in the checked-out axe code,
-not the public plan: mainnet uses epoch duration `14845`, participation threshold
-`8/10` and `3424660000` base units of rewards per epoch. The proposal preview
-shows these values and postconditions check them. `REWARD_AMOUNT` is the initial
+Reward-pool policy comes from `reward_pool_settings` in the checked-out axe code,
+not the public plan: mainnet uses epoch duration `47250` Axelar blocks, participation threshold
+`8/10` and `5553500000` uaxl (5,553.5 AXL) of rewards per epoch per pool. These match
+both pools on all 11 registered mainnet Amplifier edge chains queried on 2026-10-07.
+The step approval summary and proposal preview
+show these values and postconditions check them. `REWARD_AMOUNT` is the initial
 payment to each pool, not its ongoing per-epoch reward rate. Gas budgets
 are enforced spending limits, not guarantees about future gas prices. A run
 stops if a transaction would exceed its budget.
