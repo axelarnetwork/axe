@@ -2,7 +2,6 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
-use crate::types::Network;
 use crate::ui;
 
 pub async fn run(ctx: &DeployContext) -> Result<()> {
@@ -13,7 +12,11 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
             eyre::eyre!("no predictedGatewayAddress in state. Run predict-address step first")
         })?
         .to_string();
-    let env = ctx.state.env;
+    let plan = ctx
+        .state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
 
     let content = tokio::fs::read_to_string(&ctx.target_json).await?;
     let mut root: Value = serde_json::from_str(&content)?;
@@ -24,41 +27,16 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         .unwrap_or(&ctx.axelar_id)
         .to_string();
 
-    let (governance_address, service_name, voting_threshold, signing_threshold) = match env {
-        Network::DevnetAmplifier => (
-            "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
-            "validators",
-            json!(["6", "10"]),
-            json!(["6", "10"]),
-        ),
-        Network::Testnet => (
-            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-            "amplifier",
-            json!(["51", "100"]),
-            json!(["51", "100"]),
-        ),
-        Network::Mainnet => (
-            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-            "amplifier",
-            json!(["2", "3"]),
-            json!(["2", "3"]),
-        ),
-        Network::Stagenet => (
-            "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
-            "amplifier",
-            json!(["51", "100"]),
-            json!(["51", "100"]),
-        ),
-    };
+    let governance_address = root["axelar"]["governanceAddress"].clone();
 
     // Add VotingVerifier chain config
     let voting_verifier_config = json!({
         "governanceAddress": governance_address,
-        "serviceName": service_name,
+        "serviceName": ctx.state.env.verifier_service_name(),
         "sourceGatewayAddress": predicted_addr,
-        "votingThreshold": voting_threshold,
-        "blockExpiry": 50,
-        "confirmationHeight": 1,
+        "votingThreshold": plan.voting_threshold.map(|v| v.to_string()),
+        "blockExpiry": plan.block_expiry,
+        "confirmationHeight": plan.confirmation_height,
         "msgIdFormat": "hex_tx_hash_and_event_index",
         "addressFormat": "eip55"
     });
@@ -74,9 +52,9 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     // Add MultisigProver chain config
     let multisig_prover_config = json!({
         "governanceAddress": governance_address,
-        "adminAddress": super::prover_admin::default_address(env),
-        "signingThreshold": signing_threshold,
-        "serviceName": service_name,
+        "adminAddress": plan.prover_admin,
+        "signingThreshold": plan.signing_threshold.map(|v| v.to_string()),
+        "serviceName": ctx.state.env.verifier_service_name(),
         "verifierSetDiffThreshold": 0,
         "encoder": "abi",
         "keyType": "ecdsa"
@@ -90,11 +68,10 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     mp.insert(chain_axelar_id.clone(), multisig_prover_config);
     ui::success(&format!("added MultisigProver.{chain_axelar_id} config"));
 
-    tokio::fs::write(
+    crate::commands::deploy::hardened::storage::atomic_config_write(
         &ctx.target_json,
-        serde_json::to_string_pretty(&root)? + "\n",
-    )
-    .await?;
+        (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+    )?;
     ui::success(&format!("updated {}", ctx.target_json.display()));
 
     Ok(())

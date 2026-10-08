@@ -209,8 +209,8 @@ async fn submit(
     check_axelar_balance(
         &cfg.lcd,
         &cfg.chain_id,
-        submitter,
-        &cfg.fee_denom,
+        &submitter.parse::<cosmrs::AccountId>()?,
+        &cfg.fee_denom.parse::<cosmrs::Denom>()?,
         min_balance,
     )
     .await?;

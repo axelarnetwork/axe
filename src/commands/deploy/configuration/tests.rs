@@ -50,7 +50,7 @@ fn run_reports_all_missing_credentials_and_salts() {
     state.its_salt = Some(" ".into());
     state.its_proxy_salt = None;
 
-    let error = validate_state(&mut state, None).unwrap_err().to_string();
+    let error = validate_state(&mut state).unwrap_err().to_string();
     for name in [
         "DEPLOYER_PRIVATE_KEY",
         "GATEWAY_DEPLOYER_PRIVATE_KEY",
@@ -72,7 +72,7 @@ fn invalid_credentials_are_reported_without_exposing_their_values() {
     state.gateway_deployer_private_key = Some("invalid key must not be printed".into());
     state.rpc_url = "file:///tmp/rpc".into();
 
-    let error = validate_state(&mut state, None).unwrap_err().to_string();
+    let error = validate_state(&mut state).unwrap_err().to_string();
     for name in [
         "MNEMONIC",
         "MULTISIG_PROVER_MNEMONIC",
@@ -102,7 +102,7 @@ fn repair_preserves_progress_and_existing_keys() {
         "DEPLOYER_PRIVATE_KEY" => Some("must not overwrite saved key".into()),
         _ => None,
     });
-    validate_state(&mut state, None).unwrap();
+    validate_state(&mut state).unwrap();
 
     assert_eq!(state.gateway_deployer, Some(signer.address()));
     assert_eq!(state.deployer_private_key.as_deref(), Some(key.as_str()));
@@ -117,24 +117,10 @@ fn mismatched_gateway_key_cannot_change_the_saved_deployer() {
     let address = PrivateKeySigner::random().address();
     state.gateway_deployer = Some(address);
 
-    let error = validate_state(&mut state, None).unwrap_err().to_string();
+    let error = validate_state(&mut state).unwrap_err().to_string();
 
     assert!(error.contains("does not match"));
     assert_eq!(state.gateway_deployer, Some(address));
-}
-
-#[test]
-fn private_key_override_can_supply_missing_role_keys() {
-    let mut state = complete_state();
-    let key = state.deployer_private_key.take().unwrap();
-    state.gateway_deployer_private_key = None;
-    state.gas_service_deployer_private_key = None;
-    state.its_deployer_private_key = None;
-
-    validate_state(&mut state, Some(&key)).unwrap();
-
-    assert!(state.gateway_deployer.is_some());
-    assert!(state.admin_mnemonic.is_none());
 }
 
 #[test]

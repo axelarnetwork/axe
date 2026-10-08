@@ -600,28 +600,15 @@ pub enum DeployCommands {
     Status {
         #[arg(long)]
         axelar_id: Option<String>,
+        /// Include individual proposal votes (all pages)
+        #[arg(long)]
+        votes: bool,
     },
 
-    /// Run all pending deployment steps
+    /// Run deployment with preflight, approvals and journaled recovery
     Run {
-        #[arg(long)]
-        axelar_id: Option<String>,
-        /// Private key override (auto-resolved per step by default)
-        #[arg(long)]
-        private_key: Option<String>,
-        /// Path to implementation artifact JSON (auto-resolved by default)
-        #[arg(long)]
-        artifact_path: Option<String>,
-        /// Salt for create2 deployments (read from state by default)
-        #[arg(long)]
-        salt: Option<String>,
-        /// Path to proxy artifact JSON (auto-resolved by default)
-        #[arg(long)]
-        proxy_artifact_path: Option<String>,
-    },
-
-    /// Reset all steps to pending and remove all changes from target JSON
-    Reset {
+        #[command(flatten)]
+        deployment_options: crate::commands::deploy::hardened::types::Options,
         #[arg(long)]
         axelar_id: Option<String>,
     },

@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::{evm as deployment_evm, session};
 use alloy::{
     consensus::Transaction as _,
     eips::BlockNumberOrTag,
@@ -5,10 +6,13 @@ use alloy::{
     network::TransactionBuilder,
     primitives::{Address, Bytes, FixedBytes, U256, keccak256},
     providers::{Provider, ProviderBuilder},
-    rpc::types::{Filter, Log, TransactionRequest},
+    rpc::{
+        json_rpc::Response,
+        types::{Filter, Log, TransactionRequest},
+    },
     signers::local::PrivateKeySigner,
     sol,
-    transports::TransportResult,
+    transports::{TransportError, TransportResult},
 };
 use eyre::Result;
 
@@ -160,13 +164,6 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
         ));
         return summarise(&checks);
     }
-    if checks
-        .iter()
-        .any(|check| matches!(check.outcome, CheckOutcome::Warn(_)))
-        && !ui::confirm("Continue with contract tests despite the node health warning?").await
-    {
-        eyre::bail!("EVM compatibility check cancelled before contract tests");
-    }
 
     println!();
     ui::info("Phase 2: Contract lifecycle");
@@ -202,11 +199,10 @@ pub async fn run(ctx: &DeployContext, private_key: &str) -> Result<()> {
 async fn run_chain_identity_checks<P: Provider>(provider: &P) -> (Vec<Check>, Option<u64>) {
     let mut checks = Vec::new();
 
-    // 1. eth_chainId — `chainId` is not currently persisted into State, so
-    // we only assert the RPC returns *some* id. (Reintroduce a comparison
-    // by adding `expected_chain_id: Option<u64>` to State and reading it
-    // here.)
-    let expected_chain_id: Option<u64> = None;
+    // Compare the RPC chain ID with the pinned deployment plan.
+    let expected_chain_id = session::current()
+        .ok()
+        .map(|session| session.plan.evm_chain_id);
     match provider.get_chain_id().await {
         Ok(id) => match expected_chain_id {
             Some(expected) if id == expected => {
@@ -258,18 +254,31 @@ fn check_sync_status(result: TransportResult<serde_json::Value>) -> Check {
     match result {
         Ok(serde_json::Value::Bool(false)) => Check::pass("eth_syncing", true, "synced".into()),
         Ok(_) => Check::fail("eth_syncing", true, "node is still syncing".into()),
-        Err(error)
-            if error
-                .as_error_resp()
-                .is_some_and(|error| error.code == -32601) =>
-        {
+        Err(error) if sync_method_unavailable(&error) => {
             Check::warn(
                 "eth_syncing",
-                "RPC does not expose this method; sync status could not be checked".into(),
+                "RPC does not expose this method; sync status is unknown. Block freshness and deployment-critical checks remain required".into(),
             )
         }
         Err(error) => Check::fail("eth_syncing", true, error.to_string()),
     }
+}
+
+fn sync_method_unavailable(error: &TransportError) -> bool {
+    if error
+        .as_error_resp()
+        .is_some_and(|error| error.code == -32601)
+    {
+        return true;
+    }
+    // Some RPC gateways wrap method-not-found JSON in HTTP 403. A plain
+    // forbidden response is not evidence that only this method is unavailable.
+    error
+        .as_transport_err()
+        .and_then(|kind| kind.as_http_error())
+        .filter(|error| error.status == 403)
+        .and_then(|error| serde_json::from_str::<Response>(&error.body).ok())
+        .is_some_and(|response| response.error_code() == Some(-32601))
 }
 
 async fn run_block_health_checks<P: Provider>(provider: &P) -> Vec<Check> {
@@ -309,25 +318,17 @@ async fn run_block_health_checks<P: Provider>(provider: &P) -> Vec<Check> {
         )),
     }
 
-    // 5. eth_getBlockByNumber("finalized")
-    match provider
-        .get_block_by_number(BlockNumberOrTag::Finalized)
-        .await
-    {
-        Ok(Some(block)) => checks.push(Check::pass(
-            "eth_getBlockByNumber(finalized)",
+    // 5. The block used by the selected deployment confirmation policy.
+    match crate::commands::deploy::hardened::confirmations::observation_block(provider).await {
+        Ok(block) => checks.push(Check::pass(
+            "deployment confirmation block",
             true,
             format!("block {}", block.header.number),
         )),
-        Ok(None) => checks.push(Check::fail(
-            "eth_getBlockByNumber(finalized)",
+        Err(error) => checks.push(Check::fail(
+            "deployment confirmation block",
             true,
-            "returned null — chain may not support finalized tag".into(),
-        )),
-        Err(e) => checks.push(Check::fail(
-            "eth_getBlockByNumber(finalized)",
-            true,
-            format!("{e}"),
+            error.to_string(),
         )),
     }
 
@@ -414,89 +415,39 @@ async fn run_phase_1_health<P: Provider>(
 // Phase 2 — contract lifecycle (deploy + state read/write + tx lookup)
 // ---------------------------------------------------------------------------
 
-/// Deploys the test contract and runs the seven `eth_*` checks that need a
+/// Recovers or deploys the test contract and runs the `eth_*` checks that need a
 /// live contract on-chain. Returns the produced checks plus the contract
 /// address, the block of the `updateValue(42)` tx, and that tx's receipt
 /// logs (so Phase 3 can compare `logIndex`es).
 async fn run_phase_2_contract<P: Provider>(
     provider: &P,
 ) -> Result<(Vec<Check>, Option<Address>, Option<u64>, Vec<Log>)> {
-    let mut checks: Vec<Check> = Vec::new();
-
-    // 10. Deploy test contract
-    let bytecode_raw = hex::decode(TEST_CONTRACT_BYTECODE)?;
-    let tx = TransactionRequest::default().with_deploy_code(Bytes::from(bytecode_raw));
-    let (contract_addr, _deploy_block) = deploy_test_contract(provider, tx, &mut checks).await?;
-
-    let mut update_tx_hash = None;
-    let mut update_block_number = None;
-    let mut update_receipt_logs = Vec::new();
-
-    if let Some(addr) = contract_addr {
-        let contract = TestRpcCompat::new(addr, provider);
-        check_get_code(provider, addr, &mut checks).await;
-        check_get_value_zero(&contract, &mut checks).await;
-        check_estimate_gas(provider, &contract, addr, &mut checks).await;
-        let outcome = send_update_value(&contract, &mut checks).await;
-        if let Some((hash, block, logs)) = outcome {
-            update_tx_hash = Some(hash);
-            update_block_number = Some(block);
-            update_receipt_logs = logs;
-        }
-        check_get_value_42(&contract, &mut checks).await;
-        if let Some(hash) = update_tx_hash {
-            check_tx_by_hash(provider, hash, addr, &mut checks).await;
-        }
-    }
-
+    let mut checks = Vec::new();
+    let tx = TransactionRequest::default()
+        .with_deploy_code(Bytes::from(hex::decode(TEST_CONTRACT_BYTECODE)?));
+    let deployed = deployment_evm::send(provider, tx, "deploy compatibility probe").await?;
+    let address = deployed
+        .contract_address
+        .ok_or_else(|| eyre::eyre!("probe receipt has no contract address"))?;
+    let contract = TestRpcCompat::new(address, provider);
+    check_get_code(provider, address, &mut checks).await;
+    check_estimate_gas(provider, &contract, address, &mut checks).await;
+    let updated = deployment_evm::send(
+        provider,
+        contract
+            .updateValue(U256::from(COMPAT_TEST_VALUE))
+            .into_transaction_request(),
+        "update compatibility probe",
+    )
+    .await?;
+    check_get_value_42(&contract, &mut checks).await;
+    check_tx_by_hash(provider, updated.transaction_hash, address, &mut checks).await;
     Ok((
         checks,
-        contract_addr,
-        update_block_number,
-        update_receipt_logs,
+        Some(address),
+        updated.block_number,
+        updated.inner.logs().to_vec(),
     ))
-}
-
-async fn deploy_test_contract<P: Provider>(
-    provider: &P,
-    tx: TransactionRequest,
-    checks: &mut Vec<Check>,
-) -> Result<(Option<Address>, Option<u64>)> {
-    match provider.send_transaction(tx).await {
-        Ok(pending) => match pending.get_receipt().await {
-            Ok(receipt) if receipt.status() => {
-                let addr = receipt
-                    .contract_address
-                    .ok_or_else(|| eyre::eyre!("no contract address in receipt"))?;
-                checks.push(Check::pass("deploy test contract", true, format!("{addr}")));
-                Ok((Some(addr), Some(receipt.block_number.unwrap_or(0))))
-            }
-            Ok(_) => {
-                checks.push(Check::fail(
-                    "deploy test contract",
-                    true,
-                    "tx reverted (status=0)".into(),
-                ));
-                Ok((None, None))
-            }
-            Err(e) => {
-                checks.push(Check::fail(
-                    "deploy test contract",
-                    true,
-                    format!("receipt error: {e}"),
-                ));
-                Ok((None, None))
-            }
-        },
-        Err(e) => {
-            checks.push(Check::fail(
-                "deploy test contract",
-                true,
-                format!("send error: {e}"),
-            ));
-            Ok((None, None))
-        }
-    }
 }
 
 async fn check_get_code<P: Provider>(provider: &P, addr: Address, checks: &mut Vec<Check>) {
@@ -510,23 +461,6 @@ async fn check_get_code<P: Provider>(provider: &P, addr: Address, checks: &mut V
         }
         Ok(_) => checks.push(Check::fail("eth_getCode", true, "empty bytecode".into())),
         Err(e) => checks.push(Check::fail("eth_getCode", true, format!("{e}"))),
-    }
-}
-
-async fn check_get_value_zero<P: Provider>(
-    contract: &TestRpcCompat::TestRpcCompatInstance<&P>,
-    checks: &mut Vec<Check>,
-) {
-    match contract.getValue().call().await {
-        Ok(val) if val == U256::ZERO => {
-            checks.push(Check::pass("eth_call(getValue)", true, "returned 0".into()));
-        }
-        Ok(val) => checks.push(Check::fail(
-            "eth_call(getValue)",
-            true,
-            format!("expected 0, got {val}"),
-        )),
-        Err(e) => checks.push(Check::fail("eth_call(getValue)", true, format!("{e}"))),
     }
 }
 
@@ -550,59 +484,6 @@ async fn check_estimate_gas<P: Provider>(
             format!("{gas} gas (unexpected range)"),
         )),
         Err(e) => checks.push(Check::fail("eth_estimateGas", true, format!("{e}"))),
-    }
-}
-
-async fn send_update_value<P: Provider>(
-    contract: &TestRpcCompat::TestRpcCompatInstance<&P>,
-    checks: &mut Vec<Check>,
-) -> Option<(alloy::primitives::TxHash, u64, Vec<Log>)> {
-    match contract
-        .updateValue(U256::from(COMPAT_TEST_VALUE))
-        .send()
-        .await
-    {
-        Ok(pending) => {
-            let hash = *pending.tx_hash();
-            match pending.get_receipt().await {
-                Ok(receipt) if receipt.status() => {
-                    checks.push(Check::pass(
-                        "updateValue tx",
-                        true,
-                        format!("status 1, block {}", receipt.block_number.unwrap_or(0)),
-                    ));
-                    Some((
-                        hash,
-                        receipt.block_number.unwrap_or(0),
-                        receipt.inner.logs().to_vec(),
-                    ))
-                }
-                Ok(_) => {
-                    checks.push(Check::fail(
-                        "updateValue tx",
-                        true,
-                        "reverted (status=0)".into(),
-                    ));
-                    None
-                }
-                Err(e) => {
-                    checks.push(Check::fail(
-                        "updateValue tx",
-                        true,
-                        format!("receipt error: {e}"),
-                    ));
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            checks.push(Check::fail(
-                "updateValue tx",
-                true,
-                format!("send error: {e}"),
-            ));
-            None
-        }
     }
 }
 

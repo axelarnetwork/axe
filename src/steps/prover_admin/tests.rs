@@ -6,10 +6,8 @@ use base64::Engine;
 use bip32::{Language, Mnemonic};
 use serde_json::json;
 
-use super::{default_address, planned_address, query_admin, select_mnemonic, validate};
+use super::{query_admin, select_mnemonic};
 use crate::cosmos::derive_axelar_wallet;
-use crate::state::{State, StepStatus, default_steps};
-use crate::types::Network;
 
 fn mnemonic(seed: u8) -> String {
     Mnemonic::from_entropy([seed; 32], Language::English)
@@ -49,7 +47,7 @@ fn explicit_admin_must_match_even_if_deployer_matches() {
 #[test]
 fn missing_admin_with_unrelated_deployer_fails_with_expected_address() {
     let phrase = mnemonic(42);
-    let expected = default_address(Network::Testnet);
+    let expected = "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf";
     let error = select_mnemonic(None, &phrase, expected)
         .unwrap_err()
         .to_string();
@@ -62,49 +60,16 @@ fn missing_admin_with_unrelated_deployer_fails_with_expected_address() {
 fn malformed_mnemonic_fails_without_disclosing_it() {
     let invalid = "sensitive invalid input";
     for admin in [None, Some(invalid)] {
-        let error = select_mnemonic(admin, invalid, default_address(Network::Testnet))
-            .unwrap_err()
-            .to_string();
+        let error = select_mnemonic(
+            admin,
+            invalid,
+            "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("cannot derive"));
         assert!(!error.contains(invalid));
     }
-}
-
-#[test]
-fn planned_admin_matches_testnet_override_and_other_network_configs() {
-    assert_eq!(
-        planned_address(Network::Testnet, Some("old-config-admin")).unwrap(),
-        "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf"
-    );
-    for network in [
-        Network::DevnetAmplifier,
-        Network::Mainnet,
-        Network::Stagenet,
-    ] {
-        assert_eq!(
-            planned_address(network, Some("configured-admin")).unwrap(),
-            "configured-admin"
-        );
-        assert!(planned_address(network, None).is_err());
-        assert!(planned_address(network, Some(" ")).is_err());
-    }
-}
-
-#[tokio::test]
-async fn completed_verifier_step_needs_no_admin_or_network_access() {
-    let mut state: State = serde_json::from_value(json!({
-        "axelarId": "test-chain", "rpcUrl": "", "targetJson": "/nonexistent/config.json",
-        "mnemonic": "", "env": "testnet", "cosmSalt": "test", "steps": default_steps()
-    }))
-    .unwrap();
-    state
-        .steps
-        .iter_mut()
-        .find(|step| step.name == "WaitForVerifierSet")
-        .unwrap()
-        .status = StepStatus::Completed;
-    validate(&mut state).await.unwrap();
-    assert!(state.admin_mnemonic.is_none());
 }
 
 fn serve_raw_response(status: &str, data: &str) -> (String, thread::JoinHandle<()>) {
@@ -129,7 +94,7 @@ fn serve_raw_response(status: &str, data: &str) -> (String, thread::JoinHandle<(
 
 #[tokio::test]
 async fn reads_operational_admin_from_contract_storage() {
-    let expected = default_address(Network::Testnet);
+    let expected = "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf";
     let data = base64::engine::general_purpose::STANDARD.encode(json!(expected).to_string());
     let (lcd, server) = serve_raw_response("200 OK", &data);
     assert_eq!(query_admin(&lcd, "prover").await.unwrap(), expected);

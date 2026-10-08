@@ -378,17 +378,19 @@ where
 
 pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
-    let state = read_state(&axelar_id).await?;
+    let mut state = read_state(&axelar_id).await?;
+    crate::state::credentials::load_test_credentials(&mut state, |name| std::env::var(name).ok())?;
     let start = Instant::now();
 
     let rpc_url = state.rpc_url.clone();
     let target_json = state.target_json.clone();
     let cfg = ChainsConfig::load(&target_json).await?;
 
-    let private_key = state
-        .deployer_private_key
-        .clone()
-        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?;
+    let private_key = state.deployer_private_key.clone().ok_or_else(|| {
+        eyre::eyre!(
+            "missing smoke-test EVM key; set DEPLOYER_PRIVATE_KEY or EVM_PRIVATE_KEY in .env"
+        )
+    })?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
     let deployer_address = signer.address();
@@ -647,8 +649,14 @@ async fn prepare_config_signers(
         .ok_or_else(|| eyre::eyre!("no axelar.rpc in target json"))?;
     ui::section("Preflight");
     ui::address("axelar address", &axelar_address);
-    crate::cosmos::check_axelar_balance(&lcd, &chain_id, &axelar_address, &fee_denom, 200_000)
-        .await?;
+    crate::cosmos::check_axelar_balance(
+        &lcd,
+        &chain_id,
+        &axelar_address.parse::<cosmrs::AccountId>()?,
+        &fee_denom.parse::<cosmrs::Denom>()?,
+        200_000,
+    )
+    .await?;
     let solana = crate::solana::load_keypair(None).await?;
     let solana_address = solana.pubkey();
     let source_rpc = route.source_rpc.clone();

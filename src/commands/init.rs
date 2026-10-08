@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::commands::deploy::configuration;
 use crate::config_source;
 use crate::cosmos::{derive_axelar_wallet, read_axelar_config};
-use crate::state::{State, default_steps, save_state, state_path};
+use crate::state::{State, save_state, state_path};
 use crate::types::{ChainKey, Network};
 use crate::ui;
 
@@ -71,7 +71,7 @@ async fn print_axelar_balance(target_json: &std::path::Path, axelar_address: &st
     Ok(())
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(plan: crate::commands::deploy::hardened::types::Plan) -> Result<()> {
     configuration::validate_init_environment(|name| std::env::var(name).ok())?;
     let require = |name: &str| -> Result<String> {
         std::env::var(name).map_err(|_| eyre::eyre!("missing required env var: {name}"))
@@ -81,7 +81,7 @@ pub async fn run() -> Result<()> {
     let state_file = state_path(&axelar_id)?;
     eyre::ensure!(
         !state_file.exists(),
-        "deployment state already exists for '{axelar_id}'. Use `axe deploy run` to resume, or explicitly reset it with `axe deploy reset` before initializing again"
+        "unsupported pre-journal state exists for '{axelar_id}'; preserve it and reconcile its on-chain actions before proceeding"
     );
     let chain_name = require("CHAIN_NAME")?;
     let chain_id: u64 = require("CHAIN_ID")?
@@ -110,11 +110,14 @@ pub async fn run() -> Result<()> {
             .require_checkout()?,
     };
 
+    let steps = crate::commands::deploy::hardened::plan::steps(&plan)?;
     let mut state = State {
         axelar_id: ChainKey::new(axelar_id.clone()),
         rpc_url: rpc_url.clone(),
         target_json: target_json.clone(),
         mnemonic: mnemonic.clone(),
+        hardened_plan: Some(plan),
+        hardened_fingerprint: None,
         env: env_parsed,
         cosm_salt: salt,
         admin_mnemonic: None,
@@ -128,20 +131,35 @@ pub async fn run() -> Result<()> {
         predicted_gateway_address: None,
         sender_receiver_address: None,
         proposals: BTreeMap::new(),
-        steps: default_steps(),
+        steps,
     };
 
+    let directory = crate::commands::deploy::hardened::storage::directory(&state)?;
+    let _locks = (
+        crate::commands::deploy::hardened::storage::lock(&directory.join("run.lock"))?,
+        crate::commands::deploy::hardened::storage::config_lock(&target_json)?,
+    );
+    eyre::ensure!(
+        !directory.join("state.json").exists(),
+        "deployment already exists; resume with `axe deploy run`"
+    );
     configuration::load_missing_environment(&mut state, |name| std::env::var(name).ok());
-    configuration::validate_state(&mut state, None)?;
+    configuration::validate_state(&mut state)?;
     read_axelar_config(&target_json).await?;
     crate::steps::prover_admin::validate(&mut state).await?;
     crate::steps::cosmos_tx::check_instantiate_permissions(&state).await?;
     print_deployer_addresses(&state)?;
+    preview_initialization(&state)?;
     write_chain_config(&state, &chain_name, chain_id, &token_symbol, decimals).await?;
 
     ui::section("State");
     save_state(&state).await?;
-    ui::kv("state file", &state_file.display().to_string());
+    ui::kv(
+        "state file",
+        &crate::state::deployment_state_path(&state)?
+            .display()
+            .to_string(),
+    );
     ui::success(&format!("init complete for '{axelar_id}' (env={env})"));
 
     let (_, axelar_address) = derive_axelar_wallet(&mnemonic)?;
@@ -189,11 +207,27 @@ async fn write_chain_config(
         ));
     } else {
         chains.insert(axelar_id.to_string(), chain_entry);
-        tokio::fs::write(target_json, serde_json::to_string_pretty(&root)? + "\n").await?;
+        crate::commands::deploy::hardened::storage::atomic_config_write(
+            target_json,
+            (serde_json::to_string_pretty(&root)? + "\n").as_bytes(),
+        )?;
         ui::success(&format!(
             "added chain '{axelar_id}' to {}",
             target_json.display()
         ));
     }
+    Ok(())
+}
+
+fn preview_initialization(state: &State) -> Result<()> {
+    let plan = state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
+    ui::info(
+        "Initialize public deployment state and add the chain configuration if absent. Full preflight runs before any transaction.",
+    );
+    ui::kv("configuration", &state.target_json.display().to_string());
+    ui::info(&serde_json::to_string_pretty(plan)?);
     Ok(())
 }

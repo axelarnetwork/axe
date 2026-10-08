@@ -128,6 +128,37 @@ pub enum Network {
 }
 
 impl Network {
+    /// Standard voting and signing fractions observed on live contracts on 2026-10-07.
+    pub const fn verifier_threshold(self) -> [u64; 2] {
+        match self {
+            Self::Mainnet => [2, 3],
+            Self::Testnet | Self::Stagenet => [51, 100],
+            Self::DevnetAmplifier => [6, 10],
+        }
+    }
+
+    /// Gateway rotation delays verified on deployed gateways on 2026-10-07.
+    pub const fn gateway_rotation_delay_seconds(self) -> u64 {
+        match self {
+            Self::Mainnet => 86_400,
+            Self::Testnet => 3_600,
+            Self::Stagenet => 300,
+            Self::DevnetAmplifier => 0,
+        }
+    }
+
+    pub const fn deployment_uses_governance(self) -> bool {
+        !matches!(self, Self::DevnetAmplifier)
+    }
+
+    /// ServiceRegistry service used by this network's verifier contracts.
+    pub const fn verifier_service_name(self) -> &'static str {
+        match self {
+            Self::DevnetAmplifier => "validators",
+            Self::Mainnet | Self::Testnet | Self::Stagenet => "amplifier",
+        }
+    }
+
     pub const ALL: [Network; 4] = [
         Self::Mainnet,
         Self::Testnet,

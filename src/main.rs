@@ -31,24 +31,16 @@ async fn run_deploy(
     global_network: Option<types::Network>,
 ) -> Result<()> {
     match command {
-        cli::DeployCommands::Init => commands::init::run().await,
-        cli::DeployCommands::Status { axelar_id } => commands::status::run(axelar_id).await,
+        cli::DeployCommands::Init => {
+            commands::deploy::hardened::loading::initialize(global_network).await
+        }
+        cli::DeployCommands::Status { axelar_id, votes } => {
+            commands::status::run(axelar_id, global_network, votes).await
+        }
         cli::DeployCommands::Run {
+            deployment_options,
             axelar_id,
-            private_key,
-            artifact_path,
-            salt,
-            proxy_artifact_path,
-        } => commands::deploy::run(
-            axelar_id,
-            private_key,
-            artifact_path,
-            salt,
-            proxy_artifact_path,
-        )
-        .await
-        .map(|_| ()),
-        cli::DeployCommands::Reset { axelar_id } => commands::reset::run(axelar_id).await,
+        } => commands::deploy::run(axelar_id, deployment_options, global_network).await,
         cli::DeployCommands::SenderReceiver {
             config,
             chain,

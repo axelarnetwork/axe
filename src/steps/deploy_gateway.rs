@@ -1,7 +1,8 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{
     hex,
     network::TransactionBuilder,
-    primitives::{Bytes, U256, keccak256},
+    primitives::{B256, Bytes, U256, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -11,11 +12,14 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
-use crate::cosmos::fetch_verifier_set;
-use crate::evm::{decode_evm_error, encode_gateway_setup_params, read_artifact_bytecode};
-use crate::state::{Step, save_state};
+use crate::evm::{encode_gateway_setup_params, read_artifact_bytecode};
+use crate::state::save_state;
+use crate::types::Network;
 use crate::ui;
 use crate::utils::{compute_domain_separator, update_target_json};
+
+#[cfg(test)]
+mod tests;
 
 struct GatewayDeploymentRecord {
     proxy: alloy::primitives::Address,
@@ -44,8 +48,20 @@ async fn write_gateway_config(ctx: &DeployContext, record: &GatewayDeploymentRec
         "domainSeparator".into(),
         json!(format!("{}", record.domain_separator)),
     );
-    data.insert("minimumRotationDelay".into(), json!(3600));
-    data.insert("operator".into(), json!(format!("{}", record.deployer)));
+    data.insert(
+        "minimumRotationDelay".into(),
+        json!(ctx.state.env.gateway_rotation_delay_seconds()),
+    );
+    data.insert(
+        "operator".into(),
+        json!(
+            ctx.state
+                .hardened_plan
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("missing deployment plan"))?
+                .gateway_operator
+        ),
+    );
     data.insert("owner".into(), json!(format!("{}", record.deployer)));
     data.insert("connectionType".into(), json!("amplifier"));
     data.insert("initialVerifierSetId".into(), json!(record.verifier_set_id));
@@ -64,33 +80,18 @@ async fn deploy_gateway_proxy<P: Provider>(
     owner: alloy::primitives::Address,
     setup_params: &Bytes,
     proxy_artifact: &str,
+    nonce: Option<u64>,
 ) -> Result<alloy::primitives::Address> {
     ui::info("deploying AxelarAmplifierGatewayProxy...");
     let mut deploy_code = read_artifact_bytecode(proxy_artifact).await?;
     deploy_code
         .extend_from_slice(&(implementation, owner, setup_params.clone()).abi_encode_params());
-    let tx = TransactionRequest::default()
+    let mut tx = TransactionRequest::default()
         .with_deploy_code(Bytes::from(deploy_code))
         .with_gas_limit(5_000_000);
-    match provider.call(tx.clone()).await {
-        Ok(_) => ui::success("eth_call simulation passed"),
-        Err(error) => {
-            ui::warn(&format!(
-                "eth_call simulation failed: {}",
-                decode_evm_error(&error)
-            ));
-            ui::warn("proceeding with send_transaction anyway...");
-        }
-    }
-    let receipt = match provider.send_transaction(tx).await {
-        Ok(pending) => pending.get_receipt().await?,
-        Err(error) => {
-            return Err(eyre::eyre!(
-                "proxy deployment failed: {}",
-                decode_evm_error(&error)
-            ));
-        }
-    };
+    tx.nonce = nonce;
+
+    let receipt = deployment_evm::send(provider, tx, "gateway proxy").await?;
     ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
     if !receipt.status() {
         return Err(eyre::eyre!(
@@ -108,7 +109,6 @@ async fn deploy_gateway_proxy<P: Provider>(
 pub async fn run(
     ctx: &mut DeployContext,
     step_idx: usize,
-    step: &Step,
     private_key: &str,
     impl_artifact: &str,
     proxy_artifact: &str,
@@ -120,45 +120,21 @@ pub async fn run(
         .connect_http(ctx.rpc_url.parse()?);
 
     let domain_separator = compute_domain_separator(&ctx.target_json, &ctx.axelar_id).await?;
+    let deployment_nonce = crate::commands::deploy::hardened::verification::gateway_nonce(
+        ctx,
+        &provider,
+        deployer_addr,
+    )
+    .await?;
 
-    // How many past verifier sets the gateway accepts proofs from after a
-    // rotation. 15 means a rotation is reversible for 15 cycles before the
-    // old set goes cold.
-    const PREVIOUS_SIGNERS_RETENTION: u64 = 15;
-    // Minimum seconds between rotations. 1h matches Axelar's published
-    // gateway deployment defaults.
-    const MIN_ROTATION_DELAY_SECS: u64 = 3600;
-
-    let previous_signers_retention = U256::from(PREVIOUS_SIGNERS_RETENTION);
-    let minimum_rotation_delay = U256::from(MIN_ROTATION_DELAY_SECS);
-
-    // --- Tx 1: Deploy implementation (skip if already deployed) ---
-    let (impl_addr, impl_codehash) = if let Some(addr) = step.implementation_address() {
-        let code = provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            return Err(eyre::eyre!(
-                "saved implementation {addr} has no code on-chain"
-            ));
-        }
-        ui::info(&format!(
-            "reusing previously deployed implementation: {addr}"
-        ));
-        (addr, keccak256(&code))
-    } else {
+    // --- Tx 1: Deploy implementation (recover from the journal if already deployed) ---
+    let (impl_addr, impl_codehash) = {
         ui::info("deploying AxelarAmplifierGateway implementation...");
-        let impl_bytecode = read_artifact_bytecode(impl_artifact).await?;
-        let mut impl_deploy_code = impl_bytecode.clone();
-        impl_deploy_code.extend_from_slice(
-            &(
-                previous_signers_retention,
-                domain_separator,
-                minimum_rotation_delay,
-            )
-                .abi_encode(),
-        );
-
-        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let code =
+            gateway_implementation_code(impl_artifact, domain_separator, ctx.state.env).await?;
+        let mut tx = TransactionRequest::default().with_deploy_code(code);
+        tx.nonce = deployment_nonce;
+        let receipt = deployment_evm::send(&provider, tx, "gateway implementation").await?;
         ui::tx_hash(
             "implementation tx hash",
             &format!("{}", receipt.transaction_hash),
@@ -171,27 +147,34 @@ pub async fn run(
         let code = provider.get_code_at(addr).await?;
         let codehash = keccak256(&code);
 
-        // Save implementation address to step so retries skip re-deployment
+        // Save implementation address for status. The journal controls transaction recovery
         ctx.state.steps[step_idx].set_implementation_address(addr)?;
         save_state(&ctx.state).await?;
 
         (addr, codehash)
     };
 
+    // Recheck the prover before building a new proxy transaction. Signed attempts stay pinned.
+    crate::commands::deploy::hardened::verification::refresh_before_gateway(ctx).await?;
+
     // --- Fetch verifier set from Axelar chain ---
-    let chain_axelar_id = {
-        let content = tokio::fs::read_to_string(&ctx.target_json).await?;
-        let root: Value = serde_json::from_str(&content)?;
-        root.pointer(&format!("/chains/{}/axelarId", ctx.axelar_id))
-            .and_then(|v| v.as_str())
-            .unwrap_or(&ctx.axelar_id)
-            .to_string()
+    let (signers, threshold, nonce, verifier_set_id) = {
+        let initial = crate::commands::deploy::hardened::verification::initial_set(ctx).await?;
+        (
+            initial.signers,
+            initial.threshold,
+            initial.nonce,
+            initial.set_id,
+        )
     };
-    let (signers, threshold, nonce, verifier_set_id) =
-        fetch_verifier_set(&ctx.target_json, &chain_axelar_id).await?;
 
     // --- Encode setup params ---
-    let operator = deployer_addr;
+    let operator = ctx
+        .state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?
+        .gateway_operator;
     let owner = deployer_addr;
     let setup_params = encode_gateway_setup_params(operator, &signers, threshold, nonce);
     ui::kv(
@@ -203,8 +186,20 @@ pub async fn run(
         ),
     );
 
-    let proxy_addr =
-        deploy_gateway_proxy(&provider, impl_addr, owner, &setup_params, proxy_artifact).await?;
+    let proxy_addr = deploy_gateway_proxy(
+        &provider,
+        impl_addr,
+        owner,
+        &setup_params,
+        proxy_artifact,
+        deployment_nonce.map(|nonce| nonce + 1),
+    )
+    .await?;
+
+    eyre::ensure!(
+        Some(proxy_addr) == ctx.state.predicted_gateway_address,
+        "gateway address differs from the pinned Cosmos configuration"
+    );
 
     write_gateway_config(
         ctx,
@@ -218,4 +213,19 @@ pub async fn run(
         },
     )
     .await
+}
+
+async fn gateway_implementation_code(
+    artifact: &str,
+    domain_separator: B256,
+    network: Network,
+) -> Result<Bytes> {
+    let constructor = (
+        U256::from(15),
+        domain_separator,
+        U256::from(network.gateway_rotation_delay_seconds()),
+    );
+    let mut code = read_artifact_bytecode(artifact).await?;
+    code.extend_from_slice(&constructor.abi_encode());
+    Ok(Bytes::from(code))
 }

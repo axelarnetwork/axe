@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{
     network::TransactionBuilder,
     primitives::{Bytes, U256},
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
 use crate::evm::{LegacyProxy, read_artifact_bytecode};
-use crate::state::{Step, save_state};
+use crate::state::save_state;
 use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
 
@@ -52,18 +53,20 @@ async fn initialize_proxy<P: Provider>(
         .await?;
     if stored != U256::ZERO {
         let stored_impl = alloy::primitives::Address::from_word(stored.into());
+        eyre::ensure!(
+            stored_impl == impl_addr,
+            "proxy has a conflicting implementation"
+        );
         ui::info(&format!(
             "proxy already initialized with implementation: {stored_impl}"
         ));
         return Ok(());
     }
     ui::info(&format!("calling proxy.init({impl_addr}, {owner}, 0x)..."));
-    let receipt = LegacyProxy::new(proxy_addr, provider)
+    let request = LegacyProxy::new(proxy_addr, provider)
         .init(impl_addr, owner, Bytes::new())
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
+        .into_transaction_request();
+    let receipt = deployment_evm::send(provider, request, "gas proxy initialization").await?;
     ui::tx_hash("init tx hash", &format!("{}", receipt.transaction_hash));
     if !receipt.status() {
         return Err(eyre::eyre!(
@@ -78,7 +81,6 @@ async fn initialize_proxy<P: Provider>(
 pub async fn run(
     ctx: &mut DeployContext,
     step_idx: usize,
-    step: &Step,
     step_name: &str,
     private_key: &str,
     impl_artifact: &str,
@@ -95,26 +97,15 @@ pub async fn run(
         read_contract_address(&ctx.target_json, &ctx.axelar_id, ChainContract::Operators).await?;
     ui::address("gas collector (Operators)", &format!("{gas_collector}"));
 
-    // --- Tx 1: Deploy implementation (skip if already deployed) ---
-    let impl_addr = if let Some(addr) = step.implementation_address() {
-        let code = provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            return Err(eyre::eyre!(
-                "saved implementation {addr} has no code on-chain"
-            ));
-        }
-        ui::info(&format!(
-            "reusing previously deployed implementation: {addr}"
-        ));
-        addr
-    } else {
+    // --- Tx 1: Deploy implementation (recover from the journal if already deployed) ---
+    let impl_addr = {
         ui::info("deploying AxelarGasService implementation...");
         let impl_bytecode = read_artifact_bytecode(impl_artifact).await?;
         let mut impl_deploy_code = impl_bytecode.clone();
         impl_deploy_code.extend_from_slice(&gas_collector.abi_encode());
 
         let tx = TransactionRequest::default().with_deploy_code(Bytes::from(impl_deploy_code));
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let receipt = deployment_evm::send(&provider, tx, "gas implementation").await?;
         ui::tx_hash(
             "implementation tx hash",
             &format!("{}", receipt.transaction_hash),
@@ -132,26 +123,19 @@ pub async fn run(
             .ok_or_else(|| eyre::eyre!("no contract address in implementation receipt"))?;
         ui::address("implementation deployed at", &format!("{addr}"));
 
-        // Save to state so retries skip re-deployment
+        // Save to state for status. The journal controls transaction recovery
         ctx.state.steps[step_idx].set_implementation_address(addr)?;
         save_state(&ctx.state).await?;
         addr
     };
 
-    // --- Tx 2: Deploy proxy (skip if already deployed) ---
-    let proxy_addr = if let Some(addr) = step.proxy_address() {
-        let code = provider.get_code_at(addr).await?;
-        if code.is_empty() {
-            return Err(eyre::eyre!("saved proxy {addr} has no code on-chain"));
-        }
-        ui::info(&format!("reusing previously deployed proxy: {addr}"));
-        addr
-    } else {
+    // --- Tx 2: Deploy proxy (recover from the journal if already deployed) ---
+    let proxy_addr = {
         ui::info("deploying AxelarGasServiceProxy...");
         let proxy_bytecode = read_artifact_bytecode(proxy_artifact).await?;
 
         let tx = TransactionRequest::default().with_deploy_code(Bytes::from(proxy_bytecode));
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let receipt = deployment_evm::send(&provider, tx, "gas proxy").await?;
         ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
 
         if !receipt.status() {
@@ -166,7 +150,7 @@ pub async fn run(
             .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
         ui::address("proxy deployed at", &format!("{addr}"));
 
-        // Save to state so retries skip re-deployment
+        // Save to state for status. The journal controls transaction recovery
         ctx.state.steps[step_idx].set_proxy_address(addr)?;
         save_state(&ctx.state).await?;
         addr

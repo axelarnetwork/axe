@@ -4,16 +4,11 @@
 
 use std::path::Path;
 
-use alloy::{
-    hex,
-    primitives::{Address, FixedBytes, U256},
-};
 use base64::Engine;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::evm::pubkey_to_address;
 use crate::ui;
 
 /// `account` sub-object inside the LCD `/cosmos/auth/v1beta1/accounts`
@@ -97,9 +92,7 @@ struct Pagination {
     next_key: Option<String>,
 }
 
-/// `target.json` shape, narrowed to the axelar config fields read here. The
-/// MultisigProver address lookup is keyed by `chain_axelar_id` at runtime,
-/// so it stays a Value lookup inside `fetch_verifier_set`.
+/// `target.json` shape, narrowed to the Axelar RPC configuration.
 #[derive(Deserialize)]
 struct AxelarTargetJson {
     axelar: AxelarSection,
@@ -109,10 +102,6 @@ struct AxelarTargetJson {
 struct AxelarSection {
     #[serde(default)]
     rpc: Option<String>,
-    #[serde(default)]
-    lcd: Option<String>,
-    #[serde(default)]
-    contracts: Option<Value>,
 }
 
 /// Tendermint RPC `block?height=N` response. Only `header.time` is read.
@@ -143,39 +132,6 @@ struct BlockHeader {
 /// numeric `threshold` and per-signer `weight` are kept as raw `Value` so the
 /// existing string-or-u64 polymorphism (and its silent fallback to `1` for
 /// off-shape weights) survives unchanged.
-#[derive(Deserialize)]
-struct VerifierSetResponse {
-    data: Option<VerifierSetData>,
-}
-
-#[derive(Deserialize)]
-struct VerifierSetData {
-    #[serde(default)]
-    id: Option<String>,
-    verifier_set: Option<VerifierSet>,
-}
-
-#[derive(Deserialize)]
-struct VerifierSet {
-    signers: Option<std::collections::BTreeMap<String, Signer>>,
-    #[serde(default)]
-    threshold: Value,
-    created_at: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct Signer {
-    pub_key: Option<PubKey>,
-    #[serde(default)]
-    weight: Value,
-}
-
-#[derive(Deserialize)]
-struct PubKey {
-    #[serde(default)]
-    ecdsa: Option<String>,
-}
-
 /// Parse a numeric LCD response field that comes back as a JSON string.
 /// Cosmos LCD endpoints often represent u64/u128 as strings (for example,
 /// `"sequence": "42"`), and missing or malformed values are response errors.
@@ -189,7 +145,7 @@ where
         .map_err(|e| eyre::eyre!("invalid numeric LCD field {field}={raw}: {e}"))
 }
 
-pub(super) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
+pub(crate) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, u64)> {
     let url = format!("{lcd}/cosmos/auth/v1beta1/accounts/{address}");
     let raw: Value = crate::http::client().get(&url).send().await?.json().await?;
     if raw.get("account").is_none() {
@@ -229,10 +185,12 @@ fn display_denom(fee_denom: &str) -> String {
 pub async fn check_axelar_balance(
     lcd: &str,
     chain_id: &str,
-    address: &str,
-    fee_denom: &str,
+    address: &cosmrs::AccountId,
+    fee_denom: &cosmrs::Denom,
     min_amount: u128,
 ) -> Result<()> {
+    let address = address.as_ref();
+    let fee_denom = fee_denom.as_ref();
     let account_exists = match lcd_query_account(lcd, address).await {
         Ok(_) => true,
         Err(e) if e.to_string().contains("no account in response") => false,
@@ -274,7 +232,7 @@ pub async fn check_axelar_balance(
     Ok(())
 }
 
-pub(super) async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
+pub(crate) async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
     let tx_b64 = base64::engine::general_purpose::STANDARD.encode(tx_bytes);
     let body = serde_json::json!({
         "tx_bytes": tx_b64,
@@ -308,7 +266,7 @@ pub(super) async fn lcd_simulate_tx(lcd: &str, tx_bytes: &[u8]) -> Result<u64> {
     Ok(gas_used)
 }
 
-pub(super) async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value> {
+pub(crate) async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value> {
     let tx_b64 = base64::engine::general_purpose::STANDARD.encode(tx_bytes);
     let body = serde_json::json!({
         "tx_bytes": tx_b64,
@@ -338,7 +296,7 @@ pub(super) async fn lcd_broadcast_tx(lcd: &str, tx_bytes: &[u8]) -> Result<Value
 }
 
 /// Wait for a tx to be included in a block and return the full tx response with events.
-pub(super) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
+pub(crate) async fn lcd_wait_for_tx(lcd: &str, tx_hash: &str) -> Result<Value> {
     for _ in 0..crate::timing::LCD_WAIT_MAX_ATTEMPTS {
         tokio::time::sleep(crate::timing::LCD_WAIT_RETRY_INTERVAL).await;
         let url = format!("{lcd}/cosmos/tx/v1beta1/txs/{tx_hash}");
@@ -510,10 +468,11 @@ pub async fn lcd_cosmwasm_smart_query(
     lcd_cosmwasm_smart_query_typed(lcd, contract, query_msg)
         .await
         .map_err(eyre::Report::new)
-        .wrap_err(
-            "Tip: set AXELAR_LCD_URL to a working endpoint (e.g. \
-             `https://rest.lavenderfive.com/axelar` for mainnet).",
-        )
+        .wrap_err(if crate::commands::deploy::hardened::session::required() {
+            "Deployment contract query failed. Review the contract response or LCD connection error below, resolve it, then resume. Public fallback is disabled."
+        } else {
+            "Tip: set AXELAR_LCD_URL to a working endpoint (e.g. `https://rest.lavenderfive.com/axelar` for mainnet)."
+        })
 }
 
 pub async fn lcd_cosmwasm_smart_query_typed(
@@ -530,10 +489,13 @@ pub async fn lcd_cosmwasm_smart_query_typed(
 
     // Try the primary endpoint first; on transient failures (HTTP 5xx, network
     // error, non-JSON body) silently fall through to known-good public
-    // endpoints. Only the user-set AXELAR_LCD_URL skips fallback — we honor
-    // their explicit choice and surface the error directly.
+    // endpoints. Explicit overrides and safe deployment (including preflight)
+    // skip public fallbacks and surface the error directly.
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() {
+    if user_override.is_none()
+        && !crate::commands::deploy::hardened::session::required()
+        && !crate::commands::deploy::hardened::session::active()
+    {
         for fb in lcd_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
@@ -740,7 +702,7 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
         .to_string();
 
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() {
+    if user_override.is_none() && !crate::commands::deploy::hardened::session::required() {
         for fb in rpc_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
@@ -862,7 +824,7 @@ pub async fn rpc_block_info(rpc: &str, height: Option<u64>) -> Result<(u64, Stri
         .to_string();
 
     let mut candidates: Vec<String> = vec![primary.clone()];
-    if user_override.is_none() {
+    if user_override.is_none() && !crate::commands::deploy::hardened::session::required() {
         for fb in rpc_fallbacks_for(&primary) {
             if *fb != primary {
                 candidates.push((*fb).to_string());
@@ -927,114 +889,6 @@ pub async fn rpc_block_info(rpc: &str, height: Option<u64>) -> Result<(u64, Stri
                  `https://axelar-rpc.publicnode.com` for mainnet)."
         )
     })
-}
-
-/// Fetch the current verifier set from Axelar chain via LCD REST endpoint.
-/// Returns (signers sorted by address, threshold, nonce, verifierSetId)
-pub async fn fetch_verifier_set(
-    target_json: &Path,
-    chain_axelar_id: &str,
-) -> Result<(Vec<(Address, u128)>, u128, FixedBytes<32>, String)> {
-    let content = tokio::fs::read_to_string(target_json).await?;
-    // Parse to `Value` first so a malformed-JSON file surfaces serde's parse
-    // error verbatim, matching the original `from_str::<Value>(&content)?`.
-    let raw: Value = serde_json::from_str(&content)?;
-    let root: AxelarTargetJson =
-        serde_json::from_value(raw).map_err(|_| eyre::eyre!("no axelar.lcd in target json"))?;
-
-    let lcd = root
-        .axelar
-        .lcd
-        .as_deref()
-        .ok_or_else(|| eyre::eyre!("no axelar.lcd in target json"))?;
-
-    // The MultisigProver address is keyed by `chain_axelar_id` at runtime, so
-    // its lookup stays a `Value::pointer` — the contracts map is dynamically
-    // shaped (different contracts have different per-chain layouts).
-    let contracts = root.axelar.contracts.unwrap_or(Value::Null);
-    let prover_addr = contracts
-        .pointer(&format!("/MultisigProver/{chain_axelar_id}/address"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre::eyre!("no MultisigProver.{chain_axelar_id}.address in target json"))?;
-
-    let query_msg = "\"current_verifier_set\"";
-    let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_msg.as_bytes());
-
-    let url = format!("{lcd}/cosmwasm/wasm/v1/contract/{prover_addr}/smart/{query_b64}");
-    ui::info(&format!("fetching verifier set from: {url}"));
-
-    let resp: VerifierSetResponse = crate::http::client().get(&url).send().await?.json().await?;
-
-    let data = resp
-        .data
-        .ok_or_else(|| eyre::eyre!("no id in verifier set response"))?;
-    let verifier_set_id = data
-        .id
-        .ok_or_else(|| eyre::eyre!("no id in verifier set response"))?;
-
-    let verifier_set = data
-        .verifier_set
-        .ok_or_else(|| eyre::eyre!("no signers object in verifier set"))?;
-    let signers_obj = verifier_set
-        .signers
-        .ok_or_else(|| eyre::eyre!("no signers object in verifier set"))?;
-
-    let threshold = if let Some(value) = verifier_set.threshold.as_str() {
-        value
-            .parse::<u128>()
-            .map_err(|error| eyre::eyre!("invalid threshold: {error}"))?
-    } else if let Some(value) = verifier_set.threshold.as_u64() {
-        u128::from(value)
-    } else {
-        return Err(eyre::eyre!("no threshold in verifier set"));
-    };
-
-    let created_at = verifier_set
-        .created_at
-        .ok_or_else(|| eyre::eyre!("no created_at in verifier set"))?;
-
-    let nonce = FixedBytes::<32>::from(U256::from(created_at).to_be_bytes::<32>());
-
-    let mut weighted_signers: Vec<(Address, u128)> = Vec::new();
-
-    for signer in signers_obj.values() {
-        let pubkey_hex = signer
-            .pub_key
-            .as_ref()
-            .and_then(|p| p.ecdsa.as_deref())
-            .ok_or_else(|| eyre::eyre!("no pub_key.ecdsa for signer"))?;
-
-        let weight: u128 = if let Some(raw) = signer.weight.as_str() {
-            raw.parse::<u128>()
-                .map_err(|e| eyre::eyre!("invalid weight {raw}: {e}"))?
-        } else if let Some(raw) = signer.weight.as_u64() {
-            raw as u128
-        } else {
-            return Err(eyre::eyre!("missing or invalid verifier signer weight"));
-        };
-
-        let pubkey_bytes = hex::decode(pubkey_hex.strip_prefix("0x").unwrap_or(pubkey_hex))?;
-        let addr = pubkey_to_address(&pubkey_bytes)?;
-        weighted_signers.push((addr, weight));
-    }
-
-    weighted_signers.sort_by_key(|(addr, _)| *addr);
-
-    ui::kv(
-        "verifier set",
-        &format!(
-            "{} signers, threshold={}, created_at={}, id={}",
-            weighted_signers.len(),
-            threshold,
-            created_at,
-            verifier_set_id
-        ),
-    );
-    for (addr, weight) in &weighted_signers {
-        ui::kv(&format!("{addr}"), &format!("weight={weight}"));
-    }
-
-    Ok((weighted_signers, threshold, nonce, verifier_set_id))
 }
 
 #[cfg(test)]

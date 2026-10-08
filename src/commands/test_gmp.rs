@@ -85,16 +85,18 @@ async fn relay_message(
 pub async fn run(axelar_id: Option<String>) -> Result<()> {
     let axelar_id = resolve_axelar_id(axelar_id)?;
     let mut state = read_state(&axelar_id).await?;
+    crate::state::credentials::load_test_credentials(&mut state, |name| std::env::var(name).ok())?;
     let gmp_start = Instant::now();
 
     let rpc_url = state.rpc_url.clone();
     let target_json = state.target_json.clone();
     let cfg = ChainsConfig::load(&target_json).await?;
 
-    let private_key = state
-        .deployer_private_key
-        .clone()
-        .ok_or_else(|| eyre::eyre!("no deployerPrivateKey in state"))?;
+    let private_key = state.deployer_private_key.clone().ok_or_else(|| {
+        eyre::eyre!(
+            "missing smoke-test EVM key; set DEPLOYER_PRIVATE_KEY or EVM_PRIVATE_KEY in .env"
+        )
+    })?;
 
     let signer: PrivateKeySigner = private_key.parse()?;
     let deployer_address = signer.address();
@@ -424,8 +426,8 @@ pub async fn run_config(
     check_axelar_balance(
         &lcd,
         &chain_id,
-        &axelar_address,
-        &fee_denom,
+        &axelar_address.parse::<cosmrs::AccountId>()?,
+        &fee_denom.parse::<cosmrs::Denom>()?,
         MIN_RELAY_BALANCE_UAXL,
     )
     .await?;

@@ -3,8 +3,8 @@ use eyre::{Result, WrapErr};
 
 use crate::config::ChainsConfig;
 use crate::cosmos::derive_axelar_wallet;
-use crate::state::{State, StepStatus};
-use crate::types::Network;
+use crate::state::State;
+use crate::ui;
 
 mod types;
 
@@ -13,32 +13,11 @@ mod tests;
 
 use types::{ProverConfig, RawResponse};
 
-pub(super) fn default_address(env: Network) -> &'static str {
-    match env {
-        Network::DevnetAmplifier => "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
-        Network::Testnet => "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
-        Network::Mainnet => "axelar1pczf792wf3p3xssk4dmwfxrh6hcqnrjp70danj",
-        Network::Stagenet => "axelar1l7vz4m5g92kvga050vk9ycjynywdlk4zhs07dv",
-    }
-}
-
-pub(super) fn planned_address(env: Network, configured: Option<&str>) -> Result<&str> {
-    match env {
-        Network::Testnet => Ok(default_address(env)),
-        _ => configured
-            .filter(|address| !address.trim().is_empty())
-            .ok_or_else(|| eyre::eyre!("no adminAddress in MultisigProver config for {env}")),
-    }
-}
-
 pub(crate) async fn validate(state: &mut State) -> Result<()> {
-    if !state
-        .steps
-        .iter()
-        .any(|step| step.name == "WaitForVerifierSet" && step.status == StepStatus::Pending)
-    {
-        return Ok(());
-    }
+    let plan = state
+        .hardened_plan
+        .as_ref()
+        .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
     let config = ChainsConfig::load(&state.target_json).await?;
     let chain = config
         .chains
@@ -61,14 +40,8 @@ pub(crate) async fn validate(state: &mut State) -> Result<()> {
             .as_deref()
             .ok_or_else(|| eyre::eyre!("no axelar.lcd"))?;
         query_admin(lcd, &address).await?
-    } else if state
-        .steps
-        .iter()
-        .any(|step| step.name == "AddCosmWasmConfig" && step.status == StepStatus::Pending)
-    {
-        default_address(state.env).to_string()
     } else {
-        planned_address(state.env, prover.admin_address.as_deref())?.to_string()
+        plan.prover_admin.clone()
     };
     state.admin_mnemonic = Some(select_mnemonic(
         state.admin_mnemonic.as_deref(),
@@ -92,6 +65,11 @@ fn select_mnemonic(admin: Option<&str>, deployer: &str, expected: &str) -> Resul
         derived == expected,
         "prover admin key required before deployment: expected {expected}, but {name} derives {derived}. Set MULTISIG_PROVER_MNEMONIC to the mnemonic for {expected} and rerun `axe deploy run`. A mnemonic cannot be derived from an address"
     );
+    if explicit.is_none() {
+        ui::warn(&format!(
+            "MULTISIG_PROVER_MNEMONIC is unset or empty; using MNEMONIC for prover admin ({derived}). The same account will submit proposals and administer the prover."
+        ));
+    }
     Ok(mnemonic.to_string())
 }
 

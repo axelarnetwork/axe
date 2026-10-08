@@ -27,9 +27,6 @@ pub(super) struct InstantiatePlan {
 #[derive(Debug, Deserialize)]
 pub(super) struct Deployment {
     pub chain_name: String,
-    pub gateway_address: String,
-    pub verifier_address: String,
-    pub prover_address: String,
 }
 
 #[derive(Deserialize)]
@@ -39,42 +36,13 @@ pub(super) struct ContractResponse {
 
 #[derive(Deserialize)]
 pub(super) struct ContractInfo {
-    pub code_id: String,
-    pub creator: String,
-    pub admin: String,
     pub label: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct RawResponse {
-    pub data: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct VerifierConfig {
-    pub source_chain: String,
-    pub source_gateway_address: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct ProverConfig {
-    pub chain_name: String,
-    pub gateway: String,
-    pub voting_verifier: String,
-    pub domain_separator: [u8; 32],
 }
 
 #[derive(Deserialize)]
 pub(super) struct QueryErrorBody {
     pub code: u32,
     pub message: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct Proposal {
-    pub status: String,
-    #[serde(default)]
-    pub failed_reason: String,
 }
 
 #[derive(Deserialize)]
