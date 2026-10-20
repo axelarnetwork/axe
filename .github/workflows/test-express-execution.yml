@@ -79,7 +79,7 @@ jobs:
           # registry has gas config for it (gmp-api/config/projects.yml).
           # Testnet carries the proxy on exactly two chains.
           if [ "$NETWORK" = mainnet ]; then
-            SUPPORTED="arbitrum avalanche base binance blast celo ethereum filecoin fraxtal immutable kava linea mantle moonbeam optimism polygon scroll"
+            SUPPORTED="arbitrum avalanche base binance celo ethereum filecoin fraxtal immutable kava linea mantle optimism polygon scroll"
           else
             SUPPORTED="avalanche ethereum-sepolia"
           fi
@@ -182,7 +182,7 @@ jobs:
           # lists come from live express activity on the Axelarscan GMP API.
           if [ "$DEST_CHAIN" = all ]; then
             if [ "$NETWORK" = mainnet ]; then
-              CHAIN_ARGS=(ethereum base binance optimism polygon arbitrum mantle celo avalanche linea scroll blast)
+              CHAIN_ARGS=(ethereum base binance optimism polygon arbitrum mantle celo avalanche linea scroll)
             else
               CHAIN_ARGS=(avalanche ethereum-sepolia)
             fi

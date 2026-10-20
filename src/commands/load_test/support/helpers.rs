@@ -646,7 +646,7 @@ async fn deploy_with_artifact<P: Provider>(
         Err(error) if is_pending_state_error(&error) => {
             deploy_pinned(provider, &deploy_code, fee_mode, None).await?
         }
-        // Stale-nonce node (Blast sepolia observed): the fill's nonce query
+        // Stale-nonce node: the fill's nonce query
         // lags the tx pool, but the rejection carries the true next nonce —
         // pin it and re-send.
         Err(error) if parse_expected_nonce(&error.to_string()).is_some() => {

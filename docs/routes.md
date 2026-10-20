@@ -27,7 +27,6 @@ The `✓` columns mark the networks each chain is configured for.
 | Base        | EVM     | ✓ | ✓ | ✓ |   |
 | Berachain   | EVM     |   |   | ✓ | ✓ |
 | Binance     | EVM     | ✓ | ✓ |   |   |
-| Blast       | EVM     | ✓ | ✓ | ✓ |   |
 | Celo        | EVM     |   |   | ✓ |   |
 | Ethereum    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Filecoin    | EVM     | ✓ | ✓ |   |   |
@@ -39,7 +38,6 @@ The `✓` columns mark the networks each chain is configured for.
 | Linea       | EVM     | ✓ | ✓ | ✓ |   |
 | Mantle      | EVM     | ✓ | ✓ | ✓ |   |
 | Monad       | EVM     | ✓ | ✓ |   |   |
-| Moonbeam    | EVM     | ✓ | ✓ | ✓ |   |
 | Optimism    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Plume       | EVM     |   |   | ✓ | ✓ |
 | Polygon     | EVM     | ✓ | ✓ | ✓ |   |

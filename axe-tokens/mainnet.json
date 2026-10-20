@@ -28,13 +28,6 @@
         }
       }
     },
-    "blast": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0xcfB3781c4Ee2CF54fCeb71113da97D650505EA70"
-        }
-      }
-    },
     "ethereum": {
       "contracts": {
         "SenderReceiver": {
