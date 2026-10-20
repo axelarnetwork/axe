@@ -42,9 +42,9 @@ legacy-chain support is load-bearing for mainnet.
 
 ## 2. Supported route surface (from the dispatcher)
 
-The 29 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Berachain,
-Binance, Blast, Celo, Ethereum, Filecoin, Flow, Hedera, Hyperliquid, Immutable,
-Kava, Linea, Mantle, Monad, Moonbeam, Optimism, Plume, Polygon, Robinhood,
+The 27 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Berachain,
+Binance, Celo, Ethereum, Filecoin, Flow, Hedera, Hyperliquid, Immutable,
+Kava, Linea, Mantle, Monad, Optimism, Plume, Polygon, Robinhood,
 Scroll, Solana, Stellar, Sui, XRPL, XRPL EVM. Berachain/Celo/Flow/Plume exist
 only on stagenet / devnet-amplifier; Arc (`arc-8`) and Robinhood (`robinhood`)
 are testnet-only amplifier EVM chains (Arc also on devnet-amplifier as `arc-2`)
@@ -140,7 +140,6 @@ landed":
 
 | source (finality) | route | express→execute gap | amount fronted = reimbursed |
 | --- | --- | --- | --- |
-| avalanche (~instant) | → moonbeam | 78 s | `0xbe4488` |
 | base (moderate) | → avalanche | 1527 s | `0x119db3af5` |
 | ethereum (~13–16 min) | → polygon | 1079 s | `0x49292` |
 
@@ -161,13 +160,13 @@ destination message reached `executed`. Chain ids carry the network
 
 ### 3a. Mainnet — legacy EVM ↔ legacy EVM (GMP)
 
-avalanche → {base, binance, blast, ethereum, kava, moonbeam, polygon, scroll};
+avalanche → {base, binance, ethereum, kava, polygon, scroll};
 binance → {avalanche, fraxtal, immutable, linea}; immutable → binance;
-kava → {avalanche, filecoin, moonbeam}; moonbeam → kava.
+kava → {avalanche, filecoin}.
 
-Chains exercised as **source**: avalanche, binance, immutable, kava, moonbeam.
-Chains validated as **destination** (executed): avalanche, base, binance, blast,
-ethereum, filecoin, fraxtal, immutable, kava, linea, moonbeam, polygon, scroll.
+Chains exercised as **source**: avalanche, binance, immutable, kava.
+Chains validated as **destination** (executed): avalanche, base, binance,
+ethereum, filecoin, fraxtal, immutable, kava, linea, polygon, scroll.
 `kava → filecoin` confirms filecoin **executes on mainnet** (its testnet relayer
 does not).
 
@@ -231,9 +230,8 @@ backstop).
 | 12 | stellar → arbitrum | GMP | amplifier non-EVM → legacy EVM | `0x9824e77f21919c58ff6d16792b95680ac4c75020` | ✅ executed |
 | 13 | sui → avalanche | GMP | amplifier non-EVM → legacy EVM | `FnJCBmjKRvwAVuYR729NPPSq6usz2H86E4Ph4R3RLu` | ✅ executed |
 | 14 | avalanche → base | GMP | legacy EVM ↔ legacy EVM | `0xae0d52ca1de181624df9d75c0fb5b901afa41822` | ✅ executed |
-| 15 | kava → moonbeam | GMP | legacy EVM ↔ legacy EVM | `0xbedaf89d3a9be09fa77a7c1425e6af6079b6fe80` | ✅ executed |
 
-**Result: 15/15 ✅**  All routes reached `executed` on destination.
+**Result: 14/14 ✅**  All routes reached `executed` on destination.
 
 **Part-B reliability findings (MOU-29 audit):**
 - Fast non-EVM routes (stellar, sui, solana) typically execute in < 60 s; axe's
@@ -268,7 +266,6 @@ resolved from log data alone and need a clean re-run.
 |---|---|---|---|
 | sui → hyperliquid | its (mainnet) | hub_approved T+23 s, no second-leg in GMP-API | Likely CANNOT_EXECUTE (token not on hyperliquid for Sui ITS); re-run to confirm |
 | hyperliquid → solana | its (mainnet) | hub_approved T+24 s, no second-leg in GMP-API | Same pattern; re-run to confirm |
-| base-sepolia → moonbeam | gmp | NOT run — source wallet had 0 funds | Re-run with funded wallet |
 
 All other former §4 routes are resolved: executed-late and fast-but-missed ones
 were verifier bugs, now **fixed on this branch** (§5 items 5–6); real
@@ -282,7 +279,7 @@ window. Measured latencies confirm the buffer must be raised (see §5):
 base→polygon (1629 s), celo→optimism (1304 s), filecoin→immutable (1062 s),
 fraxtal→mantle (1705 s), mantle→kava (3226 s), mantle→linea (2953 s),
 celo→solana (1381 s), arbitrum-sepolia→filecoin-2 (1206 s),
-arbitrum-sepolia→moonbeam (1170 s), base-sepolia→filecoin-2 (1642 s),
+base-sepolia→filecoin-2 (1642 s),
 base-sepolia→scroll (1489 s).
 
 ### Resolved §4 triage — polling bugs (executed fast, verifier missed)
@@ -302,7 +299,7 @@ stellar→hyperliquid its (T+37 s total; second-leg T+16 s after routing).
    (polygon Amoy ~128 blocks).
 2. **Legacy-gas detection** (`load_test/gas_mode.rs`, `EvmFeeMode`) — chains with
    no EIP-1559 (`baseFeePerGas == null`, e.g. Kava) get type-0 txs with explicit
-   `gas_price`. Block is read as raw JSON so non-standard blocks (Moonbeam omits
+   `gas_price`. Block is read as raw JSON so non-standard blocks (missing
    `mixHash`) don't break detection.
 3. **Paris-bytecode fallback** (`helpers.rs`) — pre-Shanghai chains reject the
    default contract's `PUSH0`; axe probes with `eth_call` and deploys a
@@ -390,21 +387,16 @@ timeouts. Each is something we either accept or drive a fix for.
 7. **ITS requires the token registered on each endpoint** (a prerequisite, not a
    failure). The runner fails fast before transfer if a provided/cached token id
    is not registered on the destination.
-8. **polygon → blast / polygon → moonbeam GMP (mainnet) — relayer gas ceiling.**
-   Both routes remained in `status=called` for >8 h with no progression. Likely
-   cause: the Axelar relayer rejects transactions where the source gas payment
-   (POL) undershoots the actual fee on the destination (ETH-gas Blast, GLMR
-   Moonbeam). Not a verifier bug; the call never advanced past routing.
-9. **celo-sepolia → mantle-sepolia / monad-3 → polygon-sepolia — VotingVerifier
+8. **celo-sepolia → mantle-sepolia / monad-3 → polygon-sepolia — VotingVerifier
    gap (testnet).** Neither destination chain is covered by the testnet verifier
    set for the specified source. Messages land on Axelar but never receive enough
    votes to advance past `voted`. Not a code issue; the verifier operator set
    must add coverage.
-10. **sui → solana GMP — Solana destination rejection.** The Solana destination
+9. **sui → solana GMP — Solana destination rejection.** The Solana destination
     contract rejects GMP execution from Sui sources; `executed_ok: false` in all
     runs. Root: Solana program does not handle Sui-origin message encoding. Axe
     code is correct (ITS sui→sol ✅); limitation is in the example GMP contract.
-11. **ITS CANNOT_EXECUTE_MESSAGE/V2 on testnet (multiple routes) — token not
+10. **ITS CANNOT_EXECUTE_MESSAGE/V2 on testnet (multiple routes) — token not
     deployed on destination.** Confirmed via `errorExecute` events in GMP-API:
     - `hyperliquid → monad-3` (ITS testnet): ITS hub cannot route — token not
       registered on monad-3.
@@ -414,11 +406,11 @@ timeouts. Each is something we either accept or drive a fix for.
       registered on ethereum-sepolia ITS.
     Fix: deploy/register the ITS token on each destination before testing. No axe
     code change needed.
-12. **solana → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
+11. **solana → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
     First-leg hub_approved at T+24 s; no second-leg GMP-API record found. Pattern
     matches CANNOT_EXECUTE (token not deployed on Hyperliquid for the Solana ITS
     token). Needs re-run with token pre-registered on Hyperliquid.
-13. **sui → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
+12. **sui → hyperliquid ITS (mainnet) — ITS execution failure on Hyperliquid.**
     Same pattern as above: hub_approved T+23 s, no second-leg found. Likely the
     same token registration gap.
 
@@ -431,7 +423,7 @@ Values come from the `axelarnetwork/infrastructure` upstreams (they carry API
 keys, so they live only in secrets):
 
 - **`BINANCE_*_RPC`** — required; public BNB RPCs block `getLogs`.
-- `MOONBEAM_*_RPC`, `KAVA_*_RPC`, `FILECOIN_*_RPC`, `BLAST_*_RPC` — recommended
+- `KAVA_*_RPC`, `FILECOIN_*_RPC` — recommended
   (config defaults are flaky / rate-limited).
 
 A run-time `--source-rpc` / `--destination-rpc` always overrides the secret.

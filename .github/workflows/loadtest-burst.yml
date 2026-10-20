@@ -26,7 +26,6 @@ on:
           - Avalanche
           - Base
           - Binance
-          - Blast
           - Ethereum
           - Filecoin
           - Hedera
@@ -36,7 +35,6 @@ on:
           - Linea
           - Mantle
           - Monad
-          - Moonbeam
           - Optimism
           - Polygon
           - Robinhood
@@ -56,7 +54,6 @@ on:
           - Avalanche
           - Base
           - Binance
-          - Blast
           - Ethereum
           - Filecoin
           - Hedera
@@ -66,7 +63,6 @@ on:
           - Linea
           - Mantle
           - Monad
-          - Moonbeam
           - Optimism
           - Polygon
           - Robinhood
@@ -146,8 +142,6 @@ jobs:
       BASE_STAGENET_RPC:           ${{ secrets.BASE_STAGENET_RPC }}
       BINANCE_MAINNET_RPC:         ${{ secrets.BINANCE_MAINNET_RPC }}
       BINANCE_TESTNET_RPC:         ${{ secrets.BINANCE_TESTNET_RPC }}
-      BLAST_MAINNET_RPC:           ${{ secrets.BLAST_MAINNET_RPC }}
-      BLAST_TESTNET_RPC:           ${{ secrets.BLAST_TESTNET_RPC }}
       ETHEREUM_MAINNET_RPC:        ${{ secrets.ETHEREUM_MAINNET_RPC }}
       ETHEREUM_TESTNET_RPC:        ${{ secrets.ETHEREUM_TESTNET_RPC }}
       ETHEREUM_STAGENET_RPC:       ${{ secrets.ETHEREUM_STAGENET_RPC }}
@@ -158,8 +152,6 @@ jobs:
       HYPERLIQUID_STAGENET_RPC:    ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
       KAVA_MAINNET_RPC:            ${{ secrets.KAVA_MAINNET_RPC }}
       KAVA_TESTNET_RPC:            ${{ secrets.KAVA_TESTNET_RPC }}
-      MOONBEAM_MAINNET_RPC:        ${{ secrets.MOONBEAM_MAINNET_RPC }}
-      MOONBEAM_TESTNET_RPC:        ${{ secrets.MOONBEAM_TESTNET_RPC }}
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
       OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
       OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}

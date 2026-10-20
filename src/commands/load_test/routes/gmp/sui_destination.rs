@@ -11,7 +11,7 @@ use super::super::metrics::RunIdentity;
 use super::super::run_sizing::RunSizing;
 use super::super::{
     LoadTestArgs, check_evm_balance, ensure_sender_receiver, finalize_sui_dest_run,
-    load_stellar_main_wallet, read_cache, read_stellar_contract_address, read_stellar_network_type,
+    load_stellar_main_wallet, read_stellar_contract_address, read_stellar_network_type,
     read_stellar_token_address, sui_dest_lookup, validate_evm_rpc, validate_solana_rpc,
 };
 use super::super::{evm_sender, sol_sender, stellar_sender, verify};
@@ -71,14 +71,13 @@ pub(in crate::commands::load_test) async fn run_evm_to_sui(
         .parse()?;
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
-    let cache = read_cache(src).await;
     let evm_pk = args.private_key.clone();
     let (sender_receiver_addr, _provider) = ensure_sender_receiver(
         &args,
+        src,
         &evm_rpc_url,
         evm_gateway_addr,
         evm_gas_service_addr,
-        cache,
         evm_pk.as_deref(),
     )
     .await?;

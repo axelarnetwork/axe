@@ -162,6 +162,10 @@ async fn overlay_sender_receiver(cache_key: &str) -> Option<Address> {
 
 /// Verify a candidate SenderReceiver is live and wired to the expected
 /// gateway. Shared by the overlay and local-cache reuse paths.
+///
+/// RPC failures are errors, not "invalid": a flaky endpoint must fail the run
+/// rather than redeploy a receiver that is actually live (filecoin run
+/// 39259394188 discarded a valid configured receiver on one failed read).
 async fn sender_receiver_is_valid<R: Provider>(
     read_provider: &R,
     addr: Address,
@@ -172,7 +176,11 @@ async fn sender_receiver_is_valid<R: Provider>(
         return Ok(false);
     }
     let sr = SenderReceiver::new(addr, read_provider);
-    Ok(matches!(sr.gateway().call().await, Ok(gw) if gw == gateway_addr))
+    let onchain_gateway = retry_all("SenderReceiver gateway check", || async {
+        sr.gateway().call().await
+    })
+    .await?;
+    Ok(onchain_gateway == gateway_addr)
 }
 
 pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
@@ -213,55 +221,22 @@ pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     }
     if let Some(addr_str) = cache.sender_receiver_address.as_deref() {
         let addr: Address = addr_str.parse()?;
-        let code = get_code_with_retry(read_provider, addr).await?;
-        let needs_redeploy = if code.is_empty() {
-            ui::warn(&format!(
-                "cached SenderReceiver ({label}) has no code, redeploying..."
-            ));
-            true
-        } else {
-            // Verify the cached contract's gateway matches the current config.
-            let sr = SenderReceiver::new(addr, read_provider);
-            match sr.gateway().call().await {
-                Ok(onchain_gw) => {
-                    if onchain_gw != gateway_addr {
-                        ui::warn(&format!(
-                            "cached SenderReceiver ({label}) points to old gateway {onchain_gw}, expected {gateway_addr}, redeploying..."
-                        ));
-                        true
-                    } else {
-                        false
-                    }
-                }
-                Err(_) => {
-                    ui::warn(&format!(
-                        "cached SenderReceiver ({label}) gateway check failed, redeploying..."
-                    ));
-                    true
-                }
-            }
-        };
-        if needs_redeploy {
-            let new_addr =
-                deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
-            let mut cache = cache.clone();
-            cache.sender_receiver_address = Some(new_addr.to_string());
-            save_cache(cache_key, &cache).await?;
-            hint_persist_sender_receiver(cache_key, new_addr);
-            Ok(new_addr)
-        } else {
+        if sender_receiver_is_valid(read_provider, addr, gateway_addr).await? {
             ui::info(&format!("SenderReceiver ({label}): reusing {addr}"));
-            Ok(addr)
+            return Ok(addr);
         }
-    } else {
-        ui::info(&format!("deploying SenderReceiver on {label} chain..."));
-        let addr = deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
-        let mut cache = cache.clone();
-        cache.sender_receiver_address = Some(addr.to_string());
-        save_cache(cache_key, &cache).await?;
-        hint_persist_sender_receiver(cache_key, addr);
-        Ok(addr)
+        ui::warn(&format!(
+            "cached SenderReceiver ({label}) at {addr} has no code or points at another \
+             gateway, redeploying..."
+        ));
     }
+    ui::info(&format!("deploying SenderReceiver on {label} chain..."));
+    let addr = deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
+    let mut cache = cache.clone();
+    cache.sender_receiver_address = Some(addr.to_string());
+    save_cache(cache_key, &cache).await?;
+    hint_persist_sender_receiver(cache_key, addr);
+    Ok(addr)
 }
 
 /// Print a hint suggesting the fresh SenderReceiver be recorded in the
@@ -671,7 +646,7 @@ async fn deploy_with_artifact<P: Provider>(
         Err(error) if is_pending_state_error(&error) => {
             deploy_pinned(provider, &deploy_code, fee_mode, None).await?
         }
-        // Stale-nonce node (Blast sepolia observed): the fill's nonce query
+        // Stale-nonce node: the fill's nonce query
         // lags the tx pool, but the rejection carries the true next nonce —
         // pin it and re-send.
         Err(error) if parse_expected_nonce(&error.to_string()).is_some() => {
@@ -989,59 +964,40 @@ pub(crate) fn load_stellar_main_wallet(private_key: Option<&str>) -> Result<Stel
         StellarWallet::from_hex_seed(&key)
     }
 }
+/// Resolve the SenderReceiver on `chain` (configured overlay first, then the
+/// local cache, deploying only when neither holds a live receiver) and return
+/// it with a wallet provider the caller may submit through.
 pub(crate) async fn ensure_sender_receiver(
     args: &LoadTestArgs,
+    chain: &str,
     rpc_url: &str,
     gateway_addr: Address,
     gas_service_addr: Address,
-    cache: GmpCache,
     evm_private_key: Option<&str>,
 ) -> Result<(Address, impl Provider + use<>)> {
-    if let Some(addr_str) = cache.sender_receiver_address.as_deref() {
-        let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-        let addr: Address = addr_str.parse()?;
-        let code = get_code_with_retry(&read_provider, addr).await?;
-        let needs_redeploy = if code.is_empty() {
-            true
-        } else {
-            let sr = SenderReceiver::new(addr, &read_provider);
-            !matches!(sr.gateway().call().await, Ok(onchain_gw) if onchain_gw == gateway_addr)
-        };
-        if !needs_redeploy {
-            // Wallet provider — caller may submit txs through it. Fail loud
-            // when no key is configured rather than substitute the historic
-            // `0x0…01` placeholder, which was a sweepable-funds footgun.
-            let pk = args
-                .private_key
-                .as_deref()
-                .or(evm_private_key)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "EVM private key required to reuse the cached SenderReceiver. \
-                     Set EVM_PRIVATE_KEY env var or use --private-key"
-                    )
-                })?;
-            let signer: PrivateKeySigner = pk.parse()?;
-            let provider = ProviderBuilder::new()
-                .wallet(signer)
-                .connect_http(rpc_url.parse()?);
-            return Ok((addr, provider));
-        }
-    }
-
+    // Fail loud when no key is configured rather than substitute the historic
+    // `0x0...01` placeholder, which was a sweepable-funds footgun.
     let pk = args.private_key.as_deref().or(evm_private_key).ok_or_else(|| {
         eyre::eyre!(
-            "EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
+            "EVM private key required for the SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
         )
     })?;
     let signer: PrivateKeySigner = pk.parse()?;
+    let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let write_provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
-    let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
-    let mut cache = cache;
-    cache.sender_receiver_address = Some(addr.to_string());
-    save_cache(&args.destination_chain, &cache).await?;
+    let cache = read_cache(chain).await;
+    let addr = deploy_or_reuse_sender_receiver(
+        &cache,
+        chain,
+        &read_provider,
+        &write_provider,
+        gateway_addr,
+        gas_service_addr,
+        chain,
+    )
+    .await?;
     Ok((addr, write_provider))
 }
 /// Resolve the Sui-side ITS token id (32B) and optional coin type tag for
@@ -1491,7 +1447,52 @@ pub(crate) async fn finalize_sui_dest_run_its(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayDoc, overlay_contract, parse_token_id_hex};
+    use alloy::primitives::{Address, Bytes};
+    use alloy::providers::ProviderBuilder;
+    use alloy::rpc::client::RpcClient;
+    use alloy::sol_types::SolValue;
+    use alloy::transports::mock::Asserter;
+
+    use super::{OverlayDoc, overlay_contract, parse_token_id_hex, sender_receiver_is_valid};
+    use crate::retry::DEFAULT_ATTEMPTS;
+
+    const RECEIVER: Address = Address::repeat_byte(0x11);
+    const GATEWAY: Address = Address::repeat_byte(0x22);
+
+    fn receiver_with_code() -> Asserter {
+        let mock = Asserter::new();
+        mock.push_success(&"0x6080");
+        mock
+    }
+
+    async fn check(mock: Asserter) -> eyre::Result<bool> {
+        let provider = ProviderBuilder::new().connect_client(RpcClient::mocked(mock));
+        sender_receiver_is_valid(&provider, RECEIVER, GATEWAY).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_fails_the_run_when_the_gateway_read_keeps_failing() {
+        let mock = receiver_with_code();
+        for _ in 0..DEFAULT_ATTEMPTS {
+            mock.push_failure_msg("upstream timeout");
+        }
+        assert!(check(mock).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_survives_a_transient_gateway_read_failure() {
+        let mock = receiver_with_code();
+        mock.push_failure_msg("upstream timeout");
+        mock.push_success(&Bytes::from(GATEWAY.abi_encode()));
+        assert!(check(mock).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn receiver_wired_to_another_gateway_is_invalid() {
+        let mock = receiver_with_code();
+        mock.push_success(&Bytes::from(Address::repeat_byte(0x33).abi_encode()));
+        assert!(!check(mock).await.unwrap());
+    }
 
     #[test]
     fn token_id_parser_accepts_prefixed_and_unprefixed_32_byte_hex() {

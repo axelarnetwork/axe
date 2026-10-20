@@ -37,7 +37,6 @@ on:
           - avalanche
           - base
           - binance
-          - blast
           - celo
           - ethereum
           - filecoin
@@ -46,7 +45,6 @@ on:
           - kava
           - linea
           - mantle
-          - moonbeam
           - optimism
           - polygon
           - scroll
@@ -61,7 +59,6 @@ on:
           - avalanche
           - base
           - binance
-          - blast
           - celo
           - ethereum
           - filecoin
@@ -70,7 +67,6 @@ on:
           - kava
           - linea
           - mantle
-          - moonbeam
           - optimism
           - polygon
           - scroll
