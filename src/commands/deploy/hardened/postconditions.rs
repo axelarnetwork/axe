@@ -18,15 +18,13 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     };
     if done("SaveDeployedContracts") {
         super::contract_checks::instantiated(ctx).await?;
+        registration(ctx).await?;
     }
     if done("AxelarGateway") {
         super::verification::gateway(ctx).await?;
     }
     if done("RegisterOperators") {
         operators(ctx).await?;
-    }
-    if done("WaitRegisterProposal") {
-        registration(ctx).await?;
     }
     if done("WaitItsHubRegistration") {
         its(ctx).await?;

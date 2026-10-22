@@ -19,6 +19,7 @@ pub(super) struct InstantiatePlan {
     pub execute_msg: Value,
     pub deployment_name: String,
     pub salt_key: String,
+    pub salt: String,
     pub domain_separator: String,
     pub contract_admin: &'static str,
     pub codes: ChainCodeIds,

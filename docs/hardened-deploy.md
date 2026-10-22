@@ -129,7 +129,7 @@ protocol wiring, governance authorities, balances and service verifier limits. E
 completion is an explicit final activation dependency.
 
 On governance networks, funding checks reserve one expedited proposal deposit, both remaining reward
-payments and the remaining fee allowances. The three proposals are sequential:
+payments and the remaining fee allowances. The proposal batches are sequential:
 a later batch can only proceed after the preceding batch passes, releasing its
 deposit. A journaled deposit awaiting resolution is treated as already reserved.
 Immediately before a new Cosmos submission, axe separately checks the actual
@@ -192,13 +192,28 @@ or Cosmos transaction asks for approval. Separate approvals remain for choosing
 the initial signer set, accepting protocol/rotation changes and explicit recovery
 actions; these change trusted inputs or which transactions can be sent.
 
-The original command had four proposal submissions. Registration now includes
-reward-pool creation, reducing the flow to three expedited proposal batches:
+New deployments use two expedited proposal batches:
 
-1. Instantiate the Cosmos Gateway, VotingVerifier and MultisigProver.
-2. Register the deployment and create both reward pools in the same atomic
-   governance execution.
-3. Register the ITS edge on the ITS Hub.
+1. Instantiate the Cosmos Gateway, VotingVerifier and MultisigProver, register
+   the deployment, and create both reward pools in one atomic governance execution.
+2. Register the ITS edge on the ITS Hub after verifier activation and EVM deployment.
+
+Before batch 1, axe predicts all three Cosmos addresses using the Coordinator's
+Instantiate2 query and the exact salt/code IDs used in the proposal. The journal
+pins these predictions; pool creation uses the predicted VotingVerifier address.
+Axe checks that both pools are absent and that generated contract settings still
+match the approved plan before submission. After passage, it verifies all three
+addresses, contract configurations, registration and reward pools before funding
+or activation. Funding remains a separate approved transaction.
+
+The two-proposal sequence is the only supported deployment layout. Journals
+from the old three-proposal sequence cannot resume with this binary. Devnet
+executes the same combined messages directly, without governance.
+
+A failed combined proposal rolls back its contract writes, but its proposal record
+and submission fees remain. Axe does not automatically replace a failed or rejected
+proposal. Proposal submission simulation does not prove that embedded actions will
+execute when voting ends.
 
 Each proposal wait names the proposal to vote on. On testnet it prints
 `bash scripts/vote_testnet_proposal.sh "YOUR_VALIDATOR_NAMESPACE" <proposal-id>`:
@@ -206,11 +221,13 @@ select your testnet kubectl context and replace the namespace placeholder before
 running it from the axe repo. The script votes Yes from each matching validator
 pod; axe only prints the command. Mainnet instructions instead direct you to coordinate
 with validator operators. Casting a vote does not end the voting period. Axe
-checks every 15 seconds and continues after PASSED. Each new transaction still
+checks every 15 seconds and continues after PASSED. If an expedited proposal
+converts to regular voting, axe follows its updated deadline while still requiring
+its execution messages to match the signed submission. Each new transaction still
 requires approval.
 Ctrl+C is safe while waiting: progress is already saved. Only the applicable
 resume command is shown, using `axe`. `--activate` is added at the verifier checkpoint
-and retained for subsequent steps, not offered during the first two batches.
+and retained for subsequent steps, not offered before the verifier checkpoint.
 
 Deployment pauses and errors end with a handoff showing the network and chain,
 next unfinished step, saved proposal ID when applicable, and why axe stopped.
@@ -384,7 +401,7 @@ the journal to force progress. `--retry-failed` is not a CheckTx recovery option
 
 A confirmed failed Cosmos execution can be retired with
 `--retry-failed 'StepName/cosmos'`. Supported steps are `WaitForVerifierSet`,
-`AddRewards` and the three batch submissions. For batch submissions, this means
+`AddRewards` and the batch submissions in the saved flow. For batch submissions, this means
 the **submission transaction failed at DeliverTx and created no proposal**.
 A proposal that was created and subsequently failed or was rejected is never
 recreated. Axe requires recorded failure at a nonzero height, an advanced account
@@ -508,7 +525,7 @@ Before using this on mainnet, run a fresh testnet deployment and record evidence
    transaction, then resume; verify it was not submitted and remains pending.
 3. Close the process during a broadcast and immediately after confirmation.
    Resume and check that hashes, addresses, proposal IDs and reward payments are unchanged.
-4. Close after each of the three proposal submissions. Resume while voting is
+4. Close after each of the two proposal submissions. Resume while voting is
    pending and again after passage; record votes and verified postconditions.
 5. Reach the verifier checkpoint with registrations outstanding. Confirm the
    EVM gateway is not deployed and no freeze/pause/upgrade writes were submitted.
@@ -543,8 +560,8 @@ Before using this on mainnet, run a fresh testnet deployment and record evidence
     Rehearse devnet direct execution separately: no governance queries, proposals
     or deposits, unchanged execute messages, and the same crash recovery.
 11. Audit the transaction journal against the original deploy actions. The only
-   governance change is batching the existing reward-pool creation messages with
-   chain registration. Verify a consumed predicted gateway nonce causes a stop.
+   governance change for new runs is batching instantiation, chain registration
+   and the existing reward-pool creation messages. Verify a consumed predicted gateway nonce causes a stop.
 
 Offline Rust regression tests cover journal persistence, policy/step drift,
 proposal payload matching, key stripping, locking, sequence safety, cached
@@ -552,3 +569,28 @@ confirmations, replacement execution invariants, original-transaction wins,
 delayed finality, lost task context, verifier snapshots, LCD balance request paths
 and Cosmos CheckTx fee recovery. Passing these tests does not replace the live
 testnet rehearsal above.
+
+
+### Two-proposal mainnet acceptance gate
+
+Offline tests do not establish governance execution atomicity. Before using the
+combined flow on mainnet, rehearse the candidate release on testnet with a fresh
+Axelar chain alias and fresh salts, using the actual EVM testnet chain ID and RPC.
+Do not use `--network mainnet` against testnet. Compare the deployed Coordinator,
+Router, Multisig, Rewards, per-chain code versions, permissions and SDK with mainnet;
+network-specific values remain the intended network presets.
+
+- Use real expedited proposals and confirm exactly two proposal IDs. Check the
+  four ordered batch-1 messages, predicted addresses, registered gateway/prover,
+  and both pool parameters after execution.
+- Interrupt after broadcast, during voting, and after passage before local progress
+  is saved. Resume the same deployment and verify no duplicate submission or funding.
+- Complete verifier onboarding and activation, EVM deployment and ITS registration.
+  Verify owners and run GMP and ITS in both directions.
+- Prove rollback with a deliberately failing final message only in an isolated
+  local governance harness using the matching SDK/contract binaries. A contract
+  multi-test alone does not exercise SDK governance execution. Never submit this
+  deliberate failure to public mainnet or testnet.
+
+These live rehearsal and local governance rollback checks must be recorded as
+pending until actually executed; passing axe's offline suite is not a substitute.

@@ -37,7 +37,7 @@ pub async fn show(ctx: &DeployContext, step: &Step) -> Result<()> {
     ) {
         show_chain_contract_settings(ctx, &plan).await?;
     }
-    if step.name == "RegisterDeployment" {
+    if step.name == "InstantiateChainContracts" {
         show_reward_pool_settings(ctx).await?;
     }
     if step.name == "AddRewards" {
@@ -199,22 +199,19 @@ fn description(name: &str) -> &'static str {
             "Write the approved verifier/prover settings and predicted gateway address to the local deployment configuration."
         }
         "InstantiateChainContracts" => {
-            "Batch 1: submit an expedited proposal to instantiate Gateway, VotingVerifier and MultisigProver. Display messages and live deposit before approval, then save progress and proceed to the governance wait."
+            "Batch 1 of 2: instantiate Gateway, VotingVerifier and MultisigProver, register the deployment, and create both reward pools atomically. Review the settings and predicted addresses before approving the expedited proposal. Reward funding is separate."
         }
-        "WaitInstantiateProposal" | "WaitRegisterProposal" | "WaitItsHubRegistration" => {
+        "WaitInstantiateProposal" | "WaitItsHubRegistration" => {
             "Monitor the saved proposal until voting ends. Continue only if it passed and matches the approved submission. Ctrl+C is safe while waiting; resume recovers the same proposal."
         }
         "SaveDeployedContracts" => {
-            "Read the Coordinator deployment and save its three contract addresses locally, then verify their code and configuration."
-        }
-        "RegisterDeployment" => {
-            "Batch 2: register the deployment and create both reward pools atomically. Submit, save progress and proceed to the governance wait."
+            "Check the Coordinator's three addresses against the journaled predictions, save them locally, and verify contract code/configuration, registration and both reward pools before funding or activation."
         }
         "AddRewards" => {
             "Fund both reward pools with the plan's reward amount. These payments are journaled to prevent duplicate funding on resume."
         }
         "RegisterItsOnHub" => {
-            "Batch 3: register the deployed ITS edge with the ITS Hub. Submit the expedited proposal, save progress and proceed to the governance wait."
+            "Batch 2 of 2: register the deployed ITS edge with the ITS Hub. Review the expedited proposal, then monitor its vote. Ctrl+C is safe while waiting."
         }
         "WaitForVerifierSet" => {
             "Discover eligible verifiers and check the service minimum, initialize the prover if needed, then review and approve its actual initial signer set. Known names are informational."

@@ -4,7 +4,6 @@
 
 mod defaults;
 mod instantiate;
-mod register_deployment;
 mod register_its;
 mod reward_pools;
 mod submission;
@@ -64,9 +63,6 @@ pub async fn run(ctx: &mut DeployContext, step: &Step, step_name: &str) -> Resul
     match step_name {
         "InstantiateChainContracts" => {
             instantiate::run_instantiate(ctx, tx).await?;
-        }
-        "RegisterDeployment" => {
-            register_deployment::run_register_deployment(ctx, tx).await?;
         }
         "AddRewards" => {
             reward_pools::run_add_rewards(ctx, tx).await?;

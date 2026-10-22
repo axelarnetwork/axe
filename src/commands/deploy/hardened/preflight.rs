@@ -92,10 +92,11 @@ pub async fn validate(
         .iter()
         .map(|(name, identity)| (name, &identity.address))
         .collect();
-    let fingerprint = json!({"plan":plan,"network":state.env,"chain":state.axelar_id,"identities":identities,
+    let mut fingerprint = json!({"plan":plan,"network":state.env,"chain":state.axelar_id,"identities":identities,
         "salt":state.cosm_salt,"itsSalt":state.its_salt,"itsProxySalt":state.its_proxy_salt,
         "chainName":chain["name"],"tokenSymbol":chain["tokenSymbol"],"decimals":chain["decimals"],"operators":state.env.axelar_operators(),
         "protocolAddresses":addresses,"wiring":wiring,"artifacts":artifacts,"cosmosCodes":cosmos_codes,"governance":root["axelar"]["governanceAddress"]});
+    fingerprint["proposalFlow"] = json!("instantiate-register-v1");
     super::inputs::check_fingerprint(&fingerprint)?;
     Ok(Preflight {
         fingerprint: keccak256(serde_json::to_vec(&fingerprint)?),
@@ -250,14 +251,7 @@ async fn check_proposer_funding(
             .as_ref()
             .is_some_and(|journal| journal.actions.contains_key(&format!("{step}/cosmos")))
     };
-    let remaining = [
-        ("instantiate", "InstantiateChainContracts"),
-        ("register", "RegisterDeployment"),
-        ("itsHubRegister", "RegisterItsOnHub"),
-    ]
-    .iter()
-    .filter(|(key, step)| !state.proposals.contains_key(*key) && !recorded(step))
-    .count() as u128;
+    let (remaining, escrowed) = proposal_deposit_status(state, &recorded);
     let rewards = if !recorded("AddRewards")
         && state
             .steps
@@ -272,20 +266,7 @@ async fn check_proposer_funding(
         0
     };
     let fees = remaining_budget(state, proposer, true).await?;
-    let escrowed = [
-        ("InstantiateChainContracts", "WaitInstantiateProposal"),
-        ("RegisterDeployment", "WaitRegisterProposal"),
-        ("RegisterItsOnHub", "WaitItsHubRegistration"),
-    ]
-    .iter()
-    .any(|(submit, wait)| {
-        recorded(submit)
-            && state
-                .steps
-                .iter()
-                .any(|step| step.name == *wait && step.status == StepStatus::Pending)
-    });
-    let required = sequential_deposit(remaining > 0, escrowed, deposit)
+    let required = sequential_deposit(remaining, escrowed, deposit)
         .checked_add(rewards)
         .and_then(|amount| amount.checked_add(fees))
         .ok_or_else(|| eyre::eyre!("funding requirement overflow"))?;
@@ -298,6 +279,28 @@ async fn check_proposer_funding(
     )
     .await?;
     Ok(())
+}
+
+pub(super) fn proposal_deposit_status(
+    state: &State,
+    recorded: &impl Fn(&str) -> bool,
+) -> (bool, bool) {
+    let mut remaining = false;
+    let mut escrowed = false;
+    for submit in &state.steps {
+        let crate::state::StepKind::CosmosTx { proposal_key } = &submit.kind else {
+            continue;
+        };
+        let Some(wait) = state.steps.iter().find(|step| {
+            matches!(&step.kind, crate::state::StepKind::CosmosPoll { proposal_key: key } if key == proposal_key)
+        }) else {
+            continue;
+        };
+        let submitted = recorded(&submit.name) || state.proposals.contains_key(proposal_key);
+        remaining |= !submitted;
+        escrowed |= submitted && wait.status == StepStatus::Pending;
+    }
+    (remaining, escrowed)
 }
 
 async fn remaining_budget(state: &State, sender: &str, cosmos: bool) -> Result<u128> {

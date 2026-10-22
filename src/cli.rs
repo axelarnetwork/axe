@@ -670,11 +670,11 @@ pub enum TestCommands {
         #[arg(long)]
         axelar_id: Option<String>,
 
-        /// Path to chains config JSON (config-based mode, supports Solana → EVM)
+        /// Path to chains config JSON (supports Solana to EVM and EVM to EVM)
         #[arg(long, env = "CHAINS_CONFIG")]
         config: Option<PathBuf>,
 
-        /// Source chain axelar ID (e.g. solana-devnet)
+        /// Source chain axelar ID (e.g. solana or unichain-sepolia-2)
         #[arg(long)]
         source_chain: Option<String>,
 
@@ -686,20 +686,20 @@ pub enum TestCommands {
         #[arg(long, env = "MNEMONIC", hide_env_values = true)]
         mnemonic: Option<String>,
 
-        /// EVM private key (used to derive the destination receiver address)
+        /// EVM private key for destination execution and EVM source transactions
         #[arg(long, env = "EVM_PRIVATE_KEY", hide_env_values = true)]
         evm_private_key: Option<String>,
 
-        /// Amount of base units to transfer (default 1_000_000_000 = 1 token at 9 decimals)
+        /// Amount in token base units (EVM default: 1 token at 18 decimals, Solana default: 1_000_000)
         #[arg(long)]
         amount: Option<u64>,
 
-        /// Gas value (lamports) attached to the cross-chain ITS deploy/transfer (default: 0.01 SOL)
+        /// Cross-chain gas payment: wei for EVM (default 0, manual relay), lamports for Solana (default 0.01 SOL)
         #[arg(long)]
         gas_value: Option<u64>,
 
         /// Force a fresh token deploy even if a cached token already exists
-        /// for this network/src/dst/deployer combination.
+        /// for this network/src/dst/deployer combination (Solana source). EVM tests always use a fresh token.
         #[arg(long)]
         fresh_token: bool,
     },

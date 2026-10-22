@@ -263,7 +263,6 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
 
     relay_to_destination(DestinationRelayRequest {
         first_leg_message_id: &deployment.message_id,
-        src_axelar_id: request.src_axelar_id,
         dest_payload: &dest_payload_deploy,
         dst_its_proxy: request.dst_its_proxy,
         dst_evm_gateway: request.dst_evm_gateway,
@@ -271,7 +270,6 @@ pub(super) async fn run_phase_a_deploy<P: Provider>(
         tx: request.tx,
         dst_cosm_gateway: request.dst_cosm_gateway,
         dst_multisig_prover: request.dst_multisig_prover,
-        axelarnet_gateway: request.axelarnet_gateway,
         axelar_rpc: request.axelar_rpc,
         step_base: 5,
         step_total: PHASE_A_STEPS,

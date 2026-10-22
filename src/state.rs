@@ -231,18 +231,6 @@ pub fn default_steps() -> Vec<Step> {
         ),
         pending_step("SaveDeployedContracts", K::CosmosQuery),
         pending_step(
-            "RegisterDeployment",
-            K::CosmosTx {
-                proposal_key: "register".into(),
-            },
-        ),
-        pending_step(
-            "WaitRegisterProposal",
-            K::CosmosPoll {
-                proposal_key: "register".into(),
-            },
-        ),
-        pending_step(
             "AddRewards",
             K::CosmosTx {
                 proposal_key: "addRewards".into(),

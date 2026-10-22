@@ -18,6 +18,7 @@
 
 mod cache;
 mod encoding;
+mod evm;
 mod phase_a;
 mod phase_b;
 mod relay;
@@ -490,6 +491,7 @@ pub async fn run(axelar_id: Option<String>) -> Result<()> {
 }
 
 struct ConfigRoute {
+    source_type: ChainType,
     source: String,
     destination: String,
     source_rpc: String,
@@ -532,9 +534,10 @@ fn resolve_config_route(
         .as_deref()
         .ok_or_else(|| eyre::eyre!("destination chain '{destination}' has no chainType"))?
         .parse()?;
-    if source_type != ChainType::Svm || destination_type != ChainType::Evm {
+    if !matches!(source_type, ChainType::Svm | ChainType::Evm) || destination_type != ChainType::Evm
+    {
         return Err(eyre::eyre!(
-            "ITS config-mode currently supports svm → evm only (got {source_type} → {destination_type})"
+            "ITS config-mode supports svm → evm and evm → evm (got {source_type} → {destination_type})"
         ));
     }
     let source_axelar_id: ChainAxelarId = source_config.axelar_id_or(&source).into();
@@ -549,6 +552,7 @@ fn resolve_config_route(
         &format!("{destination} ({destination_axelar_id}, {destination_type})"),
     );
     Ok(ConfigRoute {
+        source_type,
         source_rpc: source_config
             .rpc
             .clone()
@@ -994,7 +998,6 @@ async fn relay_config_phase_b<P: alloy::providers::Provider>(
     .await?;
     relay_to_destination(DestinationRelayRequest {
         first_leg_message_id: &transfer.first_leg_message_id,
-        src_axelar_id: &request.route.source_axelar_id,
         dest_payload: &transfer.destination_payload,
         dst_its_proxy: request.route.destination_its,
         dst_evm_gateway: request.route.destination_gateway,
@@ -1002,12 +1005,12 @@ async fn relay_config_phase_b<P: alloy::providers::Provider>(
         tx,
         dst_cosm_gateway: &request.route.destination_cosm_gateway,
         dst_multisig_prover: &request.route.destination_multisig_prover,
-        axelarnet_gateway: &request.route.axelarnet_gateway,
         axelar_rpc: &request.signers.axelar_rpc,
         step_base: 3,
         step_total: PHASE_B_STEPS,
     })
     .await
+    .map(|_| ())
 }
 
 async fn run_config_phase_b<P: alloy::providers::Provider>(
@@ -1047,26 +1050,29 @@ async fn run_config_phase_b<P: alloy::providers::Provider>(
     Ok(())
 }
 
-/// Print the cast-send remediation block when DEST_CHAIN isn't trusted on the
-/// source-chain ITS (or vice versa). The owner addresses are queried so the
-/// user knows which key needs to sign the setTrustedChain calls.
+/// Test the selected Solana to EVM or Amplifier EVM to EVM route with manual relay.
 pub async fn run_config(args: ConfigArgs) -> Result<()> {
+    let cfg = ChainsConfig::load(&args.config).await?;
+    let route = resolve_config_route(
+        &cfg,
+        args.source_chain.clone(),
+        args.destination_chain.clone(),
+    )?;
+    if route.source_type == ChainType::Evm {
+        return evm::run(&cfg, route, args).await;
+    }
     let ConfigArgs {
-        config,
         network,
-        source_chain,
-        destination_chain,
         mnemonic_override,
         evm_private_key_override,
         amount,
         gas_value,
         fresh_token,
+        ..
     } = args;
     let start = Instant::now();
     let gas_value = gas_value.unwrap_or(DEFAULT_ITS_GAS_VALUE_LAMPORTS);
 
-    let cfg = ChainsConfig::load(&config).await?;
-    let route = resolve_config_route(&cfg, source_chain, destination_chain)?;
     let signers =
         prepare_config_signers(&cfg, &route, mnemonic_override, evm_private_key_override).await?;
     let dst_provider = ProviderBuilder::new()

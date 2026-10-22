@@ -21,7 +21,7 @@ fn directory() -> PathBuf {
     ))
 }
 
-pub(super) fn example_plan() -> Plan {
+pub(crate) fn example_plan() -> Plan {
     Plan {
         evm_chain_id: 31337,
         axelar_chain_id: "axelar-testnet-lisbon-3".into(),
@@ -44,7 +44,7 @@ pub(super) fn example_plan() -> Plan {
 }
 
 #[test]
-fn deployment_has_three_proposals_and_preserves_dependency_order() {
+fn deployment_has_two_proposals_and_preserves_dependency_order() {
     let steps = plan::steps(&example_plan()).unwrap();
     let names: Vec<_> = steps.iter().map(|step| step.name.as_str()).collect();
     assert_eq!(
@@ -58,8 +58,6 @@ fn deployment_has_three_proposals_and_preserves_dependency_order() {
             "InstantiateChainContracts",
             "WaitInstantiateProposal",
             "SaveDeployedContracts",
-            "RegisterDeployment",
-            "WaitRegisterProposal",
             "AddRewards",
             "WaitForVerifierSet",
             "AxelarGateway",
@@ -84,7 +82,7 @@ fn deployment_has_three_proposals_and_preserves_dependency_order() {
             _ => None,
         })
         .collect();
-    assert_eq!(proposals, ["instantiate", "register", "itsHubRegister"]);
+    assert_eq!(proposals, ["instantiate", "itsHubRegister"]);
     let position = |name| steps.iter().position(|step| step.name == name).unwrap();
     assert!(position("PredictGatewayAddress") < position("InstantiateChainContracts"));
     assert!(position("WaitForVerifierSet") < position("AxelarGateway"));
@@ -262,7 +260,7 @@ fn deployment_plan_does_not_require_a_verifier_roster() {
     );
 }
 
-pub(super) fn initial_state() -> State {
+pub(crate) fn initial_state() -> State {
     serde_json::from_value(json!({
         "axelarId":"example", "rpcUrl":"http://127.0.0.1:8545", "targetJson":"testnet.json",
         "env":"testnet", "cosmSalt":"test", "hardenedPlan":example_plan(),

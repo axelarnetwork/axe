@@ -366,7 +366,7 @@ pub async fn execute_on_axelarnet_gateway(
     match tx.broadcast(vec![execute_any]).await {
         Ok(_) => {
             ui::success(&format!(
-                "hub executed — message routed to {destination_chain_label} (relayer will handle delivery)"
+                "hub executed — message routed to {destination_chain_label}"
             ));
         }
         Err(e) => {

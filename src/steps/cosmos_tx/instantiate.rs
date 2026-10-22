@@ -18,8 +18,10 @@ use crate::state::{State, StepStatus};
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
+mod batch;
 mod permissions;
 mod reconcile;
+mod settings;
 mod types;
 
 use types::{ChainCodeIds, ChainContractAddresses, InstantiatePlan};
@@ -148,6 +150,7 @@ async fn build_instantiate_plan(
             tx.chain_axelar_id
         ))
         .ok_or_else(|| eyre::eyre!("no MultisigProver.{} config", tx.chain_axelar_id))?;
+    settings::validate(&ctx.state, &addresses.governance, verifier, prover)?;
     let salt_key = reconcile::chain_salt_key(tx.chain_axelar_id, &ctx.state.cosm_salt);
     let salt =
         base64::engine::general_purpose::STANDARD.encode(get_salt_from_key(&salt_key).as_slice());
@@ -223,6 +226,7 @@ async fn build_instantiate_plan(
         execute_msg,
         deployment_name,
         salt_key,
+        salt,
         domain_separator,
         contract_admin: admin,
         codes,
@@ -327,7 +331,22 @@ async fn submit_instantiate(
     } else {
         tx.axelar_address
     };
-    let inner_msg = build_execute_msg_any(sender, &addresses.coordinator, &plan.execute_msg)?;
-    let title = format!("Instantiate chain contracts for {}", tx.chain_axelar_id);
-    super::submission::submit(ctx, tx, vec![inner_msg], &title).await
+    let mut messages = vec![build_execute_msg_any(
+        sender,
+        &addresses.coordinator,
+        &plan.execute_msg,
+    )?];
+    let predicted = batch::prepare(ctx, &tx, addresses, plan).await?;
+    messages.extend(batch::registration_messages(
+        sender,
+        tx.env,
+        tx.chain_axelar_id,
+        addresses,
+        &predicted,
+    )?);
+    let title = format!(
+        "Instantiate and register {} with reward pools",
+        tx.chain_axelar_id
+    );
+    super::submission::submit(ctx, tx, messages, &title).await
 }
