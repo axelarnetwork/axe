@@ -2,6 +2,7 @@
 mod batch_recovery_tests;
 #[cfg(test)]
 mod batch_tests;
+pub mod canonical;
 pub mod contract_checks;
 pub mod cosmos;
 mod environment;

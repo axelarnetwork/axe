@@ -177,8 +177,7 @@ async fn prepare_its_plan<P: Provider>(
         .deployedAddress(Bytes::new(), deployer, factory_salt)
         .call()
         .await?;
-    ui::address("predicted ITS proxy", &format!("{its_proxy}"));
-    ui::address("predicted Factory proxy", &format!("{factory_proxy}"));
+    check_proxy_predictions(ctx.state.env, its_proxy, factory_proxy)?;
     let deployment = ctx
         .state
         .hardened_plan
@@ -206,6 +205,26 @@ async fn prepare_its_plan<P: Provider>(
         its_proxy,
         factory_proxy,
     })
+}
+
+fn check_proxy_predictions(
+    network: crate::types::Network,
+    its_proxy: Address,
+    factory_proxy: Address,
+) -> Result<()> {
+    crate::commands::deploy::hardened::canonical::check_address(
+        network,
+        "InterchainTokenService",
+        its_proxy,
+    )?;
+    crate::commands::deploy::hardened::canonical::check_address(
+        network,
+        "InterchainTokenFactory",
+        factory_proxy,
+    )?;
+    ui::address("predicted ITS proxy", &format!("{its_proxy}"));
+    ui::address("predicted Factory proxy", &format!("{factory_proxy}"));
+    Ok(())
 }
 
 struct NamedHelperDeployment<'a> {

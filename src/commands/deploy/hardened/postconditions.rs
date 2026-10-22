@@ -16,6 +16,9 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
                 .iter()
                 .any(|s| s.name == name && s.status == StepStatus::Completed)
     };
+    if ctx.state.env == crate::types::Network::Mainnet {
+        canonical_addresses(ctx, &done).await?;
+    }
     if done("SaveDeployedContracts") {
         super::contract_checks::instantiated(ctx).await?;
         registration(ctx).await?;
@@ -28,6 +31,25 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     }
     if done("WaitItsHubRegistration") {
         its(ctx).await?;
+    }
+    Ok(())
+}
+
+async fn canonical_addresses(ctx: &DeployContext, done: &impl Fn(&str) -> bool) -> Result<()> {
+    for (step, name) in [
+        ("ConstAddressDeployer", "ConstAddressDeployer"),
+        ("Create3Deployer", "Create3Deployer"),
+        ("AxelarGateway", "AxelarGateway"),
+        ("Operators", "Operators"),
+        ("AxelarGasService", "AxelarGasService"),
+        ("DeployInterchainTokenService", "InterchainTokenService"),
+        ("DeployInterchainTokenService", "InterchainTokenFactory"),
+    ] {
+        if done(step) {
+            let address =
+                read_contract_address_by_name(&ctx.target_json, &ctx.axelar_id, name).await?;
+            super::canonical::check_address(ctx.state.env, name, address)?;
+        }
     }
     Ok(())
 }

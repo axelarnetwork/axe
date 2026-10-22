@@ -4,7 +4,6 @@ use eyre::{Result, WrapErr};
 use crate::config::ChainsConfig;
 use crate::cosmos::derive_axelar_wallet;
 use crate::state::State;
-use crate::ui;
 
 mod types;
 
@@ -43,33 +42,21 @@ pub(crate) async fn validate(state: &mut State) -> Result<()> {
     } else {
         plan.prover_admin.clone()
     };
-    state.admin_mnemonic = Some(select_mnemonic(
-        state.admin_mnemonic.as_deref(),
-        &state.mnemonic,
-        &expected,
-    )?);
+    state.admin_mnemonic = Some(select_mnemonic(state.admin_mnemonic.as_deref(), &expected)?);
     Ok(())
 }
 
-fn select_mnemonic(admin: Option<&str>, deployer: &str, expected: &str) -> Result<String> {
-    let explicit = admin.filter(|mnemonic| !mnemonic.trim().is_empty());
-    let mnemonic = explicit.unwrap_or(deployer);
-    let name = if explicit.is_some() {
-        "MULTISIG_PROVER_MNEMONIC"
-    } else {
-        "MNEMONIC"
-    };
+fn select_mnemonic(admin: Option<&str>, expected: &str) -> Result<String> {
+    let mnemonic = admin.filter(|mnemonic| !mnemonic.trim().is_empty()).ok_or_else(|| {
+        eyre::eyre!("prover admin key required before deployment: expected {expected}. Set MULTISIG_PROVER_MNEMONIC explicitly; MNEMONIC is only the proposer")
+    })?;
+    let name = "MULTISIG_PROVER_MNEMONIC";
     let (_, derived) = derive_axelar_wallet(mnemonic)
         .map_err(|_| eyre::eyre!("invalid {name}: cannot derive the prover admin address"))?;
     eyre::ensure!(
         derived == expected,
         "prover admin key required before deployment: expected {expected}, but {name} derives {derived}. Set MULTISIG_PROVER_MNEMONIC to the mnemonic for {expected} and rerun `axe deploy run`. A mnemonic cannot be derived from an address"
     );
-    if explicit.is_none() {
-        ui::warn(&format!(
-            "MULTISIG_PROVER_MNEMONIC is unset or empty; using MNEMONIC for prover admin ({derived}). The same account will submit proposals and administer the prover."
-        ));
-    }
     Ok(mnemonic.to_string())
 }
 

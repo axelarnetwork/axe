@@ -3,7 +3,9 @@
 `axe deploy run` uses preflight checks, interactive approvals, transaction
 journaling and resumable governance waits on every network. See the
 [deployment and recovery guide](hardened-deploy.md) for the full workflow.
-Testnet and mainnet use the same code; there is no `--hardened` flag.
+Every network uses the same journal, approval and recovery system; there is no
+`--hardened` flag. Mainnet additionally enforces canonical EVM addresses and their
+deployment methods. Testnet permits custom deployment accounts and addresses.
 
 New deployments wait for **1 EVM confirmation** (the inclusion block). Use
 `axe deploy run --evm-confirmations 2` for one additional block, or
@@ -38,8 +40,8 @@ in `.env.example` (owners, thresholds and budgets).
 It reports missing variables together and validates credentials before
 writing the chain config or deployment state.
 
-The prover admin address is derived from `MULTISIG_PROVER_MNEMONIC`, or from
-`MNEMONIC` when no separate admin mnemonic is supplied. All role credentials are
+The prover admin address is derived from the required `MULTISIG_PROVER_MNEMONIC`.
+There is no fallback to `MNEMONIC`. All role credentials are
 checked before transactions and must remain available on resume. New deployments
 save public state and a transaction journal; credentials are loaded from the
 environment. No `EXPECTED_INITIAL_VERIFIERS` list is required. At the verifier
@@ -122,3 +124,9 @@ axe deploy run          # checks, approves, journals, and runs pending steps
 axe deploy status       # shows progress and proposal tallies
 axe deploy status --votes # also lists individual voters
 ```
+
+Mainnet uses canonical EVM addresses and requires their deployment accounts,
+factory bootstrap and prepared gateway nonce. See [mainnet prerequisites](hardened-deploy.md#mainnet-addresses-and-authorities).
+The expedited deposit observed on 2026-10-22 was **400,000 AXL** for a **24-hour**
+vote, in addition to initial reward funding and transaction fees. Axe reads the
+current governance parameters before submission.

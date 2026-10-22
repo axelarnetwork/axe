@@ -62,6 +62,10 @@ pub async fn instantiated(ctx: &DeployContext) -> Result<()> {
         )
         .await?;
         eyre::ensure!(
+            admin == crate::steps::cosmos_tx::contract_admin(ctx.state.env.as_str()),
+            "{name}: configured upgrade admin differs from the network policy"
+        );
+        eyre::ensure!(
             info.contract_info.code_id == expected_code.to_string()
                 && info.contract_info.creator == coordinator
                 && info.contract_info.admin == admin,

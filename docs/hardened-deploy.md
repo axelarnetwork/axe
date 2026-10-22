@@ -20,14 +20,64 @@ smoke tests can still read it without a deployment plan. Hardware,
 multisig and offline signing adapters are not implemented. A multisig **recipient**
 is allowed where no further transaction from that recipient is required.
 
+## Mainnet addresses and authorities
+
+Mainnet preserves the established EVM factory, gateway, Operators, Gas Service,
+ITS and ITS Factory addresses. Preflight checks signer identities, salts and
+artifact-derived predictions before sending any transaction or proposal.
+
+- `DEPLOYER_PRIVATE_KEY`, `GAS_SERVICE_DEPLOYER_PRIVATE_KEY` and
+  `ITS_DEPLOYER_PRIVATE_KEY` must sign as `0x6f24A47Fc8AE5441Eb47EFfC3665e70e69Ac3F05`.
+  Mainnet Operators deployment and management use `DEPLOYER_PRIVATE_KEY`.
+- `GATEWAY_DEPLOYER_PRIVATE_KEY` must sign as
+  `0xB8Cd93C83A974649D76B1c19f311f639e62272BC`. Before a fresh run, both confirmed
+  and pending nonce must be **2**. Implementation creation uses nonce 2 and proxy
+  creation uses nonce 3, yielding `0xe432150cce91c13a887f7D836923d5597adD8E31`.
+  Prepare this account through a separately reviewed procedure before starting.
+  Axe does not burn nonces. Do not use this account outside axe during deployment.
+- The canonical ConstAddressDeployer at
+  `0x98B2920D53612483F91F12Ed7754E51b4A77919e` must already exist with the expected
+  runtime code. If absent, bootstrap it with the reference deployment procedure
+  and canonical signer `0xE86375704CDb8491a5Ed82D90DceCE02Ee0ac25F` at nonce 0,
+  using `evm/legacy/ConstAddressDeployer.json` from the deployments checkout,
+  before starting axe. Axe verifies and reuses it; it does
+  not try to reproduce it with the general deployment key after compatibility probes.
+- Create3Deployer is verified and reused if present, or deployed via CREATE2 with
+  salt `Create3Deployer`. Operators uses CREATE2 with salt `Operators`.
+  The Gas Service proxy uses CREATE2 with salt `AxelarGasService` and is initialized
+  in the same transaction. Its implementation still uses CREATE.
+- Set `ITS_SALT=v2.2.0` and `ITS_PROXY_SALT=v1.0.0`. `SALT` remains the Cosmos
+  deployment salt and does not override mainnet EVM contract salts.
+- Final owners remain the explicitly configured recipients. Canonical deployment
+  accounts do not force those accounts to remain owners.
+
+The mainnet Cosmos upgrade admin for all three new contracts is the governance
+module `axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj`. The prover operational admin
+is a separate role, explicitly selected by `MULTISIG_PROVER_MNEMONIC`. To retain
+the operations admin observed on Monad on 2026-10-22, supply the signer for
+`axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly`. Axe requires the selected key and
+verifies it against the saved plan and the deployed prover; it does not force
+this particular operations address. Changing a deployed prover admin requires
+governance, so review that selection before proposal submission.
+
+Mainnet governance parameters observed on **2026-10-22** were a **400,000 AXL**
+expedited deposit and a **24-hour** voting period (regular: 150,000 AXL / 72 hours).
+Axe queries current parameters rather than hardcoding these figures. Initially,
+the proposer needs one deposit + `2 * REWARD_AMOUNT` + `COSMOS_FEE_BUDGET`, all
+converted to the configured base units. Deposits are separate from transaction
+fees and initial pool funding. Sequential passed proposals can reuse the refunded
+deposit; vetoed proposals can burn it. A separate prover-admin account also needs
+its fee budget.
+
 ## Inputs and preflight
 
 Keep credentials outside the repository (or in the existing ignored `.env`).
 Use the existing deployment environment described in [deploying.md](deploying.md):
 `CHAIN`, `CHAIN_NAME`, `CHAIN_ID`, `RPC_URL`, `TOKEN_SYMBOL`, `DECIMALS`, `ENV`,
 `SALT`, `ITS_SALT`, `ITS_PROXY_SALT`, `TARGET_JSON`, `MNEMONIC` and all four EVM
-role keys. Optionally supply `MULTISIG_PROVER_MNEMONIC` for a separate prover-admin
-account; otherwise axe uses `MNEMONIC` for both roles. Axe derives the admin
+role keys. `MULTISIG_PROVER_MNEMONIC` is required explicitly on every network.
+It may contain the same mnemonic as `MNEMONIC` if that is the intended admin,
+but axe never selects the proposer as admin implicitly. Axe derives the admin
 address, displays it for approval and pins it in the saved public plan. No
 `PROVER_ADMIN` environment variable is needed. A different admin account is
 rejected on resume.

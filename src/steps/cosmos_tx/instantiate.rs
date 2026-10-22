@@ -22,6 +22,8 @@ mod batch;
 mod permissions;
 mod reconcile;
 mod settings;
+#[cfg(test)]
+mod tests;
 mod types;
 
 use types::{ChainCodeIds, ChainContractAddresses, InstantiatePlan};
@@ -125,7 +127,7 @@ pub(crate) fn contract_admin(env: &str) -> &'static str {
     match env {
         "devnet-amplifier" => "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
         "testnet" => "axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp",
-        "mainnet" => "axelar1nctnr9x0qexemeld5w7w752rmqdsqqv92dw9am",
+        "mainnet" => "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
         _ => "axelar12qvsvse32cjyw60ztysd3v655aj5urqeup82ky",
     }
 }
@@ -194,8 +196,7 @@ async fn build_instantiate_plan(
                         "source_chain": tx.chain_axelar_id,
                         "rewards_address": addresses.rewards,
                         "msg_id_format": verifier["msgIdFormat"],
-                        "chain_codec_address": addresses.codec,
-                        "address_format": verifier["addressFormat"]
+                        "chain_codec_address": addresses.codec
                     },
                     "contract_admin": admin
                 },

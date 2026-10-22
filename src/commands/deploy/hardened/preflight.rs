@@ -30,6 +30,7 @@ pub async fn validate(
         provider.get_chain_id().await? == plan.evm_chain_id,
         "RPC is on the wrong EVM network"
     );
+    super::canonical::validate(state, &provider).await?;
     eyre::ensure!(
         provider
             .get_block_by_number(confirmation_policy.block_tag())
@@ -96,6 +97,9 @@ pub async fn validate(
         "salt":state.cosm_salt,"itsSalt":state.its_salt,"itsProxySalt":state.its_proxy_salt,
         "chainName":chain["name"],"tokenSymbol":chain["tokenSymbol"],"decimals":chain["decimals"],"operators":state.env.axelar_operators(),
         "protocolAddresses":addresses,"wiring":wiring,"artifacts":artifacts,"cosmosCodes":cosmos_codes,"governance":root["axelar"]["governanceAddress"]});
+    if state.env == crate::types::Network::Mainnet {
+        fingerprint["mainnetPolicy"] = json!({"evmAddresses":"canonical-v1", "upgradeAdmin":crate::steps::cosmos_tx::contract_admin("mainnet")});
+    }
     fingerprint["proposalFlow"] = json!("instantiate-register-v1");
     super::inputs::check_fingerprint(&fingerprint)?;
     Ok(Preflight {

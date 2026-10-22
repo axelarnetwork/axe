@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::canonical;
 use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{
     network::TransactionBuilder,
@@ -33,7 +34,25 @@ pub async fn run(
         .wallet(signer)
         .connect_http(ctx.rpc_url.parse()?);
 
-    let (addr, deploy_method, salt_used) = if step_kind == "deploy-create" {
+    let mainnet_factory = ctx.state.env == crate::types::Network::Mainnet
+        && matches!(step_name, "ConstAddressDeployer" | "Create3Deployer");
+    let reuse_factory = mainnet_factory
+        && (step_name == "ConstAddressDeployer"
+            || !provider
+                .get_code_at(canonical::CREATE3_DEPLOYER)
+                .await?
+                .is_empty());
+    let (addr, deploy_method, salt_used) = if reuse_factory {
+        let addr = canonical::factory(&provider, step_name).await?;
+        ui::info(&format!(
+            "Reusing verified canonical {step_name}; no transaction required."
+        ));
+        if step_name == "ConstAddressDeployer" {
+            (addr, "create", None)
+        } else {
+            (addr, "create2", Some("Create3Deployer".to_string()))
+        }
+    } else if step_kind == "deploy-create" {
         let tx = TransactionRequest::default().with_deploy_code(Bytes::from(bytecode_raw.clone()));
         let receipt = deployment_evm::send(&provider, tx, step_name).await?;
         ui::tx_hash("tx hash", &format!("{}", receipt.transaction_hash));
@@ -49,7 +68,8 @@ pub async fn run(
             ChainContract::ConstAddressDeployer,
         )
         .await?;
-        let salt_string = ctx.state.cosm_salt.clone();
+        let salt_string =
+            canonical::salt(ctx.state.env, step_name, &ctx.state.cosm_salt).to_string();
         let salt_bytes = get_salt_from_key(&salt_string);
 
         // For contracts with constructor args (e.g. Operators(address owner)),
@@ -72,6 +92,7 @@ pub async fn run(
             .call()
             .await?;
         ui::address("predicted address", &format!("{addr}"));
+        canonical::check_address(ctx.state.env, step_name, addr)?;
 
         let request = const_deployer
             .deploy_call(deploy_bytes, salt_bytes)
@@ -84,11 +105,20 @@ pub async fn run(
     ui::address("deployed at", &format!("{addr}"));
 
     let deployed_code = provider.get_code_at(addr).await?;
+    canonical::check_address(ctx.state.env, step_name, addr)?;
+    if mainnet_factory {
+        canonical::factory(&provider, step_name).await?;
+    }
     let codehash = keccak256(&deployed_code);
 
     let mut contract_data = serde_json::Map::new();
     contract_data.insert("address".into(), json!(format!("{addr}")));
-    contract_data.insert("deployer".into(), json!(format!("{deployer_addr}")));
+    let recorded_deployer = if reuse_factory && step_name == "ConstAddressDeployer" {
+        canonical::CONST_DEPLOYER_SIGNER
+    } else {
+        deployer_addr
+    };
+    contract_data.insert("deployer".into(), json!(format!("{recorded_deployer}")));
     contract_data.insert("deploymentMethod".into(), json!(deploy_method));
     contract_data.insert("codehash".into(), json!(format!("{codehash}")));
     contract_data.insert(

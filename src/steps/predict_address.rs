@@ -15,6 +15,11 @@ pub async fn run(ctx: &mut DeployContext) -> Result<()> {
     let nonce = provider.get_transaction_count(gateway_deployer).await?;
     let proxy_nonce = nonce + 1; // +1 for implementation tx
     let predicted = compute_create_address(gateway_deployer, proxy_nonce);
+    crate::commands::deploy::hardened::canonical::check_address(
+        ctx.state.env,
+        "AxelarGateway",
+        predicted,
+    )?;
     ui::address("gateway deployer", &format!("{gateway_deployer}"));
     ui::kv("current nonce", &nonce.to_string());
     ui::kv("proxy nonce (impl+1)", &proxy_nonce.to_string());

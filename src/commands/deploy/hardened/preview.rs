@@ -27,6 +27,15 @@ pub async fn show(ctx: &DeployContext, step: &Step) -> Result<()> {
         ui::info(
             "Devnet: execute directly with the deployer authority or verify the recorded execution. No governance proposal, deposit or voting wait.",
         );
+    } else if ctx.state.env == crate::types::Network::Mainnet
+        && matches!(
+            step.name.as_str(),
+            "ConstAddressDeployer" | "Create3Deployer"
+        )
+    {
+        ui::info(
+            "Verify and reuse the canonical factory if present. Only Create3Deployer may be created here if absent, using the canonical signer and salt. Any new transaction requires approval.",
+        );
     } else {
         ui::info(description(&step.name));
     }
@@ -95,7 +104,7 @@ async fn show_chain_contract_settings(ctx: &DeployContext, plan: &Plan) -> Resul
     ui::info("Controls governance-only contract settings, including changing the prover admin.");
     ui::address("Prover operational admin", &plan.prover_admin);
     ui::info(
-        "Can request verifier-set updates. Derived from the supplied prover-admin mnemonic, or the proposer mnemonic when it is omitted.",
+        "Can request verifier-set updates. Derived from the required MULTISIG_PROVER_MNEMONIC. Changing this admin later requires governance approval.",
     );
     ui::address(
         "Cosmos contract upgrade admin",
