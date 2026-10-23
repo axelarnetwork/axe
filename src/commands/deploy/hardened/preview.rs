@@ -117,6 +117,13 @@ async fn show_initial_reward_funding(ctx: &DeployContext, plan: &Plan) -> Result
         .checked_mul(2)
         .ok_or_else(|| eyre::eyre!("total initial reward funding exceeds the supported amount"))?;
     ui::section("Initial reward-pool funding (REWARD_AMOUNT)");
+    ui::address(
+        "Reward-pool funder (REWARDS_FUNDER_MNEMONIC)",
+        &crate::commands::deploy::cosmos_signer::rewards_funder_address(&ctx.state)?,
+    );
+    ui::info(
+        "This account pays both deposits and this transaction's Axelar fee. It does not become a contract admin.",
+    );
     ui::kv(
         "Deposit into EACH pool",
         &reward_amount_label(amount, &denom),

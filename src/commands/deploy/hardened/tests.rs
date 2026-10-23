@@ -139,12 +139,19 @@ async fn public_state_does_not_persist_credentials_and_round_trips() {
     let root = directory();
     let path = root.join("state.json");
     let key = PrivateKeySigner::random().to_bytes().to_string();
-    let state: State = serde_json::from_value(json!({
+    let mut state: State = serde_json::from_value(json!({
         "axelarId":"test-chain", "rpcUrl":"http://127.0.0.1:8545", "targetJson":"testnet.json",
         "env":"testnet", "cosmSalt":"test", "mnemonic": "in-memory-only", "adminMnemonic":"in-memory-admin",
         "deployerPrivateKey":key,"gatewayDeployerPrivateKey":key,"gasServiceDeployerPrivateKey":key,"itsDeployerPrivateKey":key,
         "hardenedPlan":example_plan(),"steps":default_steps()
     })).unwrap();
+    state.rewards_funder_mnemonic = Some("in-memory-reward-funder".into());
+    assert!(
+        serde_json::to_value(&state)
+            .unwrap()
+            .get("rewardsFunderMnemonic")
+            .is_none()
+    );
     save_state_at(&state, &path).await.unwrap();
     let bytes = std::fs::read_to_string(&path).unwrap();
     assert!(!bytes.contains(&key));
@@ -152,6 +159,7 @@ async fn public_state_does_not_persist_credentials_and_round_trips() {
     let restored = read_state_at(&path).await.unwrap();
     assert_eq!(restored.hardened_plan, state.hardened_plan);
     assert!(restored.mnemonic.is_empty());
+    assert!(restored.rewards_funder_mnemonic.is_none());
     assert!(restored.deployer_private_key.is_none());
     std::fs::remove_dir_all(root).unwrap();
 }

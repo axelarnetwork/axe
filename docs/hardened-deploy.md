@@ -54,18 +54,17 @@ code evidence, ownership checks and gateway address reconciliation remain enforc
 
 The mainnet Cosmos upgrade admin for all three new contracts is the governance
 module `axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj`. The prover operational admin
-is a separate role, explicitly selected by `MULTISIG_PROVER_MNEMONIC`. To retain
-the operations admin observed on Monad on 2026-10-22, supply the signer for
-`axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly`. Axe requires the selected key and
-verifies it against the saved plan and the deployed prover; it does not force
-this particular operations address. Changing a deployed prover admin requires
+is a separate role, explicitly selected by `MULTISIG_PROVER_MNEMONIC`. Mainnet
+requires `axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly`. Axe verifies the key
+against that address, the saved plan and the deployed prover. Changing a deployed prover admin requires
 governance, so review that selection before proposal submission.
 
 Mainnet governance parameters observed on **2026-10-22** were a **400,000 AXL**
 expedited deposit and a **24-hour** voting period (regular: 150,000 AXL / 72 hours).
 Axe queries current parameters rather than hardcoding these figures. Initially,
-the proposer needs one deposit + `2 * REWARD_AMOUNT` + `COSMOS_FEE_BUDGET`, all
-converted to the configured base units. Deposits are separate from transaction
+the proposer needs one deposit + `COSMOS_FEE_BUDGET`. The reward-pool funder needs
+`2 * REWARD_AMOUNT` + `COSMOS_FEE_BUDGET`, all in the configured base units.
+Deposits are separate from transaction
 fees and initial pool funding. Sequential passed proposals can reuse the refunded
 deposit; vetoed proposals can burn it. A separate prover-admin account also needs
 its fee budget.
@@ -77,11 +76,29 @@ Use the existing deployment environment described in [deploying.md](deploying.md
 `CHAIN`, `CHAIN_NAME`, `CHAIN_ID`, `RPC_URL`, `TOKEN_SYMBOL`, `DECIMALS`, `ENV`,
 `SALT`, `ITS_SALT`, `ITS_PROXY_SALT`, `TARGET_JSON`, `MNEMONIC` and all four EVM
 role keys. `MULTISIG_PROVER_MNEMONIC` is required explicitly on every network.
-It may contain the same mnemonic as `MNEMONIC` if that is the intended admin,
+Outside mainnet, it may contain the same mnemonic as `MNEMONIC` if that is the intended admin,
 but axe never selects the proposer as admin implicitly. Axe derives the admin
 address, displays it for approval and pins it in the saved public plan. No
 `PROVER_ADMIN` environment variable is needed. A different admin account is
 rejected on resume.
+
+`REWARDS_FUNDER_MNEMONIC` is also required explicitly on every network, with no
+fallback to `MNEMONIC`. It signs `AddRewards`, pays both pool deposits and that
+transaction's fee, and is also used for any fee replacement of that transaction.
+Its address is displayed and pinned in the deployment fingerprint. The mnemonic
+is never persisted. On non-mainnet networks, roles may explicitly share an account;
+axe combines their payments and checks one fee allowance per distinct account.
+
+Before network queries or transactions, mainnet rejects credentials that do not
+derive these operator-selected accounts:
+
+| Credential | Required mainnet address |
+| --- | --- |
+| `MNEMONIC` | `axelar1ykl3n6xjh00nyynknr4yzxvhtwwkd5vhcwrxye` |
+| `MULTISIG_PROVER_MNEMONIC` | `axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly` |
+| `REWARDS_FUNDER_MNEMONIC` | `axelar1rhhzwt6nwuzgezelv987hz602rlyz9ej6psqa9` |
+
+These address restrictions do not apply to testnet, stagenet or devnet-amplifier.
 
 Verifier keys remain with their operators. Axe discovers the eligible set at activation; it does not register verifier support or change Router administration.
 The service name is resolved from the network: `validators` on devnet-amplifier,

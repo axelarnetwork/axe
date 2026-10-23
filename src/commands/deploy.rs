@@ -7,6 +7,7 @@ use crate::state::{State, Step, StepKind};
 use crate::steps;
 
 pub(crate) mod configuration;
+pub(crate) mod cosmos_signer;
 pub(crate) mod hardened;
 
 pub struct DeployContext {

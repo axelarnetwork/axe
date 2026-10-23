@@ -43,6 +43,8 @@ pub struct State {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_mnemonic: Option<String>,
+    #[serde(skip)]
+    pub rewards_funder_mnemonic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployer_private_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -558,6 +560,7 @@ mod tests {
             env: Network::Testnet,
             cosm_salt: "cosmsalt".into(),
             admin_mnemonic: None,
+            rewards_funder_mnemonic: None,
             deployer_private_key: None,
             gateway_deployer_private_key: None,
             gateway_deployer: None,

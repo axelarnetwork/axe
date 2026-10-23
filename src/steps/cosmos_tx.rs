@@ -33,7 +33,8 @@ pub(super) struct StepTxContext<'a> {
 }
 
 pub async fn run(ctx: &mut DeployContext, step: &Step, step_name: &str) -> Result<()> {
-    let mnemonic = ctx.state.mnemonic.clone();
+    let mnemonic =
+        crate::commands::deploy::cosmos_signer::mnemonic(&ctx.state, step_name)?.to_owned();
     let env = ctx.state.env;
     let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
     let (lcd, chain_id, fee_denom, gas_price) = read_axelar_config(&ctx.target_json).await?;

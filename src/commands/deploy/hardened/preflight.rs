@@ -7,10 +7,12 @@ use base64::Engine;
 use eyre::Result;
 use serde_json::{Value, json};
 
+use super::plan;
 use super::types::{Preflight, ProtocolIdentity};
-use super::{governance, plan};
-use crate::cosmos::{check_axelar_balance, derive_axelar_wallet, read_axelar_config};
+use crate::cosmos::read_axelar_config;
 use crate::state::{State, StepStatus};
+
+mod funding;
 
 pub async fn validate(
     state: &State,
@@ -58,28 +60,8 @@ pub async fn validate(
             "{name} lacks its remaining approved gas budget"
         );
     }
-    let (_, proposer) = derive_axelar_wallet(&state.mnemonic)?;
-    identities.insert("proposer", proposer.clone());
-    let mnemonic = state
-        .admin_mnemonic
-        .as_deref()
-        .ok_or_else(|| eyre::eyre!("missing prover admin"))?;
-    let (_, address) = derive_axelar_wallet(mnemonic)?;
-    eyre::ensure!(
-        address == plan.prover_admin,
-        "prover admin credential mismatch"
-    );
-    identities.insert("MULTISIG_PROVER_MNEMONIC", address.clone());
-    check_axelar_balance(
-        &lcd,
-        &chain_id,
-        &address.parse::<cosmrs::AccountId>()?,
-        &denom.parse::<cosmrs::Denom>()?,
-        remaining_budget(state, &address, true).await?,
-    )
-    .await?;
+    identities.extend(funding::check(state, &lcd, &chain_id, &denom).await?);
     check_verifier_count(state, &root, &lcd).await?;
-    check_proposer_funding(state, &lcd, &chain_id, &denom, &proposer).await?;
     validate_lcd_override(&lcd)?;
     super::contract_checks::available_before_start(state, &lcd).await?;
     let wiring = super::contract_checks::protocol(state, &lcd, &denom).await?;
@@ -211,78 +193,6 @@ async fn artifacts(state: &State) -> Result<BTreeMap<String, B256>> {
         hashes.insert(name, keccak256(code));
     }
     Ok(hashes)
-}
-
-async fn check_proposer_funding(
-    state: &State,
-    lcd: &str,
-    chain_id: &str,
-    denom: &str,
-    proposer: &str,
-) -> Result<()> {
-    let plan = state
-        .hardened_plan
-        .as_ref()
-        .ok_or_else(|| eyre::eyre!("missing plan"))?;
-    let deposit: u128 = if state.env.deployment_uses_governance() {
-        governance::deposit(lcd, denom).await?.parse()?
-    } else {
-        0
-    };
-    crate::ui::kv(
-        "proposal deposit (zero for direct execution)",
-        &format!("{deposit} {denom} (base units)"),
-    );
-    if state.env.deployment_uses_governance() {
-        crate::ui::info(
-            "This deposit is separate from transaction fees. Funding reserves one deposit for the sequential batches; reuse requires the preceding proposal to pass and its refund to arrive.",
-        );
-    } else {
-        crate::ui::info(
-            "Devnet executes directly: funding covers transaction fees and rewards, with no proposal deposit.",
-        );
-    }
-    let journal_path = super::storage::directory(state)?.join("journal.json");
-    let journal = if journal_path.exists() {
-        Some(serde_json::from_slice::<super::types::Journal>(
-            &tokio::fs::read(journal_path).await?,
-        )?)
-    } else {
-        None
-    };
-    let recorded = |step: &str| {
-        journal
-            .as_ref()
-            .is_some_and(|journal| journal.actions.contains_key(&format!("{step}/cosmos")))
-    };
-    let (remaining, escrowed) = proposal_deposit_status(state, &recorded);
-    let rewards = if !recorded("AddRewards")
-        && state
-            .steps
-            .iter()
-            .any(|s| s.name == "AddRewards" && s.status == StepStatus::Pending)
-    {
-        plan.reward_amount
-            .parse::<u128>()?
-            .checked_mul(2)
-            .ok_or_else(|| eyre::eyre!("reward amount overflow"))?
-    } else {
-        0
-    };
-    let fees = remaining_budget(state, proposer, true).await?;
-    let required = sequential_deposit(remaining, escrowed, deposit)
-        .checked_add(rewards)
-        .and_then(|amount| amount.checked_add(fees))
-        .ok_or_else(|| eyre::eyre!("funding requirement overflow"))?;
-    check_axelar_balance(
-        lcd,
-        chain_id,
-        &proposer.parse::<cosmrs::AccountId>()?,
-        &denom.parse::<cosmrs::Denom>()?,
-        required,
-    )
-    .await?;
-    Ok(())
 }
 
 pub(super) fn proposal_deposit_status(

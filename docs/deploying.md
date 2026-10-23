@@ -42,6 +42,10 @@ It reports missing variables together and validates credentials before
 writing the chain config or deployment state.
 
 The prover admin address is derived from the required `MULTISIG_PROVER_MNEMONIC`.
+`REWARDS_FUNDER_MNEMONIC` is required separately: it pays both reward-pool
+deposits and the funding transaction fee. The proposer only pays proposal deposits
+and its transaction fees. Mainnet checks all three Cosmos signers against the
+[required mainnet addresses](hardened-deploy.md#inputs-and-preflight) before deployment.
 There is no fallback to `MNEMONIC`. All role credentials are
 checked before transactions and must remain available on resume. New deployments
 save public state and a transaction journal; credentials are loaded from the
