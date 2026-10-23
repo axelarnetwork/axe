@@ -11,7 +11,6 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
-use crate::commands::deploy::hardened::canonical;
 use crate::config::ChainContract;
 use crate::evm::{ConstAddressDeployer, LegacyProxy, get_salt_from_key, read_artifact_bytecode};
 use crate::state::save_state;
@@ -166,7 +165,12 @@ async fn deploy_proxy<P: Provider>(
     let bytecode = Bytes::from(read_artifact_bytecode(artifact).await?);
     if ctx.state.env == Network::Mainnet {
         let factory = ConstAddressDeployer::new(
-            canonical::factory(provider, "ConstAddressDeployer").await?,
+            read_contract_address(
+                &ctx.target_json,
+                &ctx.axelar_id,
+                ChainContract::ConstAddressDeployer,
+            )
+            .await?,
             provider,
         );
         let salt = get_salt_from_key("AxelarGasService");
@@ -174,9 +178,8 @@ async fn deploy_proxy<P: Provider>(
             .deployedAddress(bytecode.clone(), deployer, salt)
             .call()
             .await?;
-        canonical::check_address(ctx.state.env, "AxelarGasService", address)?;
         ui::address("predicted Gas Service proxy", &address.to_string());
-        ui::info("Deploy and initialize the proxy atomically at the canonical mainnet address.");
+        ui::info("Deploy and initialize the proxy atomically at the predicted address.");
         let proxy = LegacyProxy::new(address, provider);
         let init = proxy.init(implementation, deployer, Bytes::new());
         let request = factory

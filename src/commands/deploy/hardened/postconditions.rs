@@ -17,9 +17,6 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
                 .iter()
                 .any(|s| s.name == name && s.status == StepStatus::Completed)
     };
-    if ctx.state.env == crate::types::Network::Mainnet {
-        canonical_addresses(ctx, &done).await?;
-    }
     if done("SaveDeployedContracts") {
         super::contract_checks::instantiated(ctx).await?;
         registration(ctx).await?;
@@ -30,8 +27,8 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     if done("RegisterOperators") {
         operators(ctx).await?;
     }
-    if done("DeployInterchainTokenService") && ctx.state.env == crate::types::Network::Mainnet {
-        canonical_its_implementations(ctx).await?;
+    if done("DeployInterchainTokenService") {
+        its_implementations(ctx).await?;
     }
     if done("WaitItsHubRegistration") {
         its(ctx).await?;
@@ -39,7 +36,7 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn canonical_its_implementations(ctx: &DeployContext) -> Result<()> {
+async fn its_implementations(ctx: &DeployContext) -> Result<()> {
     let provider = ProviderBuilder::new().connect_http(ctx.rpc_url.parse()?);
     for (proxy_name, implementation_name) in [
         ("InterchainTokenService", "InterchainTokenServiceImpl"),
@@ -51,26 +48,17 @@ async fn canonical_its_implementations(ctx: &DeployContext) -> Result<()> {
             .implementation()
             .call()
             .await?;
-        super::canonical::check_address(ctx.state.env, implementation_name, implementation)?;
-    }
-    Ok(())
-}
-
-async fn canonical_addresses(ctx: &DeployContext, done: &impl Fn(&str) -> bool) -> Result<()> {
-    for (step, name) in [
-        ("ConstAddressDeployer", "ConstAddressDeployer"),
-        ("Create3Deployer", "Create3Deployer"),
-        ("AxelarGateway", "AxelarGateway"),
-        ("Operators", "Operators"),
-        ("AxelarGasService", "AxelarGasService"),
-        ("DeployInterchainTokenService", "InterchainTokenService"),
-        ("DeployInterchainTokenService", "InterchainTokenFactory"),
-    ] {
-        if done(step) {
-            let address =
-                read_contract_address_by_name(&ctx.target_json, &ctx.axelar_id, name).await?;
-            super::canonical::check_address(ctx.state.env, name, address)?;
-        }
+        let expected = ctx
+            .state
+            .steps
+            .iter()
+            .find(|step| step.name == "DeployInterchainTokenService")
+            .and_then(|step| step.its_address(implementation_name))
+            .ok_or_else(|| eyre::eyre!("missing saved {implementation_name} address"))?;
+        eyre::ensure!(
+            implementation == expected,
+            "{proxy_name}: implementation differs from the saved deployment address"
+        );
     }
     Ok(())
 }

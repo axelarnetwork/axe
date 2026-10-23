@@ -22,41 +22,35 @@ is allowed where no further transaction from that recipient is required.
 
 ## Mainnet addresses and authorities
 
-Mainnet preserves the established EVM factory, gateway, Operators, Gas Service,
-ITS and ITS Factory addresses. Preflight checks signer identities, salts and
-artifact-derived predictions before sending any transaction or proposal.
+Historical mainnet deployments used Interop-controlled EVM keys that this deployment
+team no longer controls. Axe deliberately does **not** require those signers or
+reproduce their contract addresses. Supply keys you control for each deployment
+role; final owners and the gateway operator are separate, explicitly chosen recipients.
 
-- `DEPLOYER_PRIVATE_KEY`, `GAS_SERVICE_DEPLOYER_PRIVATE_KEY` and
-  `ITS_DEPLOYER_PRIVATE_KEY` must sign as `0x6f24A47Fc8AE5441Eb47EFfC3665e70e69Ac3F05`.
-  Mainnet Operators deployment and management use `DEPLOYER_PRIVATE_KEY`.
-- `GATEWAY_DEPLOYER_PRIVATE_KEY` must sign as
-  `0xB8Cd93C83A974649D76B1c19f311f639e62272BC`. Before a fresh run, both confirmed
-  and pending nonce must be **2**. Implementation creation uses nonce 2 and proxy
-  creation uses nonce 3, yielding `0xe432150cce91c13a887f7D836923d5597adD8E31`.
-  Prepare this account through a separately reviewed procedure before starting.
-  Axe does not burn nonces. Do not use this account outside axe during deployment.
-- The canonical ConstAddressDeployer at
-  `0x98B2920D53612483F91F12Ed7754E51b4A77919e` must already exist with the expected
-  runtime code. If absent, bootstrap it with the reference deployment procedure
-  and canonical signer `0xE86375704CDb8491a5Ed82D90DceCE02Ee0ac25F` at nonce 0,
-  using `evm/legacy/ConstAddressDeployer.json` from the deployments checkout,
-  before starting axe. Axe verifies and reuses it; it does
-  not try to reproduce it with the general deployment key after compatibility probes.
-- Create3Deployer is verified and reused if present, or deployed via CREATE2 with
-  salt `Create3Deployer`. Operators uses CREATE2 with salt `Operators`.
-  The Gas Service proxy uses CREATE2 with salt `AxelarGasService` and is initialized
-  in the same transaction. Its implementation still uses CREATE.
+- Axe deploys ConstAddressDeployer with `DEPLOYER_PRIVATE_KEY`, then Create3Deployer
+  through that factory using CREATE2 with salt `Create3Deployer`.
+  Both factories' runtime code is checked against constructor simulation of the
+  pinned artifacts. Existing Interop factories are not required or adopted.
+- Mainnet Operators deployment and management use `DEPLOYER_PRIVATE_KEY` and
+  CREATE2 salt `Operators`. The Gas Service proxy uses the newly deployed factory,
+  `GAS_SERVICE_DEPLOYER_PRIVATE_KEY`, and CREATE2 salt `AxelarGasService`; it is
+  initialized atomically. Its implementation uses CREATE.
+- The gateway address is predicted from `GATEWAY_DEPLOYER_PRIVATE_KEY` and its
+  actual nonce, then pinned before Cosmos registration. No nonce burning or
+  starting nonce of 2 is required. Do not use that account outside axe from
+  prediction until gateway deployment completes.
 - Set `ITS_SALT=v2.2.0` and `ITS_PROXY_SALT=v1.0.0`. `SALT` remains the Cosmos
   deployment salt and does not override mainnet EVM contract salts.
-- The ITS implementation uses CREATE3 with salt `ITS v2.2.0 Implementation`,
-  yielding `0x4Aca663c242D31F85b77bf27d5D7dA4cF69fa7bd`. The factory implementation
-  uses CREATE2 with salt `ITS v2.2.0`, yielding
-  `0x6977477Bd4C053E1BfD0B6F287060c2A4E5E1aA1` with this release's artifacts.
-  Preflight checks both predictions, and postconditions read both proxies to
-  verify their implementation addresses. Testnet uses the same methods with its
-  configured signers, factories and salts; its addresses may differ.
-- Final owners remain the explicitly configured recipients. Canonical deployment
-  accounts do not force those accounts to remain owners.
+- ITS implementation deployment still uses CREATE3 with salt
+  `ITS v2.2.0 Implementation`; the factory implementation uses CREATE2 with salt
+  `ITS v2.2.0`. Their addresses depend on the selected signers and factories.
+  Postconditions check both proxies against their saved implementation addresses.
+
+Using the historical salts alone does not reproduce historical addresses: CREATE
+uses the creator and nonce, and these CREATE2/CREATE3 factories also incorporate
+the calling deployer into their salts. Registrations and integrations must use
+this deployment's actual addresses. Journaled transactions, pinned inputs, runtime
+code evidence, ownership checks and gateway address reconciliation remain enforced.
 
 The mainnet Cosmos upgrade admin for all three new contracts is the governance
 module `axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj`. The prover operational admin

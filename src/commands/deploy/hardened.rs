@@ -2,12 +2,12 @@
 mod batch_recovery_tests;
 #[cfg(test)]
 mod batch_tests;
-pub mod canonical;
 pub mod contract_checks;
 pub mod cosmos;
 mod environment;
 pub mod evidence;
 pub mod evm;
+pub mod evm_policy;
 pub mod governance;
 pub mod loading;
 pub mod plan;

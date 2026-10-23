@@ -27,15 +27,6 @@ pub async fn show(ctx: &DeployContext, step: &Step) -> Result<()> {
         ui::info(
             "Devnet: execute directly with the deployer authority or verify the recorded execution. No governance proposal, deposit or voting wait.",
         );
-    } else if ctx.state.env == crate::types::Network::Mainnet
-        && matches!(
-            step.name.as_str(),
-            "ConstAddressDeployer" | "Create3Deployer"
-        )
-    {
-        ui::info(
-            "Verify and reuse the canonical factory if present. Only Create3Deployer may be created here if absent, using the canonical signer and salt. Any new transaction requires approval.",
-        );
     } else {
         ui::info(description(&step.name));
     }

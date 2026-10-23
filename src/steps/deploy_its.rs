@@ -1,4 +1,3 @@
-use crate::commands::deploy::hardened::canonical;
 use crate::commands::deploy::hardened::evm as deployment_evm;
 use std::path::{Path, PathBuf};
 
@@ -33,7 +32,6 @@ async fn proxy_predeploy_codehash(artifact_base: &Path) -> Result<FixedBytes<32>
 }
 
 struct ItsDeploymentPlan {
-    network: crate::types::Network,
     step: Step,
     deployer: Address,
     service_owner: Address,
@@ -179,14 +177,14 @@ async fn prepare_its_plan<P: Provider>(
         .deployedAddress(Bytes::new(), deployer, factory_salt)
         .call()
         .await?;
-    check_proxy_predictions(ctx.state.env, its_proxy, factory_proxy)?;
+    ui::address("predicted ITS proxy", &format!("{its_proxy}"));
+    ui::address("predicted Factory proxy", &format!("{factory_proxy}"));
     let deployment = ctx
         .state
         .hardened_plan
         .as_ref()
         .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
     Ok(ItsDeploymentPlan {
-        network: ctx.state.env,
         service_owner: deployment.its_owner,
         factory_owner: deployment.factory_owner,
         step,
@@ -210,26 +208,6 @@ async fn prepare_its_plan<P: Provider>(
     })
 }
 
-fn check_proxy_predictions(
-    network: crate::types::Network,
-    its_proxy: Address,
-    factory_proxy: Address,
-) -> Result<()> {
-    crate::commands::deploy::hardened::canonical::check_address(
-        network,
-        "InterchainTokenService",
-        its_proxy,
-    )?;
-    crate::commands::deploy::hardened::canonical::check_address(
-        network,
-        "InterchainTokenFactory",
-        factory_proxy,
-    )?;
-    ui::address("predicted ITS proxy", &format!("{its_proxy}"));
-    ui::address("predicted Factory proxy", &format!("{factory_proxy}"));
-    Ok(())
-}
-
 struct NamedHelperDeployment<'a> {
     name: &'a str,
     artifact: &'a str,
@@ -247,7 +225,6 @@ async fn deploy_named_helper<P: Provider>(
         &ConstAddressDeployer::new(plan.const_deployer, provider),
         provider,
         Create2Deployment {
-            network: plan.network,
             deployer: plan.deployer,
             name: deployment.name,
             bytecode: read_artifact_bytecode(&plan.artifact(deployment.artifact)).await?,
@@ -398,7 +375,6 @@ async fn deploy_service_implementation<P: Provider>(
         .deployedAddress(Bytes::new(), plan.deployer, plan.implementation_salt)
         .call()
         .await?;
-    canonical::check_address(plan.network, "InterchainTokenServiceImpl", predicted)?;
     ui::address("predicted ITS implementation", &predicted.to_string());
     deploy_via_create3(
         &create3,
@@ -426,7 +402,6 @@ async fn deploy_its_factory<P: Provider>(
         &ConstAddressDeployer::new(plan.const_deployer, provider),
         provider,
         Create2Deployment {
-            network: plan.network,
             deployer: plan.deployer,
             name: "InterchainTokenFactoryImpl",
             bytecode: read_artifact_bytecode(
@@ -533,7 +508,6 @@ pub async fn run(
 /// Deploy a contract via CREATE2 using ConstAddressDeployer.
 /// Checks step state and on-chain code to skip already-deployed contracts.
 struct Create2Deployment<'a> {
-    network: crate::types::Network,
     deployer: Address,
     name: &'a str,
     bytecode: Vec<u8>,
@@ -548,7 +522,6 @@ async fn deploy_via_create2<P: Provider>(
     deployment: Create2Deployment<'_>,
 ) -> Result<Address> {
     let Create2Deployment {
-        network,
         deployer: deployer_addr,
         name,
         bytecode,
@@ -568,7 +541,6 @@ async fn deploy_via_create2<P: Provider>(
         .call()
         .await?;
 
-    canonical::check_address(network, name, predicted)?;
     ui::address(&format!("predicted {name}"), &predicted.to_string());
 
     // Check step state — only trust it if the saved address matches the predicted one

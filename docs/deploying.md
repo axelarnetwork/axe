@@ -4,8 +4,9 @@
 journaling and resumable governance waits on every network. See the
 [deployment and recovery guide](hardened-deploy.md) for the full workflow.
 Every network uses the same journal, approval and recovery system; there is no
-`--hardened` flag. Mainnet additionally enforces canonical EVM addresses and their
-deployment methods. Testnet permits custom deployment accounts and addresses.
+`--hardened` flag. All networks use your selected deployment accounts. Historical
+mainnet Interop keys and addresses are not required; mainnet keeps the release's
+deployment methods and salts, with addresses derived from your signers and factories.
 
 New deployments wait for **1 EVM confirmation** (the inclusion block). Use
 `axe deploy run --evm-confirmations 2` for one additional block, or
@@ -125,8 +126,7 @@ axe deploy status       # shows progress and proposal tallies
 axe deploy status --votes # also lists individual voters
 ```
 
-Mainnet uses canonical EVM addresses and requires their deployment accounts,
-factory bootstrap and prepared gateway nonce. See [mainnet prerequisites](hardened-deploy.md#mainnet-addresses-and-authorities).
+Mainnet uses operator-selected EVM keys and verifies the resulting deployment addresses. See [mainnet prerequisites](hardened-deploy.md#mainnet-addresses-and-authorities).
 The expedited deposit observed on 2026-10-22 was **400,000 AXL** for a **24-hour**
 vote, in addition to initial reward funding and transaction fees. Axe reads the
 current governance parameters before submission.
