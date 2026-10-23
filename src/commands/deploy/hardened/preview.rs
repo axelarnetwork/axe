@@ -95,7 +95,10 @@ async fn show_chain_contract_settings(ctx: &DeployContext, plan: &Plan) -> Resul
         &format!("{} source-chain blocks", plan.confirmation_height),
     );
     ui::info(
-        "Stored in VotingVerifier for event verification. Handlers using chain-specific finality may use that policy instead. This is separate from deployment transaction confirmations.",
+        "Block-counting verifier handlers use this value. RPCFinalizedBlock handlers ignore it and wait for the RPC's finalized block instead. This is separate from deployment transaction confirmations.",
+    );
+    ui::info(
+        "For finalized-block handlers, 1000000 is a guard against accidental block counting, not a million-block wait. Confirm the intended mode with the verifier operators; this setting does not select their handler mode.",
     );
     ui::section("Contract authorities");
     let governance =

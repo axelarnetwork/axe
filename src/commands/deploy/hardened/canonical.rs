@@ -26,6 +26,9 @@ pub const OPERATORS: Address = address!("7DdB2d76b80B0AA19bDEa48EB1301182F4Ceefb
 pub const GAS_SERVICE: Address = address!("2d5d7d31F671F86C782533cc367F14109a082712");
 pub const ITS: Address = address!("B5FB4BE02232B1bBA4dC8f81dc24C26980dE9e3C");
 pub const ITS_FACTORY: Address = address!("83a93500d23Fbc3e82B410aD07A6a9F7A0670D66");
+pub const ITS_IMPLEMENTATION: Address = address!("4Aca663c242D31F85b77bf27d5D7dA4cF69fa7bd");
+pub const ITS_FACTORY_IMPLEMENTATION: Address =
+    address!("6977477Bd4C053E1BfD0B6F287060c2A4E5E1aA1");
 const CONST_HASH: B256 = b256!("8fda47a596dfba923270da84e0c32a2d0312f1c03389f83e16f2b5a35ed37fbe");
 const CREATE3_HASH: B256 =
     b256!("f0ad66defbe082df243d4d274e626f557f97579c5c9e19f33d8093d6160808b7");
@@ -39,6 +42,8 @@ pub fn expected(name: &str) -> Option<Address> {
         "AxelarGasService" => Some(GAS_SERVICE),
         "InterchainTokenService" => Some(ITS),
         "InterchainTokenFactory" => Some(ITS_FACTORY),
+        "InterchainTokenServiceImpl" => Some(ITS_IMPLEMENTATION),
+        "InterchainTokenFactoryImpl" => Some(ITS_FACTORY_IMPLEMENTATION),
         _ => None,
     }
 }
@@ -105,6 +110,8 @@ pub async fn validate<P: Provider>(state: &State, provider: &P) -> Result<()> {
         "AxelarGasService",
         "InterchainTokenService",
         "InterchainTokenFactory",
+        "InterchainTokenServiceImpl",
+        "InterchainTokenFactoryImpl",
     ] {
         if let Some(address) = expected(name) {
             ui::address(name, &address.to_string());
@@ -140,6 +147,16 @@ async fn reject_unrecorded_deployments<P: Provider>(state: &State, provider: &P)
             "DeployInterchainTokenService/InterchainTokenFactoryProxy",
             "InterchainTokenFactory",
             ITS_FACTORY,
+        ),
+        (
+            "DeployInterchainTokenService/InterchainTokenServiceImpl",
+            "InterchainTokenServiceImpl",
+            ITS_IMPLEMENTATION,
+        ),
+        (
+            "DeployInterchainTokenService/InterchainTokenFactoryImpl",
+            "InterchainTokenFactoryImpl",
+            ITS_FACTORY_IMPLEMENTATION,
         ),
     ] {
         if !journal

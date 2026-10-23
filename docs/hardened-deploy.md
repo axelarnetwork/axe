@@ -48,6 +48,13 @@ artifact-derived predictions before sending any transaction or proposal.
   in the same transaction. Its implementation still uses CREATE.
 - Set `ITS_SALT=v2.2.0` and `ITS_PROXY_SALT=v1.0.0`. `SALT` remains the Cosmos
   deployment salt and does not override mainnet EVM contract salts.
+- The ITS implementation uses CREATE3 with salt `ITS v2.2.0 Implementation`,
+  yielding `0x4Aca663c242D31F85b77bf27d5D7dA4cF69fa7bd`. The factory implementation
+  uses CREATE2 with salt `ITS v2.2.0`, yielding
+  `0x6977477Bd4C053E1BfD0B6F287060c2A4E5E1aA1` with this release's artifacts.
+  Preflight checks both predictions, and postconditions read both proxies to
+  verify their implementation addresses. Testnet uses the same methods with its
+  configured signers, factories and salts; its addresses may differ.
 - Final owners remain the explicitly configured recipients. Canonical deployment
   accounts do not force those accounts to remain owners.
 
@@ -165,6 +172,18 @@ existing JSON-based workflows and takes precedence over public `.env` plan
 settings. A saved JSON deployment can also resume without either input; if you
 supply public `.env` plan settings, supply the full set and keep it identical to
 the saved plan.
+
+For Arc's documented `RPCFinalizedBlock` verifier rollout, set
+`CONFIRMATION_HEIGHT=1000000` before initialization. This is a guard against
+accidentally using a block-counting handler: a misconfigured handler would require
+a million confirmations for recent events. Correct `RPCFinalizedBlock` handlers
+ignore the numeric height and query the RPC's finalized block instead. Verify the
+actual handler configuration with the operators; the number alone does not select
+or enforce a finality mode. `EVM_CONFIRMATIONS` independently controls axe's
+deployment transaction waits. VotingVerifier v2.0.2 allows governance to change
+`confirmation_height` through `update_voting_parameters` for future polls without
+a contract migration. These settings are chain/handler-specific, not a universal
+mainnet-versus-testnet preset.
 
 Choose confirmation depth, poll expiry and thresholds for the target chain;
 the values above are illustrative. The actual prover set must have at least the

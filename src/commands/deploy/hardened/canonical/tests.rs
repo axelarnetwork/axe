@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use alloy::sol_types::SolValue;
 use alloy::{providers::ProviderBuilder, rpc::client::RpcClient, transports::mock::Asserter};
 
 use super::*;
@@ -24,6 +25,8 @@ fn canonical_policy_rejects_different_addresses_without_restricting_testnet() {
         "AxelarGasService",
         "InterchainTokenService",
         "InterchainTokenFactory",
+        "InterchainTokenServiceImpl",
+        "InterchainTokenFactoryImpl",
     ] {
         assert!(check_address(Network::Mainnet, name, expected(name).unwrap()).is_ok());
         assert!(check_address(Network::Mainnet, name, Address::ZERO).is_err());
@@ -106,4 +109,27 @@ fn canonical_create3_hash_reproduces_live_its_addresses() {
     );
     assert_ne!(predictions::create3(DEPLOYER, "ITS v2.2.0"), ITS);
     assert_ne!(predictions::create3(GATEWAY_DEPLOYER, "ITS v1.0.0"), ITS);
+    assert_eq!(
+        predictions::create3(DEPLOYER, "ITS v2.2.0 Implementation"),
+        ITS_IMPLEMENTATION
+    );
+    assert_ne!(
+        predictions::create3(DEPLOYER, "ITS v2.2.0"),
+        ITS_IMPLEMENTATION
+    );
+}
+
+#[test]
+fn factory_implementation_reference_vector_requires_the_release_salt() {
+    // ITS v2.2.0 factory creation bytecode plus the canonical ITS proxy constructor argument.
+    let init_hash = b256!("33c4c45b5ea335ef79cdc91e0a5078b598e17897263936cdcbd027ce465ee8fd");
+    let predict = |salt: &str| {
+        let salt = keccak256((DEPLOYER, crate::evm::get_salt_from_key(salt)).abi_encode_params());
+        CONST_DEPLOYER.create2(salt, init_hash)
+    };
+    assert_eq!(predict("ITS v2.2.0"), ITS_FACTORY_IMPLEMENTATION);
+    assert_ne!(
+        predict("ITS v2.2.0 Implementation"),
+        ITS_FACTORY_IMPLEMENTATION
+    );
 }

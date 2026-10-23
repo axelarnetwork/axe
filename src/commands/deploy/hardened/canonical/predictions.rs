@@ -6,7 +6,7 @@ use alloy::{
 };
 use eyre::Result;
 
-use super::{CONST_DEPLOYER, CREATE3_DEPLOYER, DEPLOYER, check_address};
+use super::{CONST_DEPLOYER, CREATE3_DEPLOYER, DEPLOYER, ITS, check_address};
 use crate::{
     evm::{get_salt_from_key, read_artifact_bytecode},
     types::Network,
@@ -43,8 +43,17 @@ pub(super) async fn validate(root: &Path) -> Result<()> {
     for (name, salt) in [
         ("InterchainTokenService", "ITS v1.0.0"),
         ("InterchainTokenFactory", "ITS Factory v1.0.0"),
+        ("InterchainTokenServiceImpl", "ITS v2.2.0 Implementation"),
     ] {
         check_address(Network::Mainnet, name, create3(DEPLOYER, salt))?;
     }
+    let artifact = root.join("node_modules/@axelar-network/interchain-token-service/artifacts/contracts/InterchainTokenFactory.sol/InterchainTokenFactory.json");
+    let mut code = read_artifact_bytecode(&artifact.to_string_lossy()).await?;
+    code.extend_from_slice(&ITS.abi_encode());
+    check_address(
+        Network::Mainnet,
+        "InterchainTokenFactoryImpl",
+        create2(CONST_DEPLOYER, DEPLOYER, "ITS v2.2.0", &code),
+    )?;
     Ok(())
 }

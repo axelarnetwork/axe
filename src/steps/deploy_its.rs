@@ -1,3 +1,4 @@
+use crate::commands::deploy::hardened::canonical;
 use crate::commands::deploy::hardened::evm as deployment_evm;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,7 @@ async fn proxy_predeploy_codehash(artifact_base: &Path) -> Result<FixedBytes<32>
 }
 
 struct ItsDeploymentPlan {
+    network: crate::types::Network,
     step: Step,
     deployer: Address,
     service_owner: Address,
@@ -184,6 +186,7 @@ async fn prepare_its_plan<P: Provider>(
         .as_ref()
         .ok_or_else(|| eyre::eyre!("missing deployment plan"))?;
     Ok(ItsDeploymentPlan {
+        network: ctx.state.env,
         service_owner: deployment.its_owner,
         factory_owner: deployment.factory_owner,
         step,
@@ -244,6 +247,7 @@ async fn deploy_named_helper<P: Provider>(
         &ConstAddressDeployer::new(plan.const_deployer, provider),
         provider,
         Create2Deployment {
+            network: plan.network,
             deployer: plan.deployer,
             name: deployment.name,
             bytecode: read_artifact_bytecode(&plan.artifact(deployment.artifact)).await?,
@@ -353,22 +357,7 @@ async fn deploy_its_service<P: Provider>(
         helpers.token_handler,
     )
         .abi_encode_params();
-    let implementation = deploy_via_create2(
-        &ConstAddressDeployer::new(plan.const_deployer, provider),
-        provider,
-        Create2Deployment {
-            deployer: plan.deployer,
-            name: "InterchainTokenServiceImpl",
-            bytecode: read_artifact_bytecode(
-                &plan.artifact("InterchainTokenService.sol/InterchainTokenService.json"),
-            )
-            .await?,
-            constructor_args: Some(constructor_args),
-            salt: plan.implementation_salt,
-            step: &plan.step,
-        },
-    )
-    .await?;
+    let implementation = deploy_service_implementation(plan, provider, constructor_args).await?;
     save_its_address(ctx, step_idx, "InterchainTokenServiceImpl", implementation).await?;
 
     ui::section("deploying InterchainTokenService proxy");
@@ -399,6 +388,33 @@ async fn deploy_its_service<P: Provider>(
     })
 }
 
+async fn deploy_service_implementation<P: Provider>(
+    plan: &ItsDeploymentPlan,
+    provider: &P,
+    constructor_args: Vec<u8>,
+) -> Result<Address> {
+    let create3 = Create3Deployer::new(plan.create3_deployer, provider);
+    let predicted = create3
+        .deployedAddress(Bytes::new(), plan.deployer, plan.implementation_salt)
+        .call()
+        .await?;
+    canonical::check_address(plan.network, "InterchainTokenServiceImpl", predicted)?;
+    ui::address("predicted ITS implementation", &predicted.to_string());
+    deploy_via_create3(
+        &create3,
+        provider,
+        "InterchainTokenServiceImpl",
+        read_artifact_bytecode(
+            &plan.artifact("InterchainTokenService.sol/InterchainTokenService.json"),
+        )
+        .await?,
+        constructor_args,
+        plan.implementation_salt,
+        predicted,
+    )
+    .await
+}
+
 async fn deploy_its_factory<P: Provider>(
     ctx: &mut DeployContext,
     step_idx: usize,
@@ -410,6 +426,7 @@ async fn deploy_its_factory<P: Provider>(
         &ConstAddressDeployer::new(plan.const_deployer, provider),
         provider,
         Create2Deployment {
+            network: plan.network,
             deployer: plan.deployer,
             name: "InterchainTokenFactoryImpl",
             bytecode: read_artifact_bytecode(
@@ -417,7 +434,7 @@ async fn deploy_its_factory<P: Provider>(
             )
             .await?,
             constructor_args: Some(plan.its_proxy.abi_encode()),
-            salt: plan.implementation_salt,
+            salt: plan.helper_salt,
             step: &plan.step,
         },
     )
@@ -516,6 +533,7 @@ pub async fn run(
 /// Deploy a contract via CREATE2 using ConstAddressDeployer.
 /// Checks step state and on-chain code to skip already-deployed contracts.
 struct Create2Deployment<'a> {
+    network: crate::types::Network,
     deployer: Address,
     name: &'a str,
     bytecode: Vec<u8>,
@@ -530,6 +548,7 @@ async fn deploy_via_create2<P: Provider>(
     deployment: Create2Deployment<'_>,
 ) -> Result<Address> {
     let Create2Deployment {
+        network,
         deployer: deployer_addr,
         name,
         bytecode,
@@ -548,6 +567,9 @@ async fn deploy_via_create2<P: Provider>(
         .deployedAddress(deploy_bytes.clone(), deployer_addr, salt)
         .call()
         .await?;
+
+    canonical::check_address(network, name, predicted)?;
+    ui::address(&format!("predicted {name}"), &predicted.to_string());
 
     // Check step state — only trust it if the saved address matches the predicted one
     if let Some(saved) = step.its_address(name)
