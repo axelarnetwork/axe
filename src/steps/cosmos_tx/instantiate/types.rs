@@ -47,11 +47,6 @@ pub(super) struct QueryErrorBody {
 }
 
 #[derive(Deserialize)]
-pub(super) struct StoredCode {
-    pub code_info: CodePermissions,
-}
-
-#[derive(Deserialize)]
 pub(super) struct CodePermissions {
     pub instantiate_permission: InstantiatePermission,
 }
