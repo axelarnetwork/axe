@@ -4,15 +4,17 @@ use alloy::primitives::{B256, U256, keccak256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use base64::Engine;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use serde_json::{Value, json};
 
 use super::plan;
-use super::types::{Preflight, ProtocolIdentity};
+use super::types::{CodeMetadata, ContractInfoResponse, Preflight, ProtocolIdentity};
 use crate::cosmos::read_axelar_config;
 use crate::state::{State, StepStatus};
 
 mod funding;
+#[cfg(test)]
+mod tests;
 
 pub async fn validate(
     state: &State,
@@ -142,29 +144,31 @@ async fn protocol_inputs(root: &Value, lcd: &str) -> Result<BTreeMap<String, Pro
         "InterchainTokenService",
     ] {
         let address = required(root, &format!("/axelar/contracts/{name}/address"))?;
-        let info: Value = crate::http::client()
-            .get(format!("{lcd}/cosmwasm/wasm/v1/contract/{address}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let contract: super::types::ContractInfo =
-            serde_json::from_value(info["contract_info"].clone())?;
-        let code: Value = crate::http::client()
-            .get(format!("{lcd}/cosmwasm/wasm/v1/code/{}", contract.code_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let checksum = required(&code, "/code_info/data_hash")?.to_owned();
+        let info: ContractInfoResponse =
+            crate::http::get_json(format!("{lcd}/cosmwasm/wasm/v1/contract/{address}").parse()?)
+                .await
+                .wrap_err_with(|| format!("could not read {name} contract metadata"))?;
+        let contract = info.contract_info;
+        // Read the stored checksum without downloading the WASM binary.
+        let code: CodeMetadata = crate::http::get_json(
+            format!("{lcd}/cosmwasm/wasm/v1/code-info/{}", contract.code_id).parse()?,
+        )
+        .await
+        .wrap_err_with(|| format!("could not read {name} code {} metadata", contract.code_id))?;
+        eyre::ensure!(
+            code.code_id == contract.code_id,
+            "{name}: code metadata ID does not match contract code ID"
+        );
+        eyre::ensure!(
+            hex::decode(&code.checksum).is_ok_and(|bytes| bytes.len() == 32),
+            "{name}: invalid code checksum in metadata"
+        );
         result.insert(
             name.into(),
             ProtocolIdentity {
                 address: address.into(),
                 code_id: contract.code_id,
-                checksum,
+                checksum: code.checksum,
                 creator: contract.creator,
                 admin: contract.admin,
             },

@@ -244,6 +244,11 @@ pub struct ContractInfo {
     pub admin: String,
 }
 #[derive(Deserialize)]
+pub struct CodeMetadata {
+    pub code_id: String,
+    pub checksum: String,
+}
+#[derive(Deserialize)]
 pub struct GatewayConfig {
     pub router: String,
     pub verifier: String,
