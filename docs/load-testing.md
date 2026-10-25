@@ -20,6 +20,23 @@ Sends a GMP message from Solana and manually relays it through the full Amplifie
 
 Pick the network with `--network` (or point `--config` at a specific chains-config file).
 
+### Relaying an already-sent message
+
+```bash
+axe test relay --network testnet --source-chain sui --destination-chain arbitrum-sepolia \
+  --message-id <tx digest>-<event index> --source-address 0x… \
+  --destination-address 0x… --payload-hash 0x…
+```
+
+Drives a message that is already on its source chain (for example one sent by
+`axe test load-test` while the relayer was down) through the Amplifier
+pipeline: verify_messages → vote → end_poll → route_messages →
+construct_proof. Prints the proof's `execute_data`; approval and execution on
+the destination chain are left to the destination relayer, or can be done by
+hand by sending `execute_data` as calldata to the destination gateway. The
+message fields must match the source chain's `ContractCall` event exactly.
+Requires `MNEMONIC` with a funded Cosmos wallet.
+
 ### ITS
 
 ```bash

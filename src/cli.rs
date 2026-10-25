@@ -664,6 +664,45 @@ pub enum TestCommands {
         mnemonic: Option<String>,
     },
 
+    /// Relay a GMP message that is already on its source chain through the
+    /// Amplifier pipeline (verify_messages → vote → end_poll → route_messages
+    /// → construct_proof) and print the proof's execute_data. For when the
+    /// relayer is down.
+    Relay {
+        /// Path to chains config JSON
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// Source chain axelar ID
+        #[arg(long)]
+        source_chain: String,
+
+        /// Destination chain axelar ID
+        #[arg(long)]
+        destination_chain: String,
+
+        /// Message id as the source chain's VotingVerifier expects it, e.g.
+        /// `<tx hash>-<log index>` for EVM or `<tx digest>-<event index>` for Sui
+        #[arg(long)]
+        message_id: String,
+
+        /// Source address exactly as emitted in the ContractCall event
+        #[arg(long)]
+        source_address: String,
+
+        /// Destination contract address exactly as emitted in the ContractCall event
+        #[arg(long)]
+        destination_address: String,
+
+        /// Payload hash (hex, with or without 0x)
+        #[arg(long)]
+        payload_hash: String,
+
+        /// Cosmos mnemonic for relay transactions
+        #[arg(long, env = "MNEMONIC", hide_env_values = true)]
+        mnemonic: Option<String>,
+    },
+
     /// Test ITS: deploy interchain token on source, deploy remotely to a destination chain via hub
     Its {
         /// Chain axelar ID (legacy EVM-only mode, uses state file)
