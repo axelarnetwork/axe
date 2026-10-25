@@ -1,13 +1,13 @@
 //! Sui (Move) primitives for axe load-testing. Parses `suiprivkey1...` bech32
 //! secrets into ed25519/secp256k1 keypairs, derives the canonical Sui address,
-//! wraps a JSON-RPC client with auto-fallback to public endpoints, and builds,
+//! wraps a gRPC client with auto-fallback to public endpoints, and builds,
 //! signs, and submits Programmable Transaction Blocks (PTBs) for the GMP
 //! `send_call` flow used by the load test.
 //!
 //! Submodules:
 //! - [`wallet`]: `SuiKeypair`, `SuiWallet`, address derivation, intent
 //!   signature serialization.
-//! - [`rpc`]: `SuiClient` (JSON-RPC + fallback) and the parsing helpers that
+//! - [`rpc`]: `SuiClient` (gRPC + fallback) and the parsing helpers that
 //!   lift Sui-RPC responses into `sui_sdk_types` values.
 //! - [`tx`]: `SubmittedTx`, `PtbBuilder`, BCS encoding, intent framing, and
 //!   `sign_and_submit`.
