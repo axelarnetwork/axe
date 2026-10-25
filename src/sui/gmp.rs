@@ -116,37 +116,15 @@ pub async fn send_gmp_call(
 
     let submitted = sign_and_submit(client, wallet, tx).await?;
 
-    // Find the ContractCall event in events[] to determine event_index.
     // The on-chain message_id is `0x{digest_hex}-{event_index}`.
-    let mut event_index = 0u32;
-    let mut source_address_hex = String::new();
-    let mut payload_hash_hex = String::new();
-    for (i, ev) in submitted.events.iter().enumerate() {
-        let ty = ev["type"].as_str().unwrap_or("");
-        if ty.ends_with("::events::ContractCall") {
-            event_index = i as u32;
-            source_address_hex = ev
-                .pointer("/parsedJson/source_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim_start_matches("0x")
-                .to_string();
-            payload_hash_hex = ev
-                .pointer("/parsedJson/payload_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim_start_matches("0x")
-                .to_string();
-            break;
-        }
-    }
+    let call = submitted.contract_call();
 
     Ok(GmpSendResult {
         digest: submitted.digest,
         success: submitted.success,
         error: submitted.error,
-        event_index,
-        source_address_hex,
-        payload_hash_hex,
+        event_index: call.event_index,
+        source_address_hex: call.source_address_hex,
+        payload_hash_hex: call.payload_hash_hex,
     })
 }

@@ -1,94 +1,93 @@
-//! Sui JSON-RPC client with auto-fallback to public endpoints, plus the
-//! response-parsing helpers (`owner_addr_hex`, `object_ref_from_json`,
-//! `parse_sui_digest`) used to lift raw JSON into `sui_sdk_types` values.
+//! Sui gRPC client with auto-fallback to public endpoints, plus the helpers
+//! that lift proto responses into `sui_sdk_types` values.
+//!
+//! Sui retired JSON-RPC on its public fullnodes (every method now answers
+//! "JSON-RPC on public fullnodes has been deprecated"), so this talks the
+//! gRPC API (`sui.rpc.v2`) through Mysten's `sui-rpc` crate instead.
 
-use base64::Engine;
+use std::time::Duration;
+
 use eyre::{Result, eyre};
+use futures::StreamExt;
 use serde_json::{Value, json};
+use sui_rpc::field::{FieldMask, FieldMaskUtil};
+use sui_rpc::proto::sui::rpc::v2::owner::OwnerKind;
+use sui_rpc::proto::sui::rpc::v2::simulate_transaction_request::TransactionChecks;
+use sui_rpc::proto::sui::rpc::v2::{
+    Bcs, EventFilter, ExecuteTransactionRequest, ExecutedTransaction, GetBalanceRequest,
+    GetObjectRequest, GetServiceInfoRequest, ListEventsRequest, ListOwnedObjectsRequest, Object,
+    Ordering, QueryOptions, SimulateTransactionRequest, Transaction, TransactionKind,
+    UserSignature, filter,
+};
 use sui_sdk_types::{Address as SuiAddress, Digest, ObjectReference};
+use tonic::{Code, Status};
 
-use super::tx::SubmittedTx;
-use crate::retry::{FALLBACK_ATTEMPTS, is_transient_default, retry_async};
+use super::tx::{SubmittedTx, SuiEvent};
+use crate::retry::{FALLBACK_ATTEMPTS, retry_async};
 
-/// Public Sui RPCs used as silent fallbacks if the configured endpoint errors.
-/// Mainnet and testnet share keys; we pick by URL hint.
+/// Public Sui gRPC endpoints used as silent fallbacks if the configured
+/// endpoint errors. Mainnet and testnet share keys; we pick by URL hint.
 const TESTNET_FALLBACKS: &[&str] = &[
     "https://fullnode.testnet.sui.io:443",
-    // blockvision.org's public testnet endpoint was retired (permanent 404,
-    // caught by fallback_endpoints_are_alive).
-    "https://sui-testnet-rpc.publicnode.com",
+    "https://sui-testnet-grpc.publicnode.com:443",
 ];
 const MAINNET_FALLBACKS: &[&str] = &[
     "https://fullnode.mainnet.sui.io:443",
-    // PublicNode retired sui-mainnet-rpc.publicnode.com (permanent 404,
-    // observed killing preflight in cron run 32793045257).
-    "https://sui-rpc.publicnode.com",
+    "https://sui-grpc.publicnode.com:443",
 ];
+
+/// How long `execute_transaction` waits for the submitted transaction to land
+/// in a checkpoint. The node's indexes (owned objects, events) only reflect
+/// checkpointed transactions, so the next PTB from the same wallet would
+/// otherwise pick stale gas-coin versions. Checkpoints land every few seconds.
+const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 enum SuiRpcError {
-    #[error("Sui RPC {endpoint} HTTP {status}: {body}")]
-    Http {
-        endpoint: String,
-        status: reqwest::StatusCode,
-        body: String,
-    },
-    #[error("Sui RPC {endpoint} {method}: {payload}")]
+    #[error("Sui gRPC {endpoint} {method}: {status}")]
     Rpc {
         endpoint: String,
-        method: String,
-        // Boxed to keep the Err variant small (clippy::result_large_err).
-        payload: Box<Value>,
-        message: String,
+        method: &'static str,
+        status: Status,
     },
-    #[error("Sui RPC {endpoint} non-JSON: {source}")]
-    NonJson {
-        endpoint: String,
-        source: serde_json::Error,
-    },
-    #[error("Sui RPC {endpoint} body read failed: {source}")]
-    Body {
-        endpoint: String,
-        source: reqwest::Error,
-    },
-    #[error("Sui RPC {endpoint} request failed: {source}")]
-    Request {
-        endpoint: String,
-        source: reqwest::Error,
-    },
-    #[error("Sui RPC exhausted all endpoints")]
+    #[error("Sui gRPC: no usable endpoints")]
     Exhausted,
 }
 
 impl SuiRpcError {
     /// Whether another pass over the endpoints could plausibly succeed.
-    /// Transport, HTTP-status, body-read, and non-JSON failures are endpoint
-    /// flakiness; a JSON-RPC error body is only retried when its text matches
-    /// the transient signatures (429, timeouts, 5xx) — a deterministic
-    /// failure (MoveAbort, object not found, insufficient gas) answers the
-    /// same on every pass, so retrying just delays the real error.
+    /// Transport-level and overload statuses are endpoint flakiness; a
+    /// deterministic rejection (bad argument, object not found, Move abort
+    /// surfaced as a precondition) answers the same on every pass, so
+    /// retrying just delays the real error.
     fn is_transient(&self) -> bool {
         match self {
-            Self::Rpc { .. } => is_transient_default(self),
-            _ => true,
+            Self::Rpc { status, .. } => !matches!(
+                status.code(),
+                Code::InvalidArgument
+                    | Code::NotFound
+                    | Code::AlreadyExists
+                    | Code::PermissionDenied
+                    | Code::Unauthenticated
+                    | Code::FailedPrecondition
+                    | Code::OutOfRange
+                    | Code::Unimplemented
+            ),
+            Self::Exhausted => false,
         }
-    }
-
-    fn is_query_events_indexer_pending(&self) -> bool {
-        matches!(
-            self,
-            Self::Rpc { message, .. }
-                if message.contains("Could not find the referenced transaction events")
-                    && message.contains("TransactionDigest")
-        )
     }
 }
 
 #[derive(Clone)]
+struct Endpoint {
+    url: String,
+    client: sui_rpc::Client,
+}
+
+#[derive(Clone)]
 pub struct SuiClient {
-    primary: String,
-    fallbacks: Vec<String>,
-    http: reqwest::Client,
+    /// Configured endpoint first, then the public fallbacks.
+    endpoints: Vec<Endpoint>,
 }
 
 impl SuiClient {
@@ -96,124 +95,66 @@ impl SuiClient {
         let primary = rpc_url.trim_end_matches('/').to_string();
         let fallbacks = if primary.contains("mainnet") {
             MAINNET_FALLBACKS
-                .iter()
-                .filter(|u| **u != primary)
-                .map(|s| (*s).to_string())
-                .collect()
         } else {
             TESTNET_FALLBACKS
-                .iter()
-                .filter(|u| **u != primary)
-                .map(|s| (*s).to_string())
-                .collect()
         };
-        Self {
-            primary,
-            fallbacks,
-            http: crate::http::client().clone(),
-        }
-    }
-
-    /// JSON-RPC call with silent fallback on transient failures.
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        self.call_typed(method, params)
-            .await
-            .map_err(eyre::Report::new)
+        let endpoints = std::iter::once(primary.as_str())
+            .chain(fallbacks.iter().copied().filter(|u| *u != primary))
+            .filter_map(|url| match sui_rpc::Client::new(url) {
+                Ok(client) => Some(Endpoint {
+                    url: url.to_string(),
+                    client,
+                }),
+                Err(err) => {
+                    crate::ui::warn(&format!("Sui gRPC: skipping endpoint {url}: {err}"));
+                    None
+                }
+            })
+            .collect();
+        Self { endpoints }
     }
 
     /// One pass over `[primary, ...fallbacks]`, retried up to
     /// [`FALLBACK_ATTEMPTS`] passes with geometric backoff while the last
     /// error of a pass looks transient ([`SuiRpcError::is_transient`]).
-    /// Every pass reuses the same serialized params, so re-POSTing a signed
-    /// transaction is safe — Sui dedups by digest.
-    async fn call_typed(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> std::result::Result<Value, SuiRpcError> {
-        let mut endpoints = vec![self.primary.clone()];
-        endpoints.extend(self.fallbacks.iter().cloned());
+    /// `op` is re-invoked per endpoint with a handle on that endpoint, so
+    /// re-sending a signed transaction is safe — Sui dedups by digest.
+    async fn call<T, F, Fut>(&self, method: &'static str, op: F) -> Result<T>
+    where
+        F: Fn(sui_rpc::Client) -> Fut,
+        Fut: Future<Output = std::result::Result<T, Status>>,
+    {
         retry_async(
-            &format!("Sui RPC {method}"),
+            &format!("Sui gRPC {method}"),
             FALLBACK_ATTEMPTS,
             SuiRpcError::is_transient,
-            || self.call_each_endpoint(method, &params, &endpoints),
+            || self.call_each_endpoint(method, &op),
         )
         .await
+        .map_err(eyre::Report::new)
     }
 
     /// Single pass: try each endpoint in order, moving on to the next
     /// whenever one fails; returns the last endpoint's error if all do.
-    async fn call_each_endpoint(
+    async fn call_each_endpoint<T, F, Fut>(
         &self,
-        method: &str,
-        params: &Value,
-        endpoints: &[String],
-    ) -> std::result::Result<Value, SuiRpcError> {
+        method: &'static str,
+        op: &F,
+    ) -> std::result::Result<T, SuiRpcError>
+    where
+        F: Fn(sui_rpc::Client) -> Fut,
+        Fut: Future<Output = std::result::Result<T, Status>>,
+    {
         let mut last_err = None;
-        for endpoint in endpoints {
-            let body = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": method,
-                "params": params,
-            });
-            match self.http.post(endpoint).json(&body).send().await {
-                Ok(resp) => {
-                    let status = resp.status();
-                    match resp.text().await {
-                        Ok(text) => {
-                            if !status.is_success() {
-                                last_err = Some(SuiRpcError::Http {
-                                    endpoint: endpoint.clone(),
-                                    status,
-                                    body: text.chars().take(300).collect(),
-                                });
-                                continue;
-                            }
-                            match serde_json::from_str::<Value>(&text) {
-                                Ok(v) => {
-                                    if let Some(err) = v.get("error") {
-                                        last_err = Some(SuiRpcError::Rpc {
-                                            endpoint: endpoint.clone(),
-                                            method: method.to_string(),
-                                            payload: Box::new(err.clone()),
-                                            message: err
-                                                .get("message")
-                                                .and_then(Value::as_str)
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                        });
-                                        // RPC-level error usually applies on every endpoint.
-                                        // But still try fallbacks for transient issues.
-                                        continue;
-                                    }
-                                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
-                                }
-                                Err(e) => {
-                                    last_err = Some(SuiRpcError::NonJson {
-                                        endpoint: endpoint.clone(),
-                                        source: e,
-                                    });
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            last_err = Some(SuiRpcError::Body {
-                                endpoint: endpoint.clone(),
-                                source: e,
-                            });
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
-                    last_err = Some(SuiRpcError::Request {
-                        endpoint: endpoint.clone(),
-                        source: e,
+        for endpoint in &self.endpoints {
+            match op(endpoint.client.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(status) => {
+                    last_err = Some(SuiRpcError::Rpc {
+                        endpoint: endpoint.url.clone(),
+                        method,
+                        status,
                     });
-                    continue;
                 }
             }
         }
@@ -221,35 +162,42 @@ impl SuiClient {
     }
 
     pub async fn get_chain_identifier(&self) -> Result<String> {
-        let r = self.call("sui_getChainIdentifier", json!([])).await?;
-        Ok(r.as_str().unwrap_or_default().to_string())
+        self.call("GetServiceInfo", |mut client| async move {
+            let info = client
+                .ledger_client()
+                .get_service_info(GetServiceInfoRequest::default())
+                .await?
+                .into_inner();
+            Ok(info.chain_id().to_string())
+        })
+        .await
     }
 
     pub async fn get_reference_gas_price(&self) -> Result<u64> {
-        let r = self.call("suix_getReferenceGasPrice", json!([])).await?;
-        let s = r.as_str().ok_or_else(|| eyre!("rgp response not string"))?;
-        s.parse::<u64>().map_err(|e| eyre!("rgp parse: {e}"))
+        self.call("GetEpoch", |mut client| async move {
+            client.get_reference_gas_price().await
+        })
+        .await
     }
 
     pub async fn get_balance(&self, owner: &SuiAddress) -> Result<u64> {
-        let r = self
-            .call(
-                "suix_getBalance",
-                json!([owner_addr_hex(owner), "0x2::sui::SUI"]),
-            )
-            .await?;
-        let s = r["totalBalance"]
-            .as_str()
-            .ok_or_else(|| eyre!("totalBalance missing in {r}"))?;
-        s.parse::<u64>().map_err(|e| eyre!("balance parse: {e}"))
+        let owner = owner_addr_hex(owner);
+        self.call("GetBalance", |mut client| {
+            let request = GetBalanceRequest::default()
+                .with_owner(owner.clone())
+                .with_coin_type("0x2::sui::SUI");
+            async move {
+                let response = client.state_client().get_balance(request).await?;
+                Ok(response.into_inner().balance().balance())
+            }
+        })
+        .await
     }
 
-    /// Get the largest SUI coin object owned by `owner`. Returns its ObjectReference
-    /// (id, version, digest) suitable for `GasPayment::objects`.
     /// Fetch ALL owned `Coin<T>` objects for `owner`, every page, sorted
-    /// largest-first. A single `suix_getCoins` page (50 items) is NOT the
-    /// whole wallet: cron refunds fragment it into hundreds of small coins,
-    /// and picking only from page one made the largest real coin invisible.
+    /// largest-first. A single page (100 items) is NOT the whole wallet:
+    /// cron refunds fragment it into hundreds of small coins, and picking
+    /// only from page one made the largest real coin invisible.
     pub async fn all_coins_of_type(
         &self,
         owner: &SuiAddress,
@@ -257,29 +205,39 @@ impl SuiClient {
     ) -> Result<Vec<(ObjectReference, u128)>> {
         // 20 pages x 100 = 2000 objects — far beyond any sane wallet.
         const MAX_PAGES: usize = 20;
+        let owner = owner_addr_hex(owner);
+        let object_type = format!("0x2::coin::Coin<{coin_type}>");
         let mut coins: Vec<(ObjectReference, u128)> = Vec::new();
-        let mut cursor = Value::Null;
+        let mut page_token: Option<Vec<u8>> = None;
         for _ in 0..MAX_PAGES {
-            let r = self
-                .call(
-                    "suix_getCoins",
-                    json!([owner_addr_hex(owner), coin_type, cursor, 100]),
-                )
+            let page = self
+                .call("ListOwnedObjects", |mut client| {
+                    let mut request = ListOwnedObjectsRequest::default()
+                        .with_owner(owner.clone())
+                        .with_object_type(object_type.clone())
+                        .with_page_size(100)
+                        .with_read_mask(FieldMask::from_paths([
+                            "object_id",
+                            "version",
+                            "digest",
+                            "balance",
+                        ]));
+                    if let Some(token) = page_token.clone() {
+                        request = request.with_page_token(token);
+                    }
+                    async move {
+                        let response = client.state_client().list_owned_objects(request).await?;
+                        Ok(response.into_inner())
+                    }
+                })
                 .await?;
-            let arr = r["data"]
-                .as_array()
-                .ok_or_else(|| eyre!("getCoins(coin_type='{coin_type}') missing data: {r}"))?;
-            for c in arr {
-                let bal: u128 = c["balance"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                coins.push((object_ref_from_json(c)?, bal));
+            for object in page.objects() {
+                coins.push((object_ref_from_proto(object)?, u128::from(object.balance())));
             }
-            if !r["hasNextPage"].as_bool().unwrap_or(false) {
-                break;
+            match page.next_page_token_opt() {
+                Some(token) if !token.is_empty() => page_token = Some(token.to_vec()),
+                _ => break,
             }
-            cursor = r["nextCursor"].clone();
         }
         coins.sort_by_key(|(_, bal)| std::cmp::Reverse(*bal));
         Ok(coins)
@@ -325,90 +283,133 @@ impl SuiClient {
         Ok(picked)
     }
 
-    /// Fetch `(initial_shared_version, latest_version, digest)` for a shared
-    /// object. The first is what PTB inputs need; the latter two are useful
-    /// for owned-object inputs.
+    /// Fetch the `initial_shared_version` of a shared object, which is what
+    /// PTB shared-object inputs need.
     pub async fn get_shared_object_initial_version(&self, object_id: &SuiAddress) -> Result<u64> {
-        let r = self
-            .call(
-                "sui_getObject",
-                json!([
-                    owner_addr_hex(object_id),
-                    {"showOwner": true, "showPreviousTransaction": false}
-                ]),
-            )
-            .await?;
-        let owner = r
-            .pointer("/data/owner")
-            .ok_or_else(|| eyre!("getObject missing owner: {r}"))?;
-        if let Some(shared) = owner.get("Shared") {
-            let v: u64 = shared
-                .get("initial_shared_version")
-                .and_then(|x| x.as_u64())
-                .ok_or_else(|| eyre!("Shared.initial_shared_version missing: {shared}"))?;
-            return Ok(v);
-        }
-        Err(eyre!(
-            "object {} is not Shared; owner = {owner}",
-            owner_addr_hex(object_id)
-        ))
+        let object_id = owner_addr_hex(object_id);
+        self.call("GetObject", |mut client| {
+            let request = GetObjectRequest::default()
+                .with_object_id(object_id.clone())
+                .with_read_mask(FieldMask::from_paths(["owner"]));
+            let object_id = object_id.clone();
+            async move {
+                let response = client.ledger_client().get_object(request).await?;
+                let owner = response.into_inner().object().owner().clone();
+                if owner.kind() == OwnerKind::Shared {
+                    Ok(owner.version())
+                } else {
+                    Err(Status::failed_precondition(format!(
+                        "object {object_id} is not Shared; owner = {owner:?}"
+                    )))
+                }
+            }
+        })
+        .await
     }
 
-    /// Submit a fully-signed transaction. Returns the tx digest.
+    /// The address (or parent object id) owning `object_id`; `None` for
+    /// shared or immutable objects.
+    pub async fn get_object_owner(&self, object_id: &str) -> Result<Option<String>> {
+        let object_id = object_id.to_string();
+        self.call("GetObject", |mut client| {
+            let request = GetObjectRequest::default()
+                .with_object_id(object_id.clone())
+                .with_read_mask(FieldMask::from_paths(["owner"]));
+            async move {
+                let response = client.ledger_client().get_object(request).await?;
+                let owner = response.into_inner().object().owner().clone();
+                Ok(match owner.kind() {
+                    OwnerKind::Address | OwnerKind::Object | OwnerKind::ConsensusAddress => {
+                        Some(owner.address().to_string())
+                    }
+                    _ => None,
+                })
+            }
+        })
+        .await
+    }
+
+    /// Submit a fully-signed transaction and wait for it to be checkpointed,
+    /// so the node's indexes reflect it before the next call.
     pub async fn execute_transaction(
         &self,
         tx_bcs: &[u8],
         sigs: &[Vec<u8>],
     ) -> Result<SubmittedTx> {
-        let tx_b64 = base64::engine::general_purpose::STANDARD.encode(tx_bcs);
-        let sigs_b64: Vec<String> = sigs
-            .iter()
-            .map(|s| base64::engine::general_purpose::STANDARD.encode(s))
-            .collect();
-        let r = self
-            .call(
-                "sui_executeTransactionBlock",
-                json!([
-                    tx_b64,
-                    sigs_b64,
-                    {"showEffects": true, "showEvents": true},
-                    "WaitForLocalExecution"
-                ]),
+        let request = ExecuteTransactionRequest::default()
+            .with_transaction(Transaction::default().with_bcs(Bcs::from(tx_bcs.to_vec())))
+            .with_signatures(
+                sigs.iter()
+                    .map(|sig| UserSignature::default().with_bcs(Bcs::from(sig.clone())))
+                    .collect::<Vec<_>>(),
             )
+            .with_read_mask(FieldMask::from_paths([
+                "digest",
+                "effects.status",
+                "events.events.event_type",
+                "events.events.json",
+            ]));
+        let executed = self
+            .call("ExecuteTransaction", |mut client| {
+                let request = request.clone();
+                async move { execute_and_wait(&mut client, request).await }
+            })
             .await?;
-        let digest = r["digest"]
-            .as_str()
-            .ok_or_else(|| eyre!("execute response missing digest: {r}"))?
-            .to_string();
-        let status = r
-            .pointer("/effects/status/status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let success = status == "success";
-        let error = if success {
-            None
-        } else {
-            r.pointer("/effects/status/error")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        };
-        let events = r
-            .get("events")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        Ok(SubmittedTx {
-            digest,
-            success,
-            error,
-            events,
-        })
+        Ok(submitted_tx(&executed))
     }
 
-    /// Query recent `MessageApproved` events from a Move events module
-    /// (typically the AxelarGateway events module) and return whether one
-    /// matching `(source_chain, message_id)` exists.
+    /// Dry-run `kind` as `sender` (no gas needed, like JSON-RPC's
+    /// `devInspect`) and return the BCS bytes of the first value returned by
+    /// command `command_index`.
+    pub async fn simulate_return_value(
+        &self,
+        sender: &SuiAddress,
+        kind: TransactionKind,
+        command_index: usize,
+    ) -> Result<Vec<u8>> {
+        let request = SimulateTransactionRequest::default()
+            .with_transaction(
+                Transaction::default()
+                    .with_kind(kind)
+                    .with_sender(owner_addr_hex(sender)),
+            )
+            .with_checks(TransactionChecks::Disabled)
+            .with_read_mask(FieldMask::from_paths([
+                "transaction.effects.status",
+                "command_outputs",
+            ]));
+        self.call("SimulateTransaction", |mut client| {
+            let request = request.clone();
+            async move {
+                let response = client
+                    .execution_client()
+                    .simulate_transaction(request)
+                    .await?
+                    .into_inner();
+                let status = response.transaction().effects().status();
+                if !status.success() {
+                    return Err(Status::failed_precondition(format!(
+                        "simulation failed: {}",
+                        status.error().description()
+                    )));
+                }
+                response
+                    .command_outputs()
+                    .get(command_index)
+                    .and_then(|outputs| outputs.return_values().first())
+                    .map(|output| output.value().value().to_vec())
+                    .ok_or_else(|| {
+                        Status::data_loss(format!(
+                            "simulation returned no value for command {command_index}"
+                        ))
+                    })
+            }
+        })
+        .await
+    }
+
+    /// Whether a recent `MessageApproved` event of the gateway events module
+    /// matches `(source_chain, message_id)`.
     pub async fn has_message_approved(
         &self,
         gateway_events_type: &str,
@@ -419,7 +420,7 @@ impl SuiClient {
             .await
     }
 
-    /// Query for `MessageExecuted` event matching `(source_chain, message_id)`.
+    /// Whether a recent `MessageExecuted` event matches `(source_chain, message_id)`.
     pub async fn has_message_executed(
         &self,
         gateway_events_type: &str,
@@ -436,69 +437,127 @@ impl SuiClient {
         source_chain: &str,
         message_id: &str,
     ) -> Result<bool> {
-        // Walk pages of `suix_queryEvents` (newest-first) until we find a
-        // matching `(source_chain, message_id)` or hit `MAX_PAGES`. The
+        // Walk `ListEvents` newest-first until we find a matching
+        // `(source_chain, message_id)` or have scanned `MAX_EVENTS`. The
         // gateway can emit hundreds of MessageApproved events per minute on
-        // testnet, so the 50-newest snapshot from a single call isn't
-        // enough — our event ages out before we poll.
-        const PAGE_SIZE: usize = 100;
-        const MAX_PAGES: usize = 20; // 20 × 100 = 2000 newest events scanned
-        let mut cursor: Value = Value::Null;
-        for _ in 0..MAX_PAGES {
-            let r = match self
-                .call_typed(
-                    "suix_queryEvents",
-                    json!([
-                        {"MoveEventType": move_event_type},
-                        cursor,
-                        PAGE_SIZE,
-                        true,
-                    ]),
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(err) if err.is_query_events_indexer_pending() => return Ok(false),
-                Err(err) => return Err(eyre::Report::new(err)),
-            };
-            let arr = r
-                .get("data")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            for ev in &arr {
-                let Some(pj) = ev.get("parsedJson") else {
-                    continue;
-                };
-                // Sui's `MessageApproved` events nest `{source_chain,
-                // message_id, ...}` under a `message` key. `MessageExecuted`
-                // emits the fields at the top level. Try both shapes.
-                let inner = pj.get("message").unwrap_or(pj);
-                let src = inner
-                    .get("source_chain")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let mid = inner
-                    .get("message_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                if src == source_chain && mid == message_id {
-                    return Ok(true);
+        // testnet, so a small newest snapshot isn't enough — our event ages
+        // out before we poll.
+        const PAGE_SIZE: u32 = 100;
+        const MAX_EVENTS: usize = 2000;
+        let request = ListEventsRequest::default()
+            .with_filter(EventFilter::matching(filter::event::event_type(
+                move_event_type,
+            )))
+            .with_read_mask(FieldMask::from_paths([
+                "json",
+                "checkpoint",
+                "transaction_index",
+                "event_index",
+            ]))
+            .with_options(
+                QueryOptions::default()
+                    .with_ordering(Ordering::Descending)
+                    .with_limit(PAGE_SIZE),
+            );
+        self.call("ListEvents", |client| {
+            let request = request.clone();
+            async move {
+                let mut events = std::pin::pin!(client.list_events(request).take(MAX_EVENTS));
+                while let Some(response) = events.next().await {
+                    let response = response?;
+                    let Some(event) = response.event_opt() else {
+                        continue;
+                    };
+                    if event_matches(&prost_to_json(event.json_opt()), source_chain, message_id) {
+                        return Ok(true);
+                    }
                 }
+                Ok(false)
             }
-            let has_next = r
-                .get("hasNextPage")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !has_next {
-                break;
-            }
-            match r.get("nextCursor") {
-                Some(c) if !c.is_null() => cursor = c.clone(),
-                _ => break,
-            }
+        })
+        .await
+    }
+}
+
+/// Submit and wait for the checkpoint. A transaction that executed but whose
+/// checkpoint confirmation failed is still a submitted transaction, so it is
+/// returned (with a warning) rather than resubmitted.
+async fn execute_and_wait(
+    client: &mut sui_rpc::Client,
+    request: ExecuteTransactionRequest,
+) -> std::result::Result<ExecutedTransaction, Status> {
+    use sui_rpc::client::ExecuteAndWaitError;
+
+    let response = match client
+        .execute_transaction_and_wait_for_checkpoint(request, CHECKPOINT_TIMEOUT)
+        .await
+    {
+        Ok(response) => response,
+        Err(ExecuteAndWaitError::RpcError(status)) => return Err(status),
+        Err(ExecuteAndWaitError::CheckpointTimeout(response)) => {
+            crate::ui::warn("Sui gRPC: transaction executed, but checkpoint wait timed out");
+            response
         }
-        Ok(false)
+        Err(ExecuteAndWaitError::CheckpointStreamError { response, error }) => {
+            crate::ui::warn(&format!(
+                "Sui gRPC: transaction executed, but checkpoint stream failed: {error}"
+            ));
+            response
+        }
+        Err(err) => return Err(Status::invalid_argument(err.to_string())),
+    };
+    Ok(response.into_inner().transaction().clone())
+}
+
+fn submitted_tx(executed: &ExecutedTransaction) -> SubmittedTx {
+    let status = executed.effects().status();
+    let success = status.success();
+    let error = (!success).then(|| status.error().description().to_string());
+    let events = executed
+        .events()
+        .events()
+        .iter()
+        .map(|event| SuiEvent {
+            event_type: event.event_type().to_string(),
+            fields: prost_to_json(event.json_opt()),
+        })
+        .collect();
+    SubmittedTx {
+        digest: executed.digest().to_string(),
+        success,
+        error,
+        events,
+    }
+}
+
+/// Sui's `MessageApproved` events nest `{source_chain, message_id, ...}`
+/// under a `message` key. `MessageExecuted` emits the fields at the top
+/// level. Try both shapes.
+fn event_matches(parsed: &Value, source_chain: &str, message_id: &str) -> bool {
+    let inner = parsed.get("message").unwrap_or(parsed);
+    let field = |key: &str| inner.get(key).and_then(Value::as_str).unwrap_or_default();
+    field("source_chain") == source_chain && field("message_id") == message_id
+}
+
+/// Convert the gRPC JSON rendering (`google.protobuf.Value`) into `serde_json`.
+fn prost_to_json(value: Option<&prost_types::Value>) -> Value {
+    use prost_types::value::Kind;
+
+    match value.and_then(|v| v.kind.as_ref()) {
+        None | Some(Kind::NullValue(_)) => Value::Null,
+        Some(Kind::BoolValue(b)) => Value::Bool(*b),
+        Some(Kind::NumberValue(n)) => json!(n),
+        Some(Kind::StringValue(s)) => Value::String(s.clone()),
+        Some(Kind::ListValue(list)) => {
+            Value::Array(list.values.iter().map(|v| prost_to_json(Some(v))).collect())
+        }
+        Some(Kind::StructValue(fields)) => Value::Object(
+            fields
+                .fields
+                .iter()
+                .map(|(k, v)| (k.clone(), prost_to_json(Some(v))))
+                .collect(),
+        ),
     }
 }
 
@@ -506,58 +565,57 @@ pub(super) fn owner_addr_hex(a: &SuiAddress) -> String {
     format!("0x{}", hex::encode(a.as_bytes()))
 }
 
-pub(super) fn object_ref_from_json(v: &Value) -> Result<ObjectReference> {
-    let id = v["coinObjectId"]
-        .as_str()
-        .or_else(|| v["objectId"].as_str())
-        .or_else(|| v.pointer("/data/objectId").and_then(|x| x.as_str()))
-        .ok_or_else(|| eyre!("objectId missing in {v}"))?;
-    let version: u64 = v["version"]
-        .as_str()
-        .or_else(|| v.pointer("/data/version").and_then(|x| x.as_str()))
-        .ok_or_else(|| eyre!("version missing in {v}"))?
+fn object_ref_from_proto(object: &Object) -> Result<ObjectReference> {
+    let id = SuiAddress::from_hex(object.object_id())
+        .map_err(|e| eyre!("objectId hex '{}': {e:?}", object.object_id()))?;
+    let digest: Digest = object
+        .digest()
         .parse()
-        .map_err(|e| eyre!("version parse: {e}"))?;
-    let digest_str = v["digest"]
-        .as_str()
-        .or_else(|| v.pointer("/data/digest").and_then(|x| x.as_str()))
-        .ok_or_else(|| eyre!("digest missing in {v}"))?;
-    let id_addr = SuiAddress::from_hex(id).map_err(|e| eyre!("objectId hex: {e:?}"))?;
-    let digest = parse_sui_digest(digest_str)?;
-    Ok(ObjectReference::new(id_addr, version, digest))
-}
-
-/// Parse Sui's base58-encoded digest into the canonical 32-byte `Digest`.
-fn parse_sui_digest(s: &str) -> Result<Digest> {
-    let bytes = bs58::decode(s)
-        .into_vec()
-        .map_err(|e| eyre!("digest base58 decode: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(eyre!(
-            "digest decoded to {} bytes, expected 32",
-            bytes.len()
-        ));
-    }
-    let mut a = [0u8; 32];
-    a.copy_from_slice(&bytes);
-    Digest::from_bytes(a).map_err(|e| eyre!("digest parse: {e:?}"))
+        .map_err(|e| eyre!("object digest '{}': {e:?}", object.digest()))?;
+    Ok(ObjectReference::new(id, object.version(), digest))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAINNET_FALLBACKS, TESTNET_FALLBACKS};
+    use serde_json::json;
 
-    /// Network probe for the hardcoded fallback RPCs. Run on demand with
-    /// `cargo test -- --ignored` when a cron run smells like a dead
-    /// endpoint - a retired hostname here fails preflight for every route
-    /// (observed: sui-mainnet-rpc.publicnode.com, cron run 32793045257).
+    use super::{Endpoint, MAINNET_FALLBACKS, SuiClient, TESTNET_FALLBACKS, event_matches};
+
+    #[test]
+    fn event_match_handles_both_event_shapes() {
+        let approved = json!({"message": {"source_chain": "axelar", "message_id": "0xab-1"}});
+        let executed = json!({"source_chain": "axelar", "message_id": "0xab-1"});
+        assert!(event_matches(&approved, "axelar", "0xab-1"));
+        assert!(event_matches(&executed, "axelar", "0xab-1"));
+        assert!(!event_matches(&executed, "axelar", "0xab-2"));
+        assert!(!event_matches(&json!(null), "axelar", "0xab-1"));
+    }
+
+    /// Network probe for the hardcoded fallback gRPC endpoints. Run on demand
+    /// with `cargo test -- --ignored` when a cron run smells like a dead
+    /// endpoint - a retired hostname here fails preflight for every route.
     #[tokio::test]
     #[ignore = "hits live public endpoints"]
     async fn fallback_endpoints_are_alive() {
         let mut dead = Vec::new();
         for url in MAINNET_FALLBACKS.iter().chain(TESTNET_FALLBACKS) {
-            if let Err(reason) = crate::http::probe_endpoint_alive(url).await {
-                dead.push(reason);
+            // One endpoint at a time: `SuiClient::new` would mask a dead
+            // endpoint with its fallbacks.
+            let grpc = match sui_rpc::Client::new(*url) {
+                Ok(grpc) => grpc,
+                Err(err) => {
+                    dead.push(format!("{url}: {err}"));
+                    continue;
+                }
+            };
+            let client = SuiClient {
+                endpoints: vec![Endpoint {
+                    url: (*url).to_string(),
+                    client: grpc,
+                }],
+            };
+            if let Err(err) = client.get_chain_identifier().await {
+                dead.push(format!("{url}: {err}"));
             }
         }
         assert!(

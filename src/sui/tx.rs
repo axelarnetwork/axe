@@ -16,14 +16,59 @@ use super::wallet::SuiWallet;
 /// Sui's intent scope for a TransactionData payload: [scope=0, version=0, app_id=0].
 const TX_INTENT: [u8; 3] = [0, 0, 0];
 
+/// One Move event emitted by a submitted transaction.
+#[derive(Debug, Clone)]
+pub struct SuiEvent {
+    /// Fully-qualified Move type, e.g. `0x…::events::ContractCall`.
+    pub event_type: String,
+    /// The node's JSON rendering of the event fields. Callers pick the
+    /// fields of the event type they expect at the protocol boundary.
+    pub fields: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct SubmittedTx {
     pub digest: String,
     pub success: bool,
     pub error: Option<String>,
-    /// Move events are module-defined JSON-RPC payloads. Callers deserialize
-    /// the event type they expect at the protocol boundary.
-    pub events: Vec<Value>,
+    /// Emitted events in order; an event's position is the message id suffix.
+    pub events: Vec<SuiEvent>,
+}
+
+/// The `ContractCall` event of a GMP/ITS send: its index in `events` (the
+/// message id suffix) plus `source_id` and `payload_hash` as bare hex.
+/// Defaults to zero/empty when the transaction emitted no such event.
+#[derive(Debug, Clone, Default)]
+pub struct ContractCallEvent {
+    pub event_index: u32,
+    pub source_address_hex: String,
+    pub payload_hash_hex: String,
+}
+
+impl SubmittedTx {
+    pub fn contract_call(&self) -> ContractCallEvent {
+        self.events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.event_type.ends_with("::events::ContractCall"))
+            .map(|(index, event)| {
+                let field = |key: &str| {
+                    event
+                        .fields
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim_start_matches("0x")
+                        .to_string()
+                };
+                ContractCallEvent {
+                    event_index: index as u32,
+                    source_address_hex: field("source_id"),
+                    payload_hash_hex: field("payload_hash"),
+                }
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Build a Move-call PTB that invokes `package::module::function(args...)`,
