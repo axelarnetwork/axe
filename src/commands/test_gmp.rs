@@ -17,6 +17,7 @@ use sender_receiver::ensure_sender_receiver_deployed;
 use source::send_evm_call_contract;
 
 use crate::cli::resolve_axelar_id;
+use crate::commands::test_helpers::CosmosTxContext;
 use crate::config::{AxelarChainContract, ChainConfig, ChainContract, ChainsConfig};
 use crate::cosmos::{check_axelar_balance, derive_axelar_wallet};
 use crate::preflight;
@@ -29,6 +30,130 @@ use crate::ui;
 
 const TOTAL_STEPS: usize = 8;
 const MIN_RELAY_BALANCE_UAXL: u128 = 100_000;
+/// `axe test relay` runs the Amplifier steps only (2-6 of the GMP test).
+const RELAY_ONLY_STEPS: usize = 6;
+
+/// A message already emitted on its source chain, as the source chain's
+/// VotingVerifier expects it.
+pub struct RelayArgs {
+    pub source_chain: String,
+    pub destination_chain: String,
+    pub message_id: String,
+    pub source_address: String,
+    pub destination_address: String,
+    pub payload_hash: String,
+    pub mnemonic: Option<String>,
+}
+
+/// Relay an existing message through the Amplifier contracts and print the
+/// proof's `execute_data`, for when no relayer is running. Approval and
+/// execution on the destination chain are left to the destination relayer
+/// or to a manual `approveMessages(execute_data)` call.
+pub async fn run_relay(config: PathBuf, args: RelayArgs) -> Result<()> {
+    let cfg = ChainsConfig::load(&config).await?;
+    let mnemonic = args
+        .mnemonic
+        .or_else(|| std::env::var("MNEMONIC").ok())
+        .ok_or_else(|| eyre::eyre!("MNEMONIC env var or --mnemonic required for relay"))?;
+    let (signing_key, axelar_address) = derive_axelar_wallet(&mnemonic)?;
+    let (lcd, chain_id, fee_denom, gas_price) = cfg.axelar.cosmos_tx_params()?;
+    let src = &args.source_chain;
+    let dst = &args.destination_chain;
+
+    ui::section(&format!("Relay: {src} → {dst}"));
+    ui::kv("message id", &args.message_id);
+    ui::address("axelar address", &axelar_address);
+    check_axelar_balance(
+        &lcd,
+        &chain_id,
+        &axelar_address.parse::<cosmrs::AccountId>()?,
+        &fee_denom.parse::<cosmrs::Denom>()?,
+        MIN_RELAY_BALANCE_UAXL,
+    )
+    .await?;
+
+    // Consensus-era chains have no Amplifier contracts of their own: as a
+    // source, Axelar core verifies and routes the message itself; as a
+    // destination, core signs the command batch after routing instead of a
+    // prover.
+    let cosm_gateway = cfg
+        .axelar
+        .contract_address(AxelarChainContract::Gateway, src)
+        .ok();
+    let voting_verifier = cfg
+        .axelar
+        .contract_address(AxelarChainContract::VotingVerifier, src)
+        .ok();
+    let multisig_prover = cfg
+        .axelar
+        .contract_address(AxelarChainContract::MultisigProver, dst)
+        .ok();
+    let gmp_msg = json!({
+        "cc_id": {
+            "message_id": args.message_id,
+            "source_chain": src,
+        },
+        "destination_chain": dst,
+        "destination_address": args.destination_address,
+        "source_address": args.source_address,
+        "payload_hash": args.payload_hash.trim_start_matches("0x"),
+    });
+    let tx = CosmosTxContext {
+        signing_key: &signing_key,
+        axelar_address: &axelar_address,
+        lcd: &lcd,
+        chain_id: &chain_id,
+        fee_denom: &fee_denom,
+        gas_price,
+    };
+    match cosm_gateway {
+        Some(cosm_gateway) => {
+            relay::verify_and_route(
+                tx,
+                cosm_gateway,
+                voting_verifier,
+                &gmp_msg,
+                RELAY_ONLY_STEPS,
+            )
+            .await?;
+        }
+        None => ui::info(&format!(
+            "{src} has no Amplifier Gateway: it is a consensus-era chain, so Axelar core has \
+             already verified and routed the message. Skipping to construct_proof."
+        )),
+    }
+
+    let Some(multisig_prover) = multisig_prover else {
+        ui::info(&format!(
+            "{dst} has no MultisigProver: it is a consensus-era chain, so Axelar core signs the \
+             command batch next. Wait for the core EVM relayer, or run \
+             `axelard tx evm sign-commands {dst}` and submit the batch's execute_data to the \
+             {dst} gateway."
+        ));
+        return Ok(());
+    };
+    let ctx = relay::AmplifierContext {
+        axelar_address,
+        lcd,
+        chain_id,
+        fee_denom,
+        gas_price,
+        // Only the prover is used from here on.
+        cosm_gateway: cosm_gateway.unwrap_or_default().to_string(),
+        voting_verifier: voting_verifier.map(str::to_string),
+        multisig_prover: multisig_prover.to_string(),
+    };
+    let execute_data_hex = relay::construct_and_wait_proof(
+        &ctx,
+        &signing_key,
+        src,
+        &args.message_id,
+        RELAY_ONLY_STEPS,
+    )
+    .await?;
+    ui::kv("execute_data", &execute_data_hex);
+    Ok(())
+}
 
 async fn relay_message(
     cfg: &ChainsConfig,

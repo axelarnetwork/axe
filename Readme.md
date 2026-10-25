@@ -46,6 +46,7 @@ axe propose testnet avalanche --op pause --relay
 | Command                   | Description                                            | Docs |
 | ------------------------- | ------------------------------------------------------ | ---- |
 | `axe test gmp`            | End-to-end GMP test (manual relay supported)           | [testing](docs/load-testing.md) |
+| `axe test relay`          | Manually relay an already-sent GMP message             | [testing](docs/load-testing.md) |
 | `axe test its`            | Deploy + transfer an interchain token                  | [testing](docs/load-testing.md) |
 | `axe test load-test`      | Burst / sustained cross-chain load test                | [testing](docs/load-testing.md) |
 | `axe test express-execution` | Express-reimbursement test: originate or monitor    | — |
