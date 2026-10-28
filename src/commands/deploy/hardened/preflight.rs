@@ -4,13 +4,17 @@ use alloy::primitives::{B256, U256, keccak256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use base64::Engine;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use serde_json::{Value, json};
 
-use super::types::{Preflight, ProtocolIdentity};
-use super::{governance, plan};
-use crate::cosmos::{check_axelar_balance, derive_axelar_wallet, read_axelar_config};
+use super::plan;
+use super::types::{CodeMetadata, ContractInfoResponse, Preflight, ProtocolIdentity};
+use crate::cosmos::read_axelar_config;
 use crate::state::{State, StepStatus};
+
+mod funding;
+#[cfg(test)]
+mod tests;
 
 pub async fn validate(
     state: &State,
@@ -30,6 +34,7 @@ pub async fn validate(
         provider.get_chain_id().await? == plan.evm_chain_id,
         "RPC is on the wrong EVM network"
     );
+    super::evm_policy::validate(state)?;
     eyre::ensure!(
         provider
             .get_block_by_number(confirmation_policy.block_tag())
@@ -57,28 +62,8 @@ pub async fn validate(
             "{name} lacks its remaining approved gas budget"
         );
     }
-    let (_, proposer) = derive_axelar_wallet(&state.mnemonic)?;
-    identities.insert("proposer", proposer.clone());
-    let mnemonic = state
-        .admin_mnemonic
-        .as_deref()
-        .ok_or_else(|| eyre::eyre!("missing prover admin"))?;
-    let (_, address) = derive_axelar_wallet(mnemonic)?;
-    eyre::ensure!(
-        address == plan.prover_admin,
-        "prover admin credential mismatch"
-    );
-    identities.insert("MULTISIG_PROVER_MNEMONIC", address.clone());
-    check_axelar_balance(
-        &lcd,
-        &chain_id,
-        &address.parse::<cosmrs::AccountId>()?,
-        &denom.parse::<cosmrs::Denom>()?,
-        remaining_budget(state, &address, true).await?,
-    )
-    .await?;
+    identities.extend(funding::check(state, &lcd, &chain_id, &denom).await?);
     check_verifier_count(state, &root, &lcd).await?;
-    check_proposer_funding(state, &lcd, &chain_id, &denom, &proposer).await?;
     validate_lcd_override(&lcd)?;
     super::contract_checks::available_before_start(state, &lcd).await?;
     let wiring = super::contract_checks::protocol(state, &lcd, &denom).await?;
@@ -92,10 +77,14 @@ pub async fn validate(
         .iter()
         .map(|(name, identity)| (name, &identity.address))
         .collect();
-    let fingerprint = json!({"plan":plan,"network":state.env,"chain":state.axelar_id,"identities":identities,
+    let mut fingerprint = json!({"plan":plan,"network":state.env,"chain":state.axelar_id,"identities":identities,
         "salt":state.cosm_salt,"itsSalt":state.its_salt,"itsProxySalt":state.its_proxy_salt,
         "chainName":chain["name"],"tokenSymbol":chain["tokenSymbol"],"decimals":chain["decimals"],"operators":state.env.axelar_operators(),
         "protocolAddresses":addresses,"wiring":wiring,"artifacts":artifacts,"cosmosCodes":cosmos_codes,"governance":root["axelar"]["governanceAddress"]});
+    if state.env == crate::types::Network::Mainnet {
+        fingerprint["mainnetPolicy"] = json!({"evmAddresses":"configured-signers-v1", "upgradeAdmin":crate::steps::cosmos_tx::contract_admin("mainnet")});
+    }
+    fingerprint["proposalFlow"] = json!("instantiate-register-v1");
     super::inputs::check_fingerprint(&fingerprint)?;
     Ok(Preflight {
         fingerprint: keccak256(serde_json::to_vec(&fingerprint)?),
@@ -155,29 +144,31 @@ async fn protocol_inputs(root: &Value, lcd: &str) -> Result<BTreeMap<String, Pro
         "InterchainTokenService",
     ] {
         let address = required(root, &format!("/axelar/contracts/{name}/address"))?;
-        let info: Value = crate::http::client()
-            .get(format!("{lcd}/cosmwasm/wasm/v1/contract/{address}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let contract: super::types::ContractInfo =
-            serde_json::from_value(info["contract_info"].clone())?;
-        let code: Value = crate::http::client()
-            .get(format!("{lcd}/cosmwasm/wasm/v1/code/{}", contract.code_id))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let checksum = required(&code, "/code_info/data_hash")?.to_owned();
+        let info: ContractInfoResponse =
+            crate::http::get_json(format!("{lcd}/cosmwasm/wasm/v1/contract/{address}").parse()?)
+                .await
+                .wrap_err_with(|| format!("could not read {name} contract metadata"))?;
+        let contract = info.contract_info;
+        // Read the stored checksum without downloading the WASM binary.
+        let code: CodeMetadata = crate::http::get_json(
+            format!("{lcd}/cosmwasm/wasm/v1/code-info/{}", contract.code_id).parse()?,
+        )
+        .await
+        .wrap_err_with(|| format!("could not read {name} code {} metadata", contract.code_id))?;
+        eyre::ensure!(
+            code.code_id == contract.code_id,
+            "{name}: code metadata ID does not match contract code ID"
+        );
+        eyre::ensure!(
+            hex::decode(&code.checksum).is_ok_and(|bytes| bytes.len() == 32),
+            "{name}: invalid code checksum in metadata"
+        );
         result.insert(
             name.into(),
             ProtocolIdentity {
                 address: address.into(),
                 code_id: contract.code_id,
-                checksum,
+                checksum: code.checksum,
                 creator: contract.creator,
                 admin: contract.admin,
             },
@@ -208,96 +199,26 @@ async fn artifacts(state: &State) -> Result<BTreeMap<String, B256>> {
     Ok(hashes)
 }
 
-async fn check_proposer_funding(
+pub(super) fn proposal_deposit_status(
     state: &State,
-    lcd: &str,
-    chain_id: &str,
-    denom: &str,
-    proposer: &str,
-) -> Result<()> {
-    let plan = state
-        .hardened_plan
-        .as_ref()
-        .ok_or_else(|| eyre::eyre!("missing plan"))?;
-    let deposit: u128 = if state.env.deployment_uses_governance() {
-        governance::deposit(lcd, denom).await?.parse()?
-    } else {
-        0
-    };
-    crate::ui::kv(
-        "proposal deposit (zero for direct execution)",
-        &format!("{deposit} {denom} (base units)"),
-    );
-    if state.env.deployment_uses_governance() {
-        crate::ui::info(
-            "This deposit is separate from transaction fees. Funding reserves one deposit for the sequential batches; reuse requires the preceding proposal to pass and its refund to arrive.",
-        );
-    } else {
-        crate::ui::info(
-            "Devnet executes directly: funding covers transaction fees and rewards, with no proposal deposit.",
-        );
+    recorded: &impl Fn(&str) -> bool,
+) -> (bool, bool) {
+    let mut remaining = false;
+    let mut escrowed = false;
+    for submit in &state.steps {
+        let crate::state::StepKind::CosmosTx { proposal_key } = &submit.kind else {
+            continue;
+        };
+        let Some(wait) = state.steps.iter().find(|step| {
+            matches!(&step.kind, crate::state::StepKind::CosmosPoll { proposal_key: key } if key == proposal_key)
+        }) else {
+            continue;
+        };
+        let submitted = recorded(&submit.name) || state.proposals.contains_key(proposal_key);
+        remaining |= !submitted;
+        escrowed |= submitted && wait.status == StepStatus::Pending;
     }
-    let journal_path = super::storage::directory(state)?.join("journal.json");
-    let journal = if journal_path.exists() {
-        Some(serde_json::from_slice::<super::types::Journal>(
-            &tokio::fs::read(journal_path).await?,
-        )?)
-    } else {
-        None
-    };
-    let recorded = |step: &str| {
-        journal
-            .as_ref()
-            .is_some_and(|journal| journal.actions.contains_key(&format!("{step}/cosmos")))
-    };
-    let remaining = [
-        ("instantiate", "InstantiateChainContracts"),
-        ("register", "RegisterDeployment"),
-        ("itsHubRegister", "RegisterItsOnHub"),
-    ]
-    .iter()
-    .filter(|(key, step)| !state.proposals.contains_key(*key) && !recorded(step))
-    .count() as u128;
-    let rewards = if !recorded("AddRewards")
-        && state
-            .steps
-            .iter()
-            .any(|s| s.name == "AddRewards" && s.status == StepStatus::Pending)
-    {
-        plan.reward_amount
-            .parse::<u128>()?
-            .checked_mul(2)
-            .ok_or_else(|| eyre::eyre!("reward amount overflow"))?
-    } else {
-        0
-    };
-    let fees = remaining_budget(state, proposer, true).await?;
-    let escrowed = [
-        ("InstantiateChainContracts", "WaitInstantiateProposal"),
-        ("RegisterDeployment", "WaitRegisterProposal"),
-        ("RegisterItsOnHub", "WaitItsHubRegistration"),
-    ]
-    .iter()
-    .any(|(submit, wait)| {
-        recorded(submit)
-            && state
-                .steps
-                .iter()
-                .any(|step| step.name == *wait && step.status == StepStatus::Pending)
-    });
-    let required = sequential_deposit(remaining > 0, escrowed, deposit)
-        .checked_add(rewards)
-        .and_then(|amount| amount.checked_add(fees))
-        .ok_or_else(|| eyre::eyre!("funding requirement overflow"))?;
-    check_axelar_balance(
-        lcd,
-        chain_id,
-        &proposer.parse::<cosmrs::AccountId>()?,
-        &denom.parse::<cosmrs::Denom>()?,
-        required,
-    )
-    .await?;
-    Ok(())
+    (remaining, escrowed)
 }
 
 async fn remaining_budget(state: &State, sender: &str, cosmos: bool) -> Result<u128> {

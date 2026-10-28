@@ -1,4 +1,4 @@
-//! Reward pool creation messages for batch 2 and direct journaled reward payments.
+//! Reward pool creation messages for batch 1 and direct journaled reward payments.
 
 use cosmos_sdk_proto::cosmos::base::v1beta1::Coin as ProtoCoin;
 use eyre::Result;
@@ -8,8 +8,7 @@ use super::StepTxContext;
 use super::defaults::RewardPoolSettings;
 use crate::commands::deploy::DeployContext;
 use crate::cosmos::{
-    build_execute_msg_any, build_execute_msg_any_with_funds, read_axelar_contract_field,
-    sign_and_broadcast_cosmos_tx,
+    build_execute_msg_any_with_funds, read_axelar_contract_field, sign_and_broadcast_cosmos_tx,
 };
 use crate::ui;
 
@@ -137,25 +136,4 @@ pub(super) async fn run_add_rewards(ctx: &DeployContext, tx: StepTxContext<'_>) 
     ui::success("rewards added to both pools");
 
     Ok(())
-}
-
-pub(super) async fn batch_messages(
-    ctx: &DeployContext,
-    sender: &str,
-    chain: &str,
-    env: &str,
-) -> Result<Vec<cosmrs::Any>> {
-    let rewards =
-        read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Rewards/address").await?;
-    let multisig =
-        read_axelar_contract_field(&ctx.target_json, "/axelar/contracts/Multisig/address").await?;
-    let verifier = read_axelar_contract_field(
-        &ctx.target_json,
-        &format!("/axelar/contracts/VotingVerifier/{chain}/address"),
-    )
-    .await?;
-    reward_pool_messages(env, chain, &verifier, &multisig)
-        .iter()
-        .map(|message| build_execute_msg_any(sender, &rewards, message))
-        .collect()
 }

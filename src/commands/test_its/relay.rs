@@ -12,7 +12,7 @@
 use alloy::{
     primitives::{Address, Bytes, FixedBytes, keccak256},
     providers::Provider,
-    rpc::types::TransactionRequest,
+    rpc::types::{TransactionReceipt, TransactionRequest},
 };
 use eyre::Result;
 use serde_json::json;
@@ -23,8 +23,8 @@ use crate::commands::test_helpers::{
     wait_for_proof,
 };
 use crate::cosmos::{
-    SecondLegInfo, build_execute_msg_any, check_cosmos_routed, check_hub_approved,
-    discover_second_leg, sign_and_broadcast_cosmos_tx,
+    SecondLegInfo, build_execute_msg_any, check_cosmos_routed, discover_second_leg,
+    sign_and_broadcast_cosmos_tx,
 };
 use crate::evm::{AxelarAmplifierGateway, InterchainTokenService};
 use crate::timing::{
@@ -102,7 +102,6 @@ pub(super) async fn relay_to_hub(request: HubRelayRequest<'_>) -> Result<()> {
 
 pub(super) struct DestinationRelayRequest<'a, P> {
     pub first_leg_message_id: &'a str,
-    pub src_axelar_id: &'a crate::types::ChainAxelarId,
     pub dest_payload: &'a [u8],
     pub dst_its_proxy: Address,
     pub dst_evm_gateway: Address,
@@ -110,35 +109,9 @@ pub(super) struct DestinationRelayRequest<'a, P> {
     pub tx: CosmosTxContext<'a>,
     pub dst_cosm_gateway: &'a str,
     pub dst_multisig_prover: &'a str,
-    pub axelarnet_gateway: &'a str,
     pub axelar_rpc: &'a str,
     pub step_base: usize,
     pub step_total: usize,
-}
-
-async fn wait_for_hub_approval(lcd: &str, gateway: &str, source_chain: &str, message_id: &str) {
-    let spinner = ui::wait_spinner("Polling hub for approval...");
-    for attempt in 0..AMPLIFIER_POLL_ATTEMPTS_5MIN {
-        if attempt > 0 {
-            tokio::time::sleep(AMPLIFIER_POLL_INTERVAL).await;
-        }
-        if check_hub_approved(lcd, gateway, source_chain, message_id)
-            .await
-            .unwrap_or(false)
-        {
-            spinner.finish_and_clear();
-            ui::success("hub approved first-leg message");
-            return;
-        }
-        spinner.set_message(format!(
-            "Waiting for hub approval (attempt {}/60)...",
-            attempt + 1
-        ));
-    }
-    spinner.finish_and_clear();
-    ui::warn(
-        "hub never reported the message as approved — proceeding anyway since it may have already been forwarded",
-    );
 }
 
 fn validate_second_leg_payload(payload: &[u8], second_leg: &SecondLegInfo) -> Result<()> {
@@ -193,7 +166,7 @@ async fn construct_destination_proof(
     step_total: usize,
 ) -> Result<Vec<u8>> {
     ui::step_header(
-        step_base + 3,
+        step_base + 2,
         step_total,
         "construct_proof on dest MultisigProver",
     );
@@ -217,7 +190,7 @@ async fn construct_destination_proof(
     let session_id = extract_event_attr(&response, "multisig_session_id")?;
     ui::kv("multisig_session_id", &session_id);
 
-    ui::step_header(step_base + 4, step_total, "Wait for proof signing");
+    ui::step_header(step_base + 3, step_total, "Wait for proof signing");
     let proof = wait_for_proof(tx.lcd, prover, &session_id).await?;
     ui::success("proof ready");
     let execute_data = proof["status"]["completed"]["execute_data"]
@@ -239,7 +212,7 @@ struct DestinationExecutionRequest<'a, P> {
 
 async fn approve_and_execute_destination<P: Provider>(
     request: DestinationExecutionRequest<'_, P>,
-) -> Result<()> {
+) -> Result<u64> {
     let DestinationExecutionRequest {
         provider,
         gateway,
@@ -251,7 +224,7 @@ async fn approve_and_execute_destination<P: Provider>(
         step_total,
     } = request;
     ui::step_header(
-        step_base + 5,
+        step_base + 4,
         step_total,
         "Submit proof to dest EVM gateway",
     );
@@ -259,7 +232,8 @@ async fn approve_and_execute_destination<P: Provider>(
         .to(gateway)
         .input(Bytes::from(execute_data).into());
     let pending = provider.send_transaction(approve).await?;
-    crate::evm::broadcast_and_log(pending, "evm approve tx").await?;
+    let receipt = crate::evm::broadcast_and_log(pending, "evm approve tx").await?;
+    let block = confirmed_block(&receipt)?;
 
     let command_id = keccak256(format!("axelar_{}", second_leg.message_id).as_bytes());
     ui::kv("commandId", &format!("{command_id}"));
@@ -271,6 +245,7 @@ async fn approve_and_execute_destination<P: Provider>(
             its_proxy,
             keccak256(dest_payload),
         )
+        .block(block.into())
         .call()
         .await?;
     ui::kv("isContractCallApproved", &format!("{approved}"));
@@ -280,7 +255,7 @@ async fn approve_and_execute_destination<P: Provider>(
         ));
     }
 
-    ui::step_header(step_base + 6, step_total, "Execute on destination ITS");
+    ui::step_header(step_base + 5, step_total, "Execute on destination ITS");
     let pending = InterchainTokenService::new(its_proxy, provider)
         .execute(
             command_id,
@@ -290,8 +265,8 @@ async fn approve_and_execute_destination<P: Provider>(
         )
         .send()
         .await?;
-    crate::evm::broadcast_and_log(pending, "its execute tx").await?;
-    Ok(())
+    let receipt = crate::evm::broadcast_and_log(pending, "its execute tx").await?;
+    confirmed_block(&receipt)
 }
 
 /// Drive the second leg actively: wait for hub-routed message → discover its
@@ -300,10 +275,9 @@ async fn approve_and_execute_destination<P: Provider>(
 /// `ITS.execute(...)` on the destination ITS proxy.
 pub(super) async fn relay_to_destination<P: Provider>(
     request: DestinationRelayRequest<'_, P>,
-) -> Result<()> {
+) -> Result<u64> {
     let DestinationRelayRequest {
         first_leg_message_id,
-        src_axelar_id,
         dest_payload,
         dst_its_proxy,
         dst_evm_gateway,
@@ -311,24 +285,14 @@ pub(super) async fn relay_to_destination<P: Provider>(
         tx,
         dst_cosm_gateway,
         dst_multisig_prover,
-        axelarnet_gateway,
         axelar_rpc,
         step_base,
         step_total,
     } = request;
-    // Wait until the AxelarnetGateway hub has approved the first-leg message.
-    // executable_messages is keyed by the *source* chain of the message.
-    ui::step_header(step_base, step_total, "Wait for hub approval");
-    wait_for_hub_approval(
-        tx.lcd,
-        axelarnet_gateway,
-        src_axelar_id.as_str(),
-        first_leg_message_id,
-    )
-    .await;
-
+    // The caller already executed the hub message. Discover its routing event
+    // directly. executable_messages may no longer include a consumed message.
     // Discover the second-leg message_id
-    ui::step_header(step_base + 1, step_total, "Discover second-leg cc_id");
+    ui::step_header(step_base, step_total, "Discover second-leg cc_id");
     let spinner = ui::wait_spinner("Searching tendermint for hub-execute tx...");
     let second_leg = loop_discover_second_leg(axelar_rpc, first_leg_message_id, &spinner).await?;
     spinner.finish_and_clear();
@@ -350,7 +314,7 @@ pub(super) async fn relay_to_destination<P: Provider>(
 
     // Wait until the destination cosmos Gateway has the outgoing message
     ui::step_header(
-        step_base + 2,
+        step_base + 1,
         step_total,
         "Wait for destination cosmos gateway to publish",
     );
@@ -374,9 +338,18 @@ pub(super) async fn relay_to_destination<P: Provider>(
         step_base,
         step_total,
     })
-    .await?;
+    .await
+}
 
-    Ok(())
+pub(super) fn confirmed_block(receipt: &TransactionReceipt) -> Result<u64> {
+    eyre::ensure!(
+        receipt.status(),
+        "transaction {} reverted",
+        receipt.transaction_hash
+    );
+    receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("confirmed transaction has no block number"))
 }
 
 /// Poll `discover_second_leg` until it returns Some, with a spinner.

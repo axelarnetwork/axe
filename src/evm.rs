@@ -714,6 +714,7 @@ sol! {
     #[sol(rpc)]
     contract ConstAddressDeployer {
         function deploy(bytes bytecode, bytes32 salt) external returns (address deployedAddress_);
+        function deployAndInit(bytes bytecode, bytes32 salt, bytes init) external returns (address deployedAddress_);
         function deployedAddress(bytes bytecode, address sender, bytes32 salt) external view returns (address deployedAddress_);
     }
 

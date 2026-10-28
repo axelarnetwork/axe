@@ -7,6 +7,7 @@ use crate::state::{State, Step, StepKind};
 use crate::steps;
 
 pub(crate) mod configuration;
+pub(crate) mod cosmos_signer;
 pub(crate) mod hardened;
 
 pub struct DeployContext {
@@ -17,6 +18,17 @@ pub struct DeployContext {
 }
 
 fn resolve_evm_key(state: &State, step_name: &str) -> Result<String> {
+    if state.env == crate::types::Network::Mainnet
+        && matches!(
+            step_name,
+            "Operators" | "RegisterOperators" | "TransferOperatorsOwnership"
+        )
+    {
+        return state
+            .deployer_private_key
+            .clone()
+            .ok_or_else(|| eyre::eyre!("missing DEPLOYER_PRIVATE_KEY for mainnet Operators"));
+    }
     let (label, private_key) = match step_name {
         "EvmCompatibilityCheck" | "ConstAddressDeployer" | "Create3Deployer" => {
             ("deployerPrivateKey", state.deployer_private_key.as_deref())

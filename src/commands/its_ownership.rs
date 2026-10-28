@@ -580,25 +580,11 @@ async fn probe_sui(entry: &ItsEntry) -> Result<OwnershipProbe> {
 }
 
 async fn query_sui_object_owner(client: &SuiClient, object_id: &str) -> FieldResult {
-    let result = client
-        .call(
-            "sui_getObject",
-            json!([object_id, {"showOwner": true, "showPreviousTransaction": false}]),
-        )
+    client
+        .get_object_owner(object_id)
         .await
-        .map_err(|err| err.to_string())?;
-    sui_owner_from_object(&result).ok_or_else(|| format!("owner not found for object {object_id}"))
-}
-
-fn sui_owner_from_object(value: &Value) -> Option<String> {
-    let owner = value.pointer("/data/owner")?;
-    if let Some(address) = owner.get("AddressOwner").and_then(Value::as_str) {
-        return Some(address.to_string());
-    }
-    owner
-        .get("ObjectOwner")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("owner not found for object {object_id}"))
 }
 
 async fn query_stellar_entry(entry: ItsEntry) -> OwnershipRow {

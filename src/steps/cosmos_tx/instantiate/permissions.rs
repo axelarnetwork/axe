@@ -1,6 +1,6 @@
-use eyre::Result;
+use eyre::{Result, WrapErr};
 
-use super::types::{ChainCodeIds, InstantiateAccess, InstantiatePermission, StoredCode};
+use super::types::{ChainCodeIds, CodePermissions, InstantiateAccess, InstantiatePermission};
 
 #[cfg(test)]
 mod tests;
@@ -46,15 +46,15 @@ pub(super) async fn check(lcd: &str, coordinator: &str, codes: &ChainCodeIds) ->
         ("VotingVerifier", codes.verifier),
         ("MultisigProver", codes.prover),
     ] {
-        let url = format!("{}/cosmwasm/wasm/v1/code/{code}", lcd.trim_end_matches('/'));
-        let stored: StoredCode = crate::http::client()
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        permissions.push((name, code, stored.code_info.instantiate_permission));
+        // The /code/{code} endpoint also downloads the entire WASM binary.
+        let url = format!(
+            "{}/cosmwasm/wasm/v1/code-info/{code}",
+            lcd.trim_end_matches('/')
+        );
+        let stored: CodePermissions = crate::http::get_json(url.parse()?)
+            .await
+            .wrap_err_with(|| format!("could not read instantiate permissions for {name} code {code}; no permission check was skipped. Retry the deployment after restoring LCD access"))?;
+        permissions.push((name, code, stored.instantiate_permission));
     }
     validate_permissions(coordinator, &permissions)
 }

@@ -1,3 +1,4 @@
+use alloy::providers::ProviderBuilder;
 use eyre::Result;
 use serde_json::{Value, json};
 
@@ -18,6 +19,7 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     };
     if done("SaveDeployedContracts") {
         super::contract_checks::instantiated(ctx).await?;
+        registration(ctx).await?;
     }
     if done("AxelarGateway") {
         super::verification::gateway(ctx).await?;
@@ -25,11 +27,38 @@ pub async fn check(ctx: &DeployContext, completed: Option<&str>) -> Result<()> {
     if done("RegisterOperators") {
         operators(ctx).await?;
     }
-    if done("WaitRegisterProposal") {
-        registration(ctx).await?;
+    if done("DeployInterchainTokenService") {
+        its_implementations(ctx).await?;
     }
     if done("WaitItsHubRegistration") {
         its(ctx).await?;
+    }
+    Ok(())
+}
+
+async fn its_implementations(ctx: &DeployContext) -> Result<()> {
+    let provider = ProviderBuilder::new().connect_http(ctx.rpc_url.parse()?);
+    for (proxy_name, implementation_name) in [
+        ("InterchainTokenService", "InterchainTokenServiceImpl"),
+        ("InterchainTokenFactory", "InterchainTokenFactoryImpl"),
+    ] {
+        let proxy =
+            read_contract_address_by_name(&ctx.target_json, &ctx.axelar_id, proxy_name).await?;
+        let implementation = super::verification::ManagedContract::new(proxy, &provider)
+            .implementation()
+            .call()
+            .await?;
+        let expected = ctx
+            .state
+            .steps
+            .iter()
+            .find(|step| step.name == "DeployInterchainTokenService")
+            .and_then(|step| step.its_address(implementation_name))
+            .ok_or_else(|| eyre::eyre!("missing saved {implementation_name} address"))?;
+        eyre::ensure!(
+            implementation == expected,
+            "{proxy_name}: implementation differs from the saved deployment address"
+        );
     }
     Ok(())
 }

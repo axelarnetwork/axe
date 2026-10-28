@@ -33,7 +33,6 @@ pub(super) fn validate_submission(saved: &Transaction) -> Result<()> {
 pub(super) async fn check(ctx: &DeployContext, key: &str) -> Result<()> {
     let step = match key {
         "instantiate" => "InstantiateChainContracts",
-        "register" => "RegisterDeployment",
         "itsHubRegister" => "RegisterItsOnHub",
         _ => {
             eyre::bail!("unknown direct execution checkpoint");

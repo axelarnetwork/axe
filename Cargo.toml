@@ -73,11 +73,13 @@ ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 
 # Sui dependencies (load test).
 # We use Mysten's `sui-sdk-types` for canonical type defs (TransactionData,
-# ObjectRef, Address, etc.); JSON-RPC is hand-rolled in `src/sui.rs` to keep
-# the Sui blast radius minimal (no async-runtime or transport-layer deps
-# pulled in beyond what we already use). Auto-fallback handles flaky public
-# Sui endpoints.
-sui-sdk-types = { version = "0.3", features = ["serde", "hash"] }
+# ObjectRef, Address, etc.) and `sui-rpc` for the gRPC API: Sui retired
+# JSON-RPC on its public fullnodes. Auto-fallback in `src/sui/rpc.rs` handles
+# flaky public Sui endpoints.
+sui-sdk-types = { version = "0.4", features = ["serde", "hash"] }
+sui-rpc = "0.4"
+tonic = { version = "0.14", default-features = false }
+prost-types = "0.14"
 bech32 = "0.11"
 bcs = "0.1"
 blake2 = "0.10"

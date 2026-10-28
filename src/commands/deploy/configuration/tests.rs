@@ -7,7 +7,7 @@ use crate::state::{State, StepStatus, default_steps};
 
 fn complete_state() -> State {
     let key = PrivateKeySigner::random().to_bytes().to_string();
-    serde_json::from_value(json!({
+    let mut state: State = serde_json::from_value(json!({
         "axelarId": "test-chain",
         "rpcUrl": "http://localhost:8545",
         "targetJson": "testnet.json",
@@ -23,21 +23,54 @@ fn complete_state() -> State {
         "proposals": {},
         "steps": default_steps()
     }))
-    .unwrap()
+    .unwrap();
+    state.rewards_funder_mnemonic = Some(
+        Mnemonic::from_entropy([44; 32], Language::English)
+            .phrase()
+            .to_owned(),
+    );
+    state
 }
 
 #[test]
 fn init_reports_all_missing_and_blank_variables() {
     let error = validate_init_environment(|name| match name {
-        "GATEWAY_DEPLOYER_PRIVATE_KEY" | "ITS_SALT" => None,
+        "GATEWAY_DEPLOYER_PRIVATE_KEY" | "ITS_SALT" | "REWARDS_FUNDER_MNEMONIC" => None,
         "ITS_PROXY_SALT" => Some("  ".into()),
         _ => Some("configured".into()),
     })
     .unwrap_err()
     .to_string();
-    for name in ["GATEWAY_DEPLOYER_PRIVATE_KEY", "ITS_SALT", "ITS_PROXY_SALT"] {
+    for name in [
+        "GATEWAY_DEPLOYER_PRIVATE_KEY",
+        "ITS_SALT",
+        "ITS_PROXY_SALT",
+        "REWARDS_FUNDER_MNEMONIC",
+    ] {
         assert!(error.contains(name), "{error}");
     }
+}
+
+#[test]
+fn reward_funder_is_loaded_explicitly_and_missing_input_clears_it() {
+    let mut state = complete_state();
+    let funder = Mnemonic::from_entropy([45; 32], Language::English);
+    load_missing_environment(&mut state, |name| {
+        (name == "REWARDS_FUNDER_MNEMONIC").then(|| funder.phrase().to_owned())
+    });
+    assert_eq!(
+        state.rewards_funder_mnemonic.as_deref(),
+        Some(funder.phrase())
+    );
+    validate_state(&mut state).unwrap();
+    load_missing_environment(&mut state, |_| None);
+    assert!(state.rewards_funder_mnemonic.is_none());
+    assert!(
+        validate_state(&mut state)
+            .unwrap_err()
+            .to_string()
+            .contains("missing REWARDS_FUNDER_MNEMONIC")
+    );
 }
 
 #[test]
@@ -49,6 +82,7 @@ fn run_reports_all_missing_credentials_and_salts() {
     state.its_deployer_private_key = None;
     state.its_salt = Some(" ".into());
     state.its_proxy_salt = None;
+    state.rewards_funder_mnemonic = None;
 
     let error = validate_state(&mut state).unwrap_err().to_string();
     for name in [
@@ -58,6 +92,7 @@ fn run_reports_all_missing_credentials_and_salts() {
         "ITS_DEPLOYER_PRIVATE_KEY",
         "ITS_SALT",
         "ITS_PROXY_SALT",
+        "REWARDS_FUNDER_MNEMONIC",
     ] {
         assert!(error.contains(&format!("missing {name}")), "{error}");
     }
@@ -69,6 +104,7 @@ fn invalid_credentials_are_reported_without_exposing_their_values() {
     let mut state = complete_state();
     state.mnemonic = "invalid mnemonic must not be printed".into();
     state.admin_mnemonic = Some("invalid admin mnemonic must not be printed".into());
+    state.rewards_funder_mnemonic = Some("invalid funder mnemonic must not be printed".into());
     state.gateway_deployer_private_key = Some("invalid key must not be printed".into());
     state.rpc_url = "file:///tmp/rpc".into();
 
@@ -76,6 +112,7 @@ fn invalid_credentials_are_reported_without_exposing_their_values() {
     for name in [
         "MNEMONIC",
         "MULTISIG_PROVER_MNEMONIC",
+        "REWARDS_FUNDER_MNEMONIC",
         "GATEWAY_DEPLOYER_PRIVATE_KEY",
         "RPC_URL",
     ] {
@@ -100,6 +137,11 @@ fn repair_preserves_progress_and_existing_keys() {
         "GATEWAY_DEPLOYER_PRIVATE_KEY" => Some(key.clone()),
         "ITS_SALT" | "ITS_PROXY_SALT" => Some("restored".into()),
         "DEPLOYER_PRIVATE_KEY" => Some("must not overwrite saved key".into()),
+        "REWARDS_FUNDER_MNEMONIC" => Some(
+            Mnemonic::from_entropy([44; 32], Language::English)
+                .phrase()
+                .to_owned(),
+        ),
         _ => None,
     });
     validate_state(&mut state).unwrap();

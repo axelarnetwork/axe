@@ -14,10 +14,7 @@ pub(crate) mod rpc;
 mod signers;
 pub(crate) mod tx;
 
-pub use events::{
-    SecondLegInfo, check_cosmos_routed, check_hub_approved, discover_second_leg,
-    extract_proposal_id,
-};
+pub use events::{SecondLegInfo, check_cosmos_routed, discover_second_leg, extract_proposal_id};
 pub use rpc::{
     CosmwasmQueryError, CosmwasmQueryPending, check_axelar_balance, lcd_cosmwasm_smart_query,
     lcd_cosmwasm_smart_query_typed, lcd_fetch_code_id, lcd_query_proposal, read_axelar_config,

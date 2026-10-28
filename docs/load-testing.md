@@ -20,13 +20,35 @@ Sends a GMP message from Solana and manually relays it through the full Amplifie
 
 Pick the network with `--network` (or point `--config` at a specific chains-config file).
 
-### ITS
+### ITS with manual relay (EVM → EVM)
 
 ```bash
-axe test its
+axe --network testnet test its \
+  --source-chain unichain-sepolia-2 --destination-chain robinhood
 ```
 
-Deploys an interchain token locally, deploys it remotely to a destination chain via the ITS Hub, then sends a cross-chain transfer and verifies the balance on the destination. Relays through the full Amplifier pipeline (verify → vote → route → execute on hub).
+Uses the selected chains-config entries; reverse the two flags to test the other
+way. Both chains must have Amplifier gateways and ITS deployments, be registered
+on the ITS Hub, and trust each other. Verifiers must be online. Axe performs both
+relay legs itself, including proof construction, gateway approval and destination
+ITS execution; no external relayer is required.
+
+Set `MNEMONIC` to an Axelar wallet funded for relay fees, and `EVM_PRIVATE_KEY`
+(or `DEPLOYER_PRIVATE_KEY`) to a wallet funded on both EVM chains. No owner or
+prover-admin key is needed. Preflight checks the RPC chain IDs, balances, mutual
+trust and configured hub before sending transactions.
+
+Each EVM run creates a fresh test token, deploys it remotely, transfers one token
+(18 decimals by default), and checks the exact destination balance increase.
+`--amount` overrides token base units. `--gas-value` is an optional payment in wei
+to the gas service, defaulting to zero because axe manually relays the messages.
+Source finality is awaited before verification; this can take minutes on L2s.
+These smoke tests do not use the deployment journal or resume an interrupted run.
+
+Config mode also supports Solana → EVM with manual relay and a cached token
+setup. The older `test its --axelar-id ...` EVM path still targets Hedera and
+relies on external destination delivery; use the explicit chain pair above for
+an EVM test with both relay legs handled by axe.
 
 ## Load tests
 

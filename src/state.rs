@@ -43,6 +43,8 @@ pub struct State {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_mnemonic: Option<String>,
+    #[serde(skip)]
+    pub rewards_funder_mnemonic: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployer_private_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,18 +232,6 @@ pub fn default_steps() -> Vec<Step> {
             },
         ),
         pending_step("SaveDeployedContracts", K::CosmosQuery),
-        pending_step(
-            "RegisterDeployment",
-            K::CosmosTx {
-                proposal_key: "register".into(),
-            },
-        ),
-        pending_step(
-            "WaitRegisterProposal",
-            K::CosmosPoll {
-                proposal_key: "register".into(),
-            },
-        ),
         pending_step(
             "AddRewards",
             K::CosmosTx {
@@ -570,6 +560,7 @@ mod tests {
             env: Network::Testnet,
             cosm_salt: "cosmsalt".into(),
             admin_mnemonic: None,
+            rewards_funder_mnemonic: None,
             deployer_private_key: None,
             gateway_deployer_private_key: None,
             gateway_deployer: None,

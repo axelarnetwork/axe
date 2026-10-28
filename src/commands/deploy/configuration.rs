@@ -17,6 +17,7 @@ pub(crate) fn validate_init_environment(lookup: impl Fn(&str) -> Option<String>)
         "TOKEN_SYMBOL",
         "DECIMALS",
         "MNEMONIC",
+        "REWARDS_FUNDER_MNEMONIC",
         "ENV",
         "SALT",
         "DEPLOYER_PRIVATE_KEY",
@@ -70,6 +71,8 @@ pub(crate) fn load_missing_environment(state: &mut State, lookup: impl Fn(&str) 
     {
         state.admin_mnemonic = Some(mnemonic);
     }
+    state.rewards_funder_mnemonic =
+        lookup("REWARDS_FUNDER_MNEMONIC").filter(|mnemonic| !mnemonic.trim().is_empty());
 }
 
 pub(crate) fn validate_state(state: &mut State) -> Result<()> {
@@ -81,6 +84,10 @@ pub(crate) fn validate_state(state: &mut State) -> Result<()> {
     }
     for (name, value) in [
         ("MNEMONIC", Some(state.mnemonic.as_str())),
+        (
+            "REWARDS_FUNDER_MNEMONIC",
+            state.rewards_funder_mnemonic.as_deref(),
+        ),
         ("SALT", Some(state.cosm_salt.as_str())),
         ("ITS_SALT", state.its_salt.as_deref()),
         ("ITS_PROXY_SALT", state.its_proxy_salt.as_deref()),
@@ -91,6 +98,14 @@ pub(crate) fn validate_state(state: &mut State) -> Result<()> {
     }
     if !state.mnemonic.trim().is_empty() && derive_axelar_wallet(&state.mnemonic).is_err() {
         errors.push("invalid MNEMONIC".into());
+    }
+    if state
+        .rewards_funder_mnemonic
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && let Err(error) = super::cosmos_signer::rewards_funder_address(state)
+    {
+        errors.push(error.to_string());
     }
     if let Some(mnemonic) = &state.admin_mnemonic
         && derive_axelar_wallet(mnemonic).is_err()
@@ -122,6 +137,11 @@ pub(crate) fn validate_state(state: &mut State) -> Result<()> {
         && saved != derived
     {
         errors.push("gateway deployer key does not match the saved gatewayDeployer address".into());
+    }
+    if errors.is_empty()
+        && let Err(error) = super::cosmos_signer::validate_mainnet(state)
+    {
+        errors.push(error.to_string());
     }
     eyre::ensure!(
         errors.is_empty(),
