@@ -21,10 +21,17 @@ async fn devnet_submits_the_original_messages_without_querying_governance() {
         gas_price: 0.007,
         chain_axelar_id: "test",
         env: "devnet-amplifier",
-        proposal_key: "register",
+        proposal_key: "instantiate",
     };
     let inner = vec![
+        build_execute_msg_any(
+            &address,
+            "coordinator",
+            &json!({"instantiate_chain_contracts":{}}),
+        )
+        .unwrap(),
         build_execute_msg_any(&address, "coordinator", &json!({"register_deployment":{}})).unwrap(),
+        build_execute_msg_any(&address, "rewards", &json!({"create_pool":{}})).unwrap(),
         build_execute_msg_any(&address, "rewards", &json!({"create_pool":{}})).unwrap(),
     ];
     assert_eq!(

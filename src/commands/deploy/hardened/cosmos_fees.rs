@@ -36,14 +36,10 @@ pub(super) async fn bump(
         current == *sequence,
         "{key}: sequence consumed or unavailable; recover all attempt receipts before replacing"
     );
-    let mnemonic = if key == "WaitForVerifierSet/cosmos" {
-        ctx.state
-            .admin_mnemonic
-            .as_deref()
-            .ok_or_else(|| eyre::eyre!("missing prover admin credential"))?
-    } else {
-        &ctx.state.mnemonic
-    };
+    let step = key
+        .strip_suffix("/cosmos")
+        .ok_or_else(|| eyre::eyre!("invalid Cosmos action key"))?;
+    let mnemonic = crate::commands::deploy::cosmos_signer::mnemonic(&ctx.state, step)?;
     let (signing_key, _) = derive_axelar_wallet(mnemonic)?;
     let session = session::current()?;
     let amount = session

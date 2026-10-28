@@ -43,7 +43,7 @@ fn proposal() -> (Vec<u8>, Value) {
 }
 
 #[test]
-fn proposal_must_match_approved_messages_and_expedited_mode() {
+fn proposal_must_match_approved_messages_even_after_regular_conversion() {
     let (raw, actual) = proposal();
     validate_payload(&raw, &actual).unwrap();
     for changed in [
@@ -60,10 +60,21 @@ fn proposal_must_match_approved_messages_and_expedited_mode() {
     }
     let mut invalid = actual.clone();
     invalid["expedited"] = json!(false);
+    validate_payload(&raw, &invalid).unwrap();
+    invalid["messages"][0]["contract"] = json!("other");
     assert!(validate_payload(&raw, &invalid).is_err());
     invalid = actual;
     invalid["messages"].as_array_mut().unwrap().clear();
     assert!(validate_payload(&raw, &invalid).is_err());
+}
+
+#[test]
+fn expedited_mode_can_only_change_from_expedited_to_regular() {
+    assert!(super::valid_expedited_transition(true, Some(false)));
+    assert!(super::valid_expedited_transition(true, Some(true)));
+    assert!(super::valid_expedited_transition(false, Some(false)));
+    assert!(!super::valid_expedited_transition(false, Some(true)));
+    assert!(!super::valid_expedited_transition(true, None));
 }
 
 #[test]

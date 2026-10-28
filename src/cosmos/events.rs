@@ -202,35 +202,6 @@ pub async fn check_cosmos_routed(
     })
 }
 
-/// Check whether a message is executable on the AxelarnetGateway hub via
-/// the `executable_messages` query. True once the hub has been instructed to
-/// forward the message (or once it has executed it).
-pub async fn check_hub_approved(
-    lcd: &str,
-    axelarnet_gateway: &str,
-    source_chain: &str,
-    message_id: &str,
-) -> Result<bool> {
-    let query = serde_json::json!({
-        "executable_messages": {
-            "cc_ids": [{
-                "source_chain": source_chain,
-                "message_id": message_id,
-            }]
-        }
-    });
-
-    let resp = match lcd_cosmwasm_smart_query_typed(lcd, axelarnet_gateway, &query).await {
-        Ok(response) => response,
-        Err(error) if error.is_pending(CosmwasmQueryPending::ExecutableMessage) => {
-            return Ok(false);
-        }
-        Err(error) => return Err(error).wrap_err("Axelarnet hub approval query failed"),
-    };
-    let resp_str = serde_json::to_string(&resp)?;
-    Ok(!resp_str.contains("null") && resp_str.contains(message_id))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;

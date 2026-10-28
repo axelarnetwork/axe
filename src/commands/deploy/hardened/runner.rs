@@ -176,8 +176,6 @@ fn signer_for(ctx: &DeployContext, name: &str) -> Result<String> {
         | "InstantiateChainContracts"
         | "WaitInstantiateProposal"
         | "SaveDeployedContracts"
-        | "RegisterDeployment"
-        | "WaitRegisterProposal"
         | "AddRewards"
         | "RegisterItsOnHub"
         | "WaitItsHubRegistration"

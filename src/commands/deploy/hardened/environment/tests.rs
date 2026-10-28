@@ -33,6 +33,7 @@ fn environment() -> BTreeMap<&'static str, String> {
         ("FACTORY_OWNER", plan.factory_owner.to_string()),
         ("GATEWAY_OPERATOR", plan.gateway_operator.to_string()),
         ("MNEMONIC", mnemonic(42)),
+        ("MULTISIG_PROVER_MNEMONIC", mnemonic(42)),
         ("EVM_GAS_BUDGET", plan.evm_gas_budget),
         ("COSMOS_FEE_BUDGET", plan.cosmos_fee_budget),
         ("REWARD_AMOUNT", plan.reward_amount),
@@ -233,18 +234,21 @@ fn explicit_admin_mnemonic_selects_a_separate_account() {
 }
 
 #[test]
-fn empty_admin_mnemonic_falls_back_to_proposer() {
+fn empty_admin_mnemonic_is_rejected() {
     let mut values = environment();
     values.insert("MULTISIG_PROVER_MNEMONIC", "  ".into());
-    assert_eq!(
-        load(Network::Testnet, None, |name| values.get(name).cloned()).unwrap(),
-        example_plan()
+    let error = load(Network::Testnet, None, |name| values.get(name).cloned()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("missing MULTISIG_PROVER_MNEMONIC")
     );
 }
 
 #[test]
 fn changed_admin_signer_cannot_replace_the_saved_identity() {
-    for name in ["MNEMONIC", "MULTISIG_PROVER_MNEMONIC"] {
+    {
+        let name = "MULTISIG_PROVER_MNEMONIC";
         let mut values = environment();
         let saved = load(Network::Testnet, None, |name| values.get(name).cloned()).unwrap();
         values.insert(name, mnemonic(43));
@@ -259,11 +263,16 @@ fn changed_admin_signer_cannot_replace_the_saved_identity() {
 #[test]
 fn missing_or_invalid_admin_credentials_fail_without_exposing_them() {
     let mut values = environment();
-    values.remove("MNEMONIC");
+    values.remove("MULTISIG_PROVER_MNEMONIC");
     let error = load(Network::Testnet, None, |name| values.get(name).cloned()).unwrap_err();
-    assert!(error.to_string().contains("missing MNEMONIC"));
+    assert!(
+        error
+            .to_string()
+            .contains("missing MULTISIG_PROVER_MNEMONIC")
+    );
     let invalid = "sensitive invalid input";
-    for name in ["MNEMONIC", "MULTISIG_PROVER_MNEMONIC"] {
+    {
+        let name = "MULTISIG_PROVER_MNEMONIC";
         let mut values = environment();
         values.insert(name, invalid.into());
         let error = load(Network::Testnet, None, |name| values.get(name).cloned())
@@ -272,4 +281,18 @@ fn missing_or_invalid_admin_credentials_fail_without_exposing_them() {
         assert!(error.contains(name));
         assert!(!error.contains(invalid));
     }
+}
+
+#[test]
+fn changing_proposer_does_not_change_explicit_prover_admin() {
+    let mut values = environment();
+    let saved = load(Network::Testnet, None, |name| values.get(name).cloned()).unwrap();
+    values.insert("MNEMONIC", mnemonic(43));
+    assert_eq!(
+        load(Network::Testnet, Some(&saved), |name| values
+            .get(name)
+            .cloned())
+        .unwrap(),
+        saved
+    );
 }

@@ -1,7 +1,7 @@
 use crate::commands::deploy::hardened::evm as deployment_evm;
 use alloy::{
     network::TransactionBuilder,
-    primitives::{Bytes, U256},
+    primitives::{Address, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -12,8 +12,9 @@ use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
 use crate::config::ChainContract;
-use crate::evm::{LegacyProxy, read_artifact_bytecode};
+use crate::evm::{ConstAddressDeployer, LegacyProxy, get_salt_from_key, read_artifact_bytecode};
 use crate::state::save_state;
+use crate::types::Network;
 use crate::ui;
 use crate::utils::{read_contract_address, update_target_json};
 
@@ -29,7 +30,17 @@ async fn write_contract_config(
     data.insert("address".into(), json!(format!("{proxy_addr}")));
     data.insert("implementation".into(), json!(format!("{impl_addr}")));
     data.insert("deployer".into(), json!(format!("{deployer_addr}")));
-    data.insert("deploymentMethod".into(), json!("create"));
+    data.insert(
+        "deploymentMethod".into(),
+        json!(if ctx.state.env == Network::Mainnet {
+            "create2"
+        } else {
+            "create"
+        }),
+    );
+    if ctx.state.env == Network::Mainnet {
+        data.insert("salt".into(), json!("AxelarGasService"));
+    }
     data.insert("collector".into(), json!(format!("{gas_collector}")));
     update_target_json(
         &ctx.target_json,
@@ -129,34 +140,9 @@ pub async fn run(
         addr
     };
 
-    // --- Tx 2: Deploy proxy (recover from the journal if already deployed) ---
-    let proxy_addr = {
-        ui::info("deploying AxelarGasServiceProxy...");
-        let proxy_bytecode = read_artifact_bytecode(proxy_artifact).await?;
-
-        let tx = TransactionRequest::default().with_deploy_code(Bytes::from(proxy_bytecode));
-        let receipt = deployment_evm::send(&provider, tx, "gas proxy").await?;
-        ui::tx_hash("proxy tx hash", &format!("{}", receipt.transaction_hash));
-
-        if !receipt.status() {
-            return Err(eyre::eyre!(
-                "proxy deployment tx {} reverted on-chain",
-                receipt.transaction_hash
-            ));
-        }
-
-        let addr = receipt
-            .contract_address
-            .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
-        ui::address("proxy deployed at", &format!("{addr}"));
-
-        // Save to state for status. The journal controls transaction recovery
-        ctx.state.steps[step_idx].set_proxy_address(addr)?;
-        save_state(&ctx.state).await?;
-        addr
-    };
-
-    initialize_proxy(&provider, proxy_addr, impl_addr, deployer_addr).await?;
+    let proxy_addr = deploy_proxy(ctx, &provider, proxy_artifact, impl_addr, deployer_addr).await?;
+    ctx.state.steps[step_idx].set_proxy_address(proxy_addr)?;
+    save_state(&ctx.state).await?;
 
     write_contract_config(
         ctx,
@@ -167,4 +153,63 @@ pub async fn run(
         gas_collector,
     )
     .await
+}
+
+async fn deploy_proxy<P: Provider>(
+    ctx: &DeployContext,
+    provider: &P,
+    artifact: &str,
+    implementation: Address,
+    deployer: Address,
+) -> Result<Address> {
+    let bytecode = Bytes::from(read_artifact_bytecode(artifact).await?);
+    if ctx.state.env == Network::Mainnet {
+        let factory = ConstAddressDeployer::new(
+            read_contract_address(
+                &ctx.target_json,
+                &ctx.axelar_id,
+                ChainContract::ConstAddressDeployer,
+            )
+            .await?,
+            provider,
+        );
+        let salt = get_salt_from_key("AxelarGasService");
+        let address = factory
+            .deployedAddress(bytecode.clone(), deployer, salt)
+            .call()
+            .await?;
+        ui::address("predicted Gas Service proxy", &address.to_string());
+        ui::info("Deploy and initialize the proxy atomically at the predicted address.");
+        let proxy = LegacyProxy::new(address, provider);
+        let init = proxy.init(implementation, deployer, Bytes::new());
+        let request = factory
+            .deployAndInit(bytecode, salt, init.calldata().clone())
+            .into_transaction_request();
+        let receipt = deployment_evm::send(provider, request, "gas proxy").await?;
+        ui::tx_hash("proxy tx hash", &receipt.transaction_hash.to_string());
+        ui::address("proxy deployed at", &address.to_string());
+        let block = alloy::eips::BlockId::hash_canonical(
+            receipt
+                .block_hash
+                .ok_or_else(|| eyre::eyre!("gas proxy receipt has no block hash"))?,
+        );
+        let deployed = crate::commands::deploy::hardened::verification::ManagedContract::new(
+            address, provider,
+        );
+        eyre::ensure!(
+            deployed.implementation().block(block).call().await? == implementation
+                && deployed.owner().block(block).call().await? == deployer,
+            "atomic Gas Service initialization could not be verified at its receipt block; resume to recheck the saved transaction"
+        );
+        return Ok(address);
+    }
+    let tx = TransactionRequest::default().with_deploy_code(bytecode);
+    let receipt = deployment_evm::send(provider, tx, "gas proxy").await?;
+    ui::tx_hash("proxy tx hash", &receipt.transaction_hash.to_string());
+    let address = receipt
+        .contract_address
+        .ok_or_else(|| eyre::eyre!("no contract address in proxy receipt"))?;
+    ui::address("proxy deployed at", &address.to_string());
+    initialize_proxy(provider, address, implementation, deployer).await?;
+    Ok(address)
 }

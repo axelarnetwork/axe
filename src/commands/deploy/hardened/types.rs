@@ -8,6 +8,17 @@ use alloy::rpc::types::TransactionReceipt;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CosmosDeployment {
+    pub deployment_name: String,
+    pub coordinator: String,
+    pub salt: String,
+    pub code_ids: [u64; 3],
+    pub gateway: String,
+    pub verifier: String,
+    pub prover: String,
+}
+
 /// Public deployment inputs. Credentials are supplied through the environment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -143,6 +154,8 @@ pub struct Options {
 pub struct Journal {
     pub version: u32,
     pub fingerprint: B256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosmos_deployment: Option<CosmosDeployment>,
     #[serde(default)]
     pub inputs_hash: Option<B256>,
     #[serde(default = "EvmConfirmationPolicy::previous_default")]
@@ -229,6 +242,11 @@ pub struct ContractInfo {
     pub code_id: String,
     pub creator: String,
     pub admin: String,
+}
+#[derive(Deserialize)]
+pub struct CodeMetadata {
+    pub code_id: String,
+    pub checksum: String,
 }
 #[derive(Deserialize)]
 pub struct GatewayConfig {

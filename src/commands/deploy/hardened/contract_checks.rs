@@ -28,6 +28,23 @@ pub async fn raw<T: DeserializeOwned>(lcd: &str, address: &str, key: &str) -> Re
 pub async fn instantiated(ctx: &DeployContext) -> Result<()> {
     let (lcd, _, _, _) = read_axelar_config(&ctx.target_json).await?;
     let coordinator = contract(&ctx.state, "Coordinator", false).await?;
+    let predicted = super::session::current()?
+        .journal
+        .lock()
+        .await
+        .cosmos_deployment
+        .clone()
+        .ok_or_else(|| eyre::eyre!("missing journaled Cosmos deployment predictions"))?;
+    let actual = json!({"chain_name":ctx.axelar_id,
+        "gateway_address":contract(&ctx.state,"Gateway",true).await?,
+        "verifier_address":contract(&ctx.state,"VotingVerifier",true).await?,
+        "prover_address":contract(&ctx.state,"MultisigProver",true).await?});
+    crate::steps::cosmos_query::validate_prediction(
+        &predicted,
+        &predicted.deployment_name,
+        &ctx.axelar_id,
+        &actual,
+    )?;
     for name in ["Gateway", "VotingVerifier", "MultisigProver"] {
         let address = contract(&ctx.state, name, true).await?;
         let expected_hash = super::inputs::cosmos_code_hash(&ctx.target_json, name).await?;
@@ -44,6 +61,10 @@ pub async fn instantiated(ctx: &DeployContext) -> Result<()> {
             &format!("/axelar/contracts/{name}/{}/contractAdmin", ctx.axelar_id),
         )
         .await?;
+        eyre::ensure!(
+            admin == crate::steps::cosmos_tx::contract_admin(ctx.state.env.as_str()),
+            "{name}: configured upgrade admin differs from the network policy"
+        );
         eyre::ensure!(
             info.contract_info.code_id == expected_code.to_string()
                 && info.contract_info.creator == coordinator

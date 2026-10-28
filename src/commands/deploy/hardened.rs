@@ -1,8 +1,13 @@
+#[cfg(test)]
+mod batch_recovery_tests;
+#[cfg(test)]
+mod batch_tests;
 pub mod contract_checks;
 pub mod cosmos;
 mod environment;
 pub mod evidence;
 pub mod evm;
+pub mod evm_policy;
 pub mod governance;
 pub mod loading;
 pub mod plan;
@@ -13,7 +18,7 @@ pub mod runner;
 pub mod session;
 pub mod storage;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod types;
 pub mod verification;
 pub mod verifiers;

@@ -37,7 +37,7 @@ pub async fn show(ctx: &DeployContext, step: &Step) -> Result<()> {
     ) {
         show_chain_contract_settings(ctx, &plan).await?;
     }
-    if step.name == "RegisterDeployment" {
+    if step.name == "InstantiateChainContracts" {
         show_reward_pool_settings(ctx).await?;
     }
     if step.name == "AddRewards" {
@@ -86,7 +86,10 @@ async fn show_chain_contract_settings(ctx: &DeployContext, plan: &Plan) -> Resul
         &format!("{} source-chain blocks", plan.confirmation_height),
     );
     ui::info(
-        "Stored in VotingVerifier for event verification. Handlers using chain-specific finality may use that policy instead. This is separate from deployment transaction confirmations.",
+        "Block-counting verifier handlers use this value. RPCFinalizedBlock handlers ignore it and wait for the RPC's finalized block instead. This is separate from deployment transaction confirmations.",
+    );
+    ui::info(
+        "For finalized-block handlers, 1000000 is a guard against accidental block counting, not a million-block wait. Confirm the intended mode with the verifier operators; this setting does not select their handler mode.",
     );
     ui::section("Contract authorities");
     let governance =
@@ -95,7 +98,7 @@ async fn show_chain_contract_settings(ctx: &DeployContext, plan: &Plan) -> Resul
     ui::info("Controls governance-only contract settings, including changing the prover admin.");
     ui::address("Prover operational admin", &plan.prover_admin);
     ui::info(
-        "Can request verifier-set updates. Derived from the supplied prover-admin mnemonic, or the proposer mnemonic when it is omitted.",
+        "Can request verifier-set updates. Derived from the required MULTISIG_PROVER_MNEMONIC. Changing this admin later requires governance approval.",
     );
     ui::address(
         "Cosmos contract upgrade admin",
@@ -114,6 +117,13 @@ async fn show_initial_reward_funding(ctx: &DeployContext, plan: &Plan) -> Result
         .checked_mul(2)
         .ok_or_else(|| eyre::eyre!("total initial reward funding exceeds the supported amount"))?;
     ui::section("Initial reward-pool funding (REWARD_AMOUNT)");
+    ui::address(
+        "Reward-pool funder (REWARDS_FUNDER_MNEMONIC)",
+        &crate::commands::deploy::cosmos_signer::rewards_funder_address(&ctx.state)?,
+    );
+    ui::info(
+        "This account pays both deposits and this transaction's Axelar fee. It does not become a contract admin.",
+    );
     ui::kv(
         "Deposit into EACH pool",
         &reward_amount_label(amount, &denom),
@@ -199,22 +209,19 @@ fn description(name: &str) -> &'static str {
             "Write the approved verifier/prover settings and predicted gateway address to the local deployment configuration."
         }
         "InstantiateChainContracts" => {
-            "Batch 1: submit an expedited proposal to instantiate Gateway, VotingVerifier and MultisigProver. Display messages and live deposit before approval, then save progress and proceed to the governance wait."
+            "Batch 1 of 2: instantiate Gateway, VotingVerifier and MultisigProver, register the deployment, and create both reward pools atomically. Review the settings and predicted addresses before approving the expedited proposal. Reward funding is separate."
         }
-        "WaitInstantiateProposal" | "WaitRegisterProposal" | "WaitItsHubRegistration" => {
+        "WaitInstantiateProposal" | "WaitItsHubRegistration" => {
             "Monitor the saved proposal until voting ends. Continue only if it passed and matches the approved submission. Ctrl+C is safe while waiting; resume recovers the same proposal."
         }
         "SaveDeployedContracts" => {
-            "Read the Coordinator deployment and save its three contract addresses locally, then verify their code and configuration."
-        }
-        "RegisterDeployment" => {
-            "Batch 2: register the deployment and create both reward pools atomically. Submit, save progress and proceed to the governance wait."
+            "Check the Coordinator's three addresses against the journaled predictions, save them locally, and verify contract code/configuration, registration and both reward pools before funding or activation."
         }
         "AddRewards" => {
             "Fund both reward pools with the plan's reward amount. These payments are journaled to prevent duplicate funding on resume."
         }
         "RegisterItsOnHub" => {
-            "Batch 3: register the deployed ITS edge with the ITS Hub. Submit the expedited proposal, save progress and proceed to the governance wait."
+            "Batch 2 of 2: register the deployed ITS edge with the ITS Hub. Review the expedited proposal, then monitor its vote. Ctrl+C is safe while waiting."
         }
         "WaitForVerifierSet" => {
             "Discover eligible verifiers and check the service minimum, initialize the prover if needed, then review and approve its actual initial signer set. Known names are informational."

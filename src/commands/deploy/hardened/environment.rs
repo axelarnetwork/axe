@@ -91,21 +91,14 @@ pub(super) fn load(
 }
 
 fn derive_prover_admin(lookup: &impl Fn(&str) -> Option<String>) -> Result<String> {
-    let (name, mnemonic) =
-        match lookup("MULTISIG_PROVER_MNEMONIC").filter(|mnemonic| !mnemonic.trim().is_empty()) {
-            Some(mnemonic) => ("MULTISIG_PROVER_MNEMONIC", mnemonic),
-            None => (
-                "MNEMONIC",
-                lookup("MNEMONIC")
-                    .filter(|mnemonic| !mnemonic.trim().is_empty())
-                    .ok_or_else(|| {
-                        eyre::eyre!("missing MNEMONIC to derive the prover admin address")
-                    })?,
-            ),
-        };
+    let mnemonic = lookup("MULTISIG_PROVER_MNEMONIC")
+        .filter(|mnemonic| !mnemonic.trim().is_empty())
+        .ok_or_else(|| eyre::eyre!("missing MULTISIG_PROVER_MNEMONIC: explicitly select the prover admin signer; MNEMONIC is only the proposer"))?;
     derive_axelar_wallet(&mnemonic)
         .map(|(_, address)| address)
-        .map_err(|_| eyre::eyre!("invalid {name}: cannot derive the prover admin address"))
+        .map_err(|_| {
+            eyre::eyre!("invalid MULTISIG_PROVER_MNEMONIC: cannot derive the prover admin address")
+        })
 }
 
 fn parse<T: FromStr>(name: &str, value: &str) -> Result<T> {

@@ -1,10 +1,8 @@
-use base64::Engine;
 use eyre::Result;
 use serde_json::json;
 
 use super::types::{ContractInfo, ContractResponse, Deployment, InstantiatePlan, QueryErrorBody};
 use crate::cosmos::{lcd_cosmwasm_smart_query, lcd_cosmwasm_smart_query_typed};
-use crate::evm::get_salt_from_key;
 
 #[cfg(test)]
 mod tests;
@@ -41,20 +39,18 @@ pub(super) async fn find_deployment(
     }
 }
 
-async fn predicted_addresses(
+pub(super) async fn predicted_addresses(
     lcd: &str,
     coordinator: &str,
     plan: &InstantiatePlan,
-    salt_key: &str,
 ) -> Result<[String; 3]> {
-    let salt = base64::engine::general_purpose::STANDARD.encode(get_salt_from_key(salt_key));
     let mut addresses = [String::new(), String::new(), String::new()];
     for (address, code_id) in
         addresses
             .iter_mut()
             .zip([plan.codes.gateway, plan.codes.verifier, plan.codes.prover])
     {
-        let query = json!({"instantiate2_address": {"code_id": code_id, "salt": salt}});
+        let query = json!({"instantiate2_address": {"code_id": code_id, "salt": plan.salt}});
         *address =
             serde_json::from_value(lcd_cosmwasm_smart_query(lcd, coordinator, &query).await?)?;
     }
@@ -95,7 +91,7 @@ pub(super) async fn check_addresses_available(
     coordinator: &str,
     plan: &InstantiatePlan,
 ) -> Result<()> {
-    for address in predicted_addresses(lcd, coordinator, plan, &plan.salt_key).await? {
+    for address in predicted_addresses(lcd, coordinator, plan).await? {
         if let Some(info) = contract_info(lcd, &address).await? {
             eyre::bail!(
                 "cannot instantiate {}: address {address} is already occupied by '{}'. No proposal was submitted",

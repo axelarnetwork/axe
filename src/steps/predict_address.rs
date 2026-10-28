@@ -13,7 +13,17 @@ pub async fn run(ctx: &mut DeployContext) -> Result<()> {
 
     let provider = ProviderBuilder::new().connect_http(ctx.rpc_url.parse()?);
     let nonce = provider.get_transaction_count(gateway_deployer).await?;
-    let proxy_nonce = nonce + 1; // +1 for implementation tx
+    let pending = provider
+        .get_transaction_count(gateway_deployer)
+        .pending()
+        .await?;
+    eyre::ensure!(
+        nonce == pending,
+        "gateway deployer has pending transactions; wait for them before predicting its address"
+    );
+    let proxy_nonce = nonce
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("gateway nonce overflow"))?; // implementation then proxy
     let predicted = compute_create_address(gateway_deployer, proxy_nonce);
     ui::address("gateway deployer", &format!("{gateway_deployer}"));
     ui::kv("current nonce", &nonce.to_string());

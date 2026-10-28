@@ -2,6 +2,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use crate::commands::deploy::DeployContext;
+use crate::commands::deploy::hardened::{session, types::CosmosDeployment};
 use crate::cosmos::{lcd_cosmwasm_smart_query, read_axelar_config, read_axelar_contract_field};
 use crate::ui;
 
@@ -36,6 +37,16 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
         }
     });
     let result = lcd_cosmwasm_smart_query(&lcd, &coordinator_addr, &query).await?;
+    let predicted = session::current()?
+        .journal
+        .lock()
+        .await
+        .cosmos_deployment
+        .clone()
+        .ok_or_else(|| {
+            eyre::eyre!("missing journaled Cosmos predictions; restore the deployment journal")
+        })?;
+    validate_prediction(&predicted, &deployment_name, &chain_axelar_id, &result)?;
 
     let verifier_address = result["verifier_address"]
         .as_str()
@@ -74,5 +85,22 @@ pub async fn run(ctx: &DeployContext) -> Result<()> {
     )?;
     ui::success(&format!("updated {}", ctx.target_json.display()));
 
+    Ok(())
+}
+
+pub(crate) fn validate_prediction(
+    predicted: &CosmosDeployment,
+    name: &str,
+    chain: &str,
+    actual: &Value,
+) -> Result<()> {
+    eyre::ensure!(
+        predicted.deployment_name == name
+            && actual["chain_name"] == chain
+            && actual["gateway_address"] == predicted.gateway
+            && actual["verifier_address"] == predicted.verifier
+            && actual["prover_address"] == predicted.prover,
+        "Coordinator deployment differs from the journaled predictions; no contract addresses were saved and no reward funding was sent"
+    );
     Ok(())
 }

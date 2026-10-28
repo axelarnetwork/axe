@@ -9,3 +9,8 @@ fn reward_preview_uses_the_configured_denomination() {
         "5553.500000 AXL (5553500000 uaxl)"
     );
 }
+#[test]
+fn combined_flow_previews_the_correct_batches() {
+    assert!(super::description("InstantiateChainContracts").contains("both reward pools"));
+    assert!(super::description("RegisterItsOnHub").contains("Batch 2 of 2"));
+}

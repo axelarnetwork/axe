@@ -20,17 +20,85 @@ smoke tests can still read it without a deployment plan. Hardware,
 multisig and offline signing adapters are not implemented. A multisig **recipient**
 is allowed where no further transaction from that recipient is required.
 
+## Mainnet addresses and authorities
+
+Historical mainnet deployments used Interop-controlled EVM keys that this deployment
+team no longer controls. Axe deliberately does **not** require those signers or
+reproduce their contract addresses. Supply keys you control for each deployment
+role; final owners and the gateway operator are separate, explicitly chosen recipients.
+
+- Axe deploys ConstAddressDeployer with `DEPLOYER_PRIVATE_KEY`, then Create3Deployer
+  through that factory using CREATE2 with salt `Create3Deployer`.
+  Both factories' runtime code is checked against constructor simulation of the
+  pinned artifacts. Existing Interop factories are not required or adopted.
+- Mainnet Operators deployment and management use `DEPLOYER_PRIVATE_KEY` and
+  CREATE2 salt `Operators`. The Gas Service proxy uses the newly deployed factory,
+  `GAS_SERVICE_DEPLOYER_PRIVATE_KEY`, and CREATE2 salt `AxelarGasService`; it is
+  initialized atomically. Its implementation uses CREATE.
+- The gateway address is predicted from `GATEWAY_DEPLOYER_PRIVATE_KEY` and its
+  actual nonce, then pinned before Cosmos registration. No nonce burning or
+  starting nonce of 2 is required. Do not use that account outside axe from
+  prediction until gateway deployment completes.
+- Set `ITS_SALT=v2.2.0` and `ITS_PROXY_SALT=v1.0.0`. `SALT` remains the Cosmos
+  deployment salt and does not override mainnet EVM contract salts.
+- ITS implementation deployment still uses CREATE3 with salt
+  `ITS v2.2.0 Implementation`; the factory implementation uses CREATE2 with salt
+  `ITS v2.2.0`. Their addresses depend on the selected signers and factories.
+  Postconditions check both proxies against their saved implementation addresses.
+
+Using the historical salts alone does not reproduce historical addresses: CREATE
+uses the creator and nonce, and these CREATE2/CREATE3 factories also incorporate
+the calling deployer into their salts. Registrations and integrations must use
+this deployment's actual addresses. Journaled transactions, pinned inputs, runtime
+code evidence, ownership checks and gateway address reconciliation remain enforced.
+
+The mainnet Cosmos upgrade admin for all three new contracts is the governance
+module `axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj`. The prover operational admin
+is a separate role, explicitly selected by `MULTISIG_PROVER_MNEMONIC`. Mainnet
+requires `axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly`. Axe verifies the key
+against that address, the saved plan and the deployed prover. Changing a deployed prover admin requires
+governance, so review that selection before proposal submission.
+
+Mainnet governance parameters observed on **2026-10-22** were a **400,000 AXL**
+expedited deposit and a **24-hour** voting period (regular: 150,000 AXL / 72 hours).
+Axe queries current parameters rather than hardcoding these figures. Initially,
+the proposer needs one deposit + `COSMOS_FEE_BUDGET`. The reward-pool funder needs
+`2 * REWARD_AMOUNT` + `COSMOS_FEE_BUDGET`, all in the configured base units.
+Deposits are separate from transaction
+fees and initial pool funding. Sequential passed proposals can reuse the refunded
+deposit; vetoed proposals can burn it. A separate prover-admin account also needs
+its fee budget.
+
 ## Inputs and preflight
 
 Keep credentials outside the repository (or in the existing ignored `.env`).
 Use the existing deployment environment described in [deploying.md](deploying.md):
 `CHAIN`, `CHAIN_NAME`, `CHAIN_ID`, `RPC_URL`, `TOKEN_SYMBOL`, `DECIMALS`, `ENV`,
 `SALT`, `ITS_SALT`, `ITS_PROXY_SALT`, `TARGET_JSON`, `MNEMONIC` and all four EVM
-role keys. Optionally supply `MULTISIG_PROVER_MNEMONIC` for a separate prover-admin
-account; otherwise axe uses `MNEMONIC` for both roles. Axe derives the admin
+role keys. `MULTISIG_PROVER_MNEMONIC` is required explicitly on every network.
+Outside mainnet, it may contain the same mnemonic as `MNEMONIC` if that is the intended admin,
+but axe never selects the proposer as admin implicitly. Axe derives the admin
 address, displays it for approval and pins it in the saved public plan. No
 `PROVER_ADMIN` environment variable is needed. A different admin account is
 rejected on resume.
+
+`REWARDS_FUNDER_MNEMONIC` is also required explicitly on every network, with no
+fallback to `MNEMONIC`. It signs `AddRewards`, pays both pool deposits and that
+transaction's fee, and is also used for any fee replacement of that transaction.
+Its address is displayed and pinned in the deployment fingerprint. The mnemonic
+is never persisted. On non-mainnet networks, roles may explicitly share an account;
+axe combines their payments and checks one fee allowance per distinct account.
+
+Before network queries or transactions, mainnet rejects credentials that do not
+derive these operator-selected accounts:
+
+| Credential | Required mainnet address |
+| --- | --- |
+| `MNEMONIC` | `axelar1ykl3n6xjh00nyynknr4yzxvhtwwkd5vhcwrxye` |
+| `MULTISIG_PROVER_MNEMONIC` | `axelar1w2ey0ek9e8q2dfmeznz6ah49zdywpdme0z0kly` |
+| `REWARDS_FUNDER_MNEMONIC` | `axelar1rhhzwt6nwuzgezelv987hz602rlyz9ej6psqa9` |
+
+These address restrictions do not apply to testnet, stagenet or devnet-amplifier.
 
 Verifier keys remain with their operators. Axe discovers the eligible set at activation; it does not register verifier support or change Router administration.
 The service name is resolved from the network: `validators` on devnet-amplifier,
@@ -116,6 +184,18 @@ settings. A saved JSON deployment can also resume without either input; if you
 supply public `.env` plan settings, supply the full set and keep it identical to
 the saved plan.
 
+For Arc's documented `RPCFinalizedBlock` verifier rollout, set
+`CONFIRMATION_HEIGHT=1000000` before initialization. This is a guard against
+accidentally using a block-counting handler: a misconfigured handler would require
+a million confirmations for recent events. Correct `RPCFinalizedBlock` handlers
+ignore the numeric height and query the RPC's finalized block instead. Verify the
+actual handler configuration with the operators; the number alone does not select
+or enforce a finality mode. `EVM_CONFIRMATIONS` independently controls axe's
+deployment transaction waits. VotingVerifier v2.0.2 allows governance to change
+`confirmation_height` through `update_voting_parameters` for future polls without
+a contract migration. These settings are chain/handler-specific, not a universal
+mainnet-versus-testnet preset.
+
 Choose confirmation depth, poll expiry and thresholds for the target chain;
 the values above are illustrative. The actual prover set must have at least the
 service minimum number of verifiers, stay within any service maximum, have
@@ -129,7 +209,7 @@ protocol wiring, governance authorities, balances and service verifier limits. E
 completion is an explicit final activation dependency.
 
 On governance networks, funding checks reserve one expedited proposal deposit, both remaining reward
-payments and the remaining fee allowances. The three proposals are sequential:
+payments and the remaining fee allowances. The proposal batches are sequential:
 a later batch can only proceed after the preceding batch passes, releasing its
 deposit. A journaled deposit awaiting resolution is treated as already reserved.
 Immediately before a new Cosmos submission, axe separately checks the actual
@@ -192,13 +272,28 @@ or Cosmos transaction asks for approval. Separate approvals remain for choosing
 the initial signer set, accepting protocol/rotation changes and explicit recovery
 actions; these change trusted inputs or which transactions can be sent.
 
-The original command had four proposal submissions. Registration now includes
-reward-pool creation, reducing the flow to three expedited proposal batches:
+New deployments use two expedited proposal batches:
 
-1. Instantiate the Cosmos Gateway, VotingVerifier and MultisigProver.
-2. Register the deployment and create both reward pools in the same atomic
-   governance execution.
-3. Register the ITS edge on the ITS Hub.
+1. Instantiate the Cosmos Gateway, VotingVerifier and MultisigProver, register
+   the deployment, and create both reward pools in one atomic governance execution.
+2. Register the ITS edge on the ITS Hub after verifier activation and EVM deployment.
+
+Before batch 1, axe predicts all three Cosmos addresses using the Coordinator's
+Instantiate2 query and the exact salt/code IDs used in the proposal. The journal
+pins these predictions; pool creation uses the predicted VotingVerifier address.
+Axe checks that both pools are absent and that generated contract settings still
+match the approved plan before submission. After passage, it verifies all three
+addresses, contract configurations, registration and reward pools before funding
+or activation. Funding remains a separate approved transaction.
+
+The two-proposal sequence is the only supported deployment layout. Journals
+from the old three-proposal sequence cannot resume with this binary. Devnet
+executes the same combined messages directly, without governance.
+
+A failed combined proposal rolls back its contract writes, but its proposal record
+and submission fees remain. Axe does not automatically replace a failed or rejected
+proposal. Proposal submission simulation does not prove that embedded actions will
+execute when voting ends.
 
 Each proposal wait names the proposal to vote on. On testnet it prints
 `bash scripts/vote_testnet_proposal.sh "YOUR_VALIDATOR_NAMESPACE" <proposal-id>`:
@@ -206,11 +301,13 @@ select your testnet kubectl context and replace the namespace placeholder before
 running it from the axe repo. The script votes Yes from each matching validator
 pod; axe only prints the command. Mainnet instructions instead direct you to coordinate
 with validator operators. Casting a vote does not end the voting period. Axe
-checks every 15 seconds and continues after PASSED. Each new transaction still
+checks every 15 seconds and continues after PASSED. If an expedited proposal
+converts to regular voting, axe follows its updated deadline while still requiring
+its execution messages to match the signed submission. Each new transaction still
 requires approval.
 Ctrl+C is safe while waiting: progress is already saved. Only the applicable
 resume command is shown, using `axe`. `--activate` is added at the verifier checkpoint
-and retained for subsequent steps, not offered during the first two batches.
+and retained for subsequent steps, not offered before the verifier checkpoint.
 
 Deployment pauses and errors end with a handoff showing the network and chain,
 next unfinished step, saved proposal ID when applicable, and why axe stopped.
@@ -384,7 +481,7 @@ the journal to force progress. `--retry-failed` is not a CheckTx recovery option
 
 A confirmed failed Cosmos execution can be retired with
 `--retry-failed 'StepName/cosmos'`. Supported steps are `WaitForVerifierSet`,
-`AddRewards` and the three batch submissions. For batch submissions, this means
+`AddRewards` and the batch submissions in the saved flow. For batch submissions, this means
 the **submission transaction failed at DeliverTx and created no proposal**.
 A proposal that was created and subsequently failed or was rejected is never
 recreated. Axe requires recorded failure at a nonzero height, an advanced account
@@ -508,7 +605,7 @@ Before using this on mainnet, run a fresh testnet deployment and record evidence
    transaction, then resume; verify it was not submitted and remains pending.
 3. Close the process during a broadcast and immediately after confirmation.
    Resume and check that hashes, addresses, proposal IDs and reward payments are unchanged.
-4. Close after each of the three proposal submissions. Resume while voting is
+4. Close after each of the two proposal submissions. Resume while voting is
    pending and again after passage; record votes and verified postconditions.
 5. Reach the verifier checkpoint with registrations outstanding. Confirm the
    EVM gateway is not deployed and no freeze/pause/upgrade writes were submitted.
@@ -543,8 +640,8 @@ Before using this on mainnet, run a fresh testnet deployment and record evidence
     Rehearse devnet direct execution separately: no governance queries, proposals
     or deposits, unchanged execute messages, and the same crash recovery.
 11. Audit the transaction journal against the original deploy actions. The only
-   governance change is batching the existing reward-pool creation messages with
-   chain registration. Verify a consumed predicted gateway nonce causes a stop.
+   governance change for new runs is batching instantiation, chain registration
+   and the existing reward-pool creation messages. Verify a consumed predicted gateway nonce causes a stop.
 
 Offline Rust regression tests cover journal persistence, policy/step drift,
 proposal payload matching, key stripping, locking, sequence safety, cached
@@ -552,3 +649,28 @@ confirmations, replacement execution invariants, original-transaction wins,
 delayed finality, lost task context, verifier snapshots, LCD balance request paths
 and Cosmos CheckTx fee recovery. Passing these tests does not replace the live
 testnet rehearsal above.
+
+
+### Two-proposal mainnet acceptance gate
+
+Offline tests do not establish governance execution atomicity. Before using the
+combined flow on mainnet, rehearse the candidate release on testnet with a fresh
+Axelar chain alias and fresh salts, using the actual EVM testnet chain ID and RPC.
+Do not use `--network mainnet` against testnet. Compare the deployed Coordinator,
+Router, Multisig, Rewards, per-chain code versions, permissions and SDK with mainnet;
+network-specific values remain the intended network presets.
+
+- Use real expedited proposals and confirm exactly two proposal IDs. Check the
+  four ordered batch-1 messages, predicted addresses, registered gateway/prover,
+  and both pool parameters after execution.
+- Interrupt after broadcast, during voting, and after passage before local progress
+  is saved. Resume the same deployment and verify no duplicate submission or funding.
+- Complete verifier onboarding and activation, EVM deployment and ITS registration.
+  Verify owners and run GMP and ITS in both directions.
+- Prove rollback with a deliberately failing final message only in an isolated
+  local governance harness using the matching SDK/contract binaries. A contract
+  multi-test alone does not exercise SDK governance execution. Never submit this
+  deliberate failure to public mainnet or testnet.
+
+These live rehearsal and local governance rollback checks must be recorded as
+pending until actually executed; passing axe's offline suite is not a substitute.
