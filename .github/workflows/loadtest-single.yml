@@ -155,6 +155,7 @@ jobs:
       OPTIMISM_MAINNET_RPC:        ${{ secrets.OPTIMISM_MAINNET_RPC }}
       OPTIMISM_TESTNET_RPC:        ${{ secrets.OPTIMISM_TESTNET_RPC }}
       OPTIMISM_STAGENET_RPC:       ${{ secrets.OPTIMISM_STAGENET_RPC }}
+      POLYGON_TESTNET_RPC:         ${{ secrets.POLYGON_TESTNET_RPC }}
       ROBINHOOD_TESTNET_RPC:       ${{ secrets.ROBINHOOD_TESTNET_RPC }}
       SOLANA_MAINNET_RPC:          ${{ secrets.SOLANA_MAINNET_RPC }}
       SOLANA_TESTNET_RPC:          ${{ secrets.SOLANA_TESTNET_RPC }}
