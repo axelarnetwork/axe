@@ -121,7 +121,9 @@ async fn observe_contract_query<T: DeserializeOwned>(
         Ok(response) => serde_json::from_value(response)
             .map(ContractQueryObservation::Ready)
             .wrap_err("CosmWasm verification response had an unexpected shape"),
-        Err(error) if is_pending_contract_error(&error, pending) => {
+        // An LCD hiccup is not a verdict on the message: re-poll next tick
+        // (mainnet run of mantle -> polygon ITS died on one dropped connection).
+        Err(error) if is_pending_contract_error(&error, pending) || error.is_transient() => {
             Ok(ContractQueryObservation::Pending)
         }
         Err(error) => Err(error).wrap_err("CosmWasm verification query failed"),

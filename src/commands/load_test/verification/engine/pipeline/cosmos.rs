@@ -7,7 +7,7 @@ use serde::de::IgnoredAny;
 use serde_json::json;
 
 use super::{ContractQueryObservation, observe_contract_query};
-use crate::cosmos::{CosmwasmQueryPending, lcd_cosmwasm_smart_query};
+use crate::cosmos::{CosmwasmQueryPending, lcd_cosmwasm_smart_query_typed};
 
 /// Max messages per Cosmos LCD batch query. The query is base64-encoded in
 /// the URL, so each message adds ~500 chars. Ten stays below common URL limits.
@@ -105,7 +105,17 @@ pub(super) async fn batch_check_voting_verifier_owned(
                 })
                 .collect::<Vec<_>>();
             let query = json!({ "messages_status": messages });
-            let response = lcd_cosmwasm_smart_query(lcd, voting_verifier, &query).await?;
+            let response = match lcd_cosmwasm_smart_query_typed(lcd, voting_verifier, &query).await
+            {
+                Ok(response) => response,
+                // LCD hiccup: report "not voted yet" and re-poll next tick.
+                Err(error) if error.is_transient() => {
+                    return Ok(chunk.iter().map(|(index, ..)| (*index, false)).collect());
+                }
+                Err(error) => {
+                    return Err(eyre::Report::new(error).wrap_err("VotingVerifier query failed"));
+                }
+            };
             let items: Vec<Option<VotingStatus>> = serde_json::from_value(response)
                 .map_err(|error| eyre::eyre!("invalid VotingVerifier response: {error}"))?;
             if items.len() != chunk.len() {
