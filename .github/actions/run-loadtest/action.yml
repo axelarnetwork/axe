@@ -130,7 +130,7 @@ runs:
           "Plume":       {"stagenet": "plume",     "devnet-amplifier": "plume-2"},
           "Polygon":     {"mainnet": "polygon",    "testnet": "polygon-sepolia",  "stagenet": "polygon-sepolia"},
           "Robinhood":   {"testnet": "robinhood"},
-          "Scroll":      {"mainnet": "scroll",     "testnet": "scroll"},
+          "Scroll":      {"mainnet": "scroll"},
           "Solana":      {"mainnet": "solana",     "testnet": "solana",           "stagenet": "solana-stagenet-3", "devnet-amplifier": "solana-18"},
           "Stellar":     {"mainnet": "stellar",    "testnet": "stellar-2026-q1-2"},
           "Sui":         {"mainnet": "sui",        "testnet": "sui",              "stagenet": "sui", "devnet-amplifier": "sui-2"},
