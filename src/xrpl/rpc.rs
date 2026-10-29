@@ -26,6 +26,11 @@ const VALIDATE_TIMEOUT: Duration = Duration::from_secs(60);
 /// load-test bursts that may queue behind several congested closes.
 pub const LAST_LEDGER_SEQUENCE_BUMP: u32 = 26;
 
+/// Submits of one blob while rippled answers with a `tel*` (local, not
+/// applied) result. Backoff totals ~30 s, well inside the
+/// `LastLedgerSequence` window.
+const LOCAL_REJECTION_ATTEMPTS: u32 = 5;
+
 /// Maximum txs returned by `account_tx` when scanning for an inbound
 /// `Payment` carrying a particular `message_id` memo. The XRPL public
 /// servers cap responses lower (200 is the documented ceiling), so this is
@@ -172,17 +177,33 @@ impl XrplClient {
     /// exact Sequence already consumed), an earlier attempt may have
     /// landed — confirm via the precomputed hash before failing.
     pub async fn submit_signed_blob(&self, req: &SubmitRequest, tx_hash: &str) -> Result<()> {
-        let submit_result = crate::retry::retry_async(
-            "xrpl.submit",
-            crate::retry::FALLBACK_ATTEMPTS,
-            crate::retry::is_transient_default,
-            || {
-                let req = req.clone();
-                let inner = &self.inner;
-                async move { inner.call(req).await }
-            },
-        )
-        .await;
+        let mut attempt = 0;
+        let submit_result = loop {
+            let result = crate::retry::retry_async(
+                "xrpl.submit",
+                crate::retry::FALLBACK_ATTEMPTS,
+                crate::retry::is_transient_default,
+                || {
+                    let req = req.clone();
+                    let inner = &self.inner;
+                    async move { inner.call(req).await }
+                },
+            )
+            .await;
+            // A `tel*` result (e.g. `telCAN_NOT_QUEUE` while the queue is
+            // full) was not applied anywhere, so resubmitting the same blob
+            // later is safe (mainnet cron run 40686406464 died on one).
+            match &result {
+                Ok(resp)
+                    if is_local_rejection(&format!("{:?}", resp.engine_result))
+                        && attempt + 1 < LOCAL_REJECTION_ATTEMPTS =>
+                {
+                    tokio::time::sleep(crate::retry::backoff_for_attempt(attempt)).await;
+                    attempt += 1;
+                }
+                _ => break result,
+            }
+        };
         match submit_result {
             Ok(resp) => {
                 let engine = format!("{:?}", resp.engine_result);
@@ -357,4 +378,24 @@ pub struct AccountInfo {
 pub struct ValidatedTx {
     pub ledger_index: Option<u32>,
     pub success: bool,
+}
+
+/// True for rippled's `tel*` engine results: rejected locally, not applied
+/// or relayed, so the same signed blob may be resubmitted.
+fn is_local_rejection(engine_result: &str) -> bool {
+    engine_result.starts_with("tel")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_rejection;
+
+    #[test]
+    fn only_tel_results_are_resubmittable() {
+        assert!(is_local_rejection("telCAN_NOT_QUEUE"));
+        assert!(is_local_rejection("telINSUF_FEE_P"));
+        assert!(!is_local_rejection("tesSUCCESS"));
+        assert!(!is_local_rejection("tefPAST_SEQ"));
+        assert!(!is_local_rejection("tecUNFUNDED_PAYMENT"));
+    }
 }
