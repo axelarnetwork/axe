@@ -113,6 +113,7 @@ pub async fn run(args: LoadTestArgs, sizing: RunSizing) -> eyre::Result<()> {
             network: args.network,
             source_chain: src.to_string(),
             destination_chain: dest.to_string(),
+            destination_axelar_id: args.destination_axelar_id.to_string(),
             num_txs: sizing.num_keys,
             gas_value,
             token_id_override: args.token_id.clone(),
@@ -314,7 +315,6 @@ async fn run_sustained_pipeline(
     keypairs: Vec<Arc<Keypair>>,
     transfer: &ItsTransferSpec,
 ) -> eyre::Result<()> {
-    let dest = &args.destination_chain;
     let evm_rpc_url = args.destination_rpc.to_string();
     let SustainedPlan {
         tps: tps_n,
@@ -334,7 +334,7 @@ async fn run_sustained_pipeline(
         network: args.network,
         token_id: transfer.token_id.into(),
         mint: transfer.mint,
-        destination_chain: dest.to_string(),
+        destination_chain: args.destination_axelar_id.to_string(),
         destination_address: transfer.dest_address_bytes.clone(),
         amount: transfer.amount_per_tx,
         gas_value: super::units::Lamports::new(hub_gas_value(transfer.gas_value)),
@@ -383,7 +383,6 @@ async fn run_burst_pipeline(
     evm_rpc_url: &str,
     sizing: RunSizing,
 ) -> eyre::Result<()> {
-    let dest = &args.destination_chain;
     let key_count = keypairs.len();
     let test_start = Instant::now();
     let jobs = keypairs
@@ -399,7 +398,7 @@ async fn run_burst_pipeline(
             network: args.network,
             token_id: transfer.token_id.into(),
             mint: transfer.mint,
-            destination_chain: dest.to_string(),
+            destination_chain: args.destination_axelar_id.to_string(),
             destination_address: transfer.dest_address_bytes.clone(),
             amount: transfer.amount_per_tx,
             gas_value: super::units::Lamports::new(transfer.gas_value),
@@ -476,6 +475,9 @@ struct TokenSetupRequest {
     network: Network,
     source_chain: String,
     destination_chain: String,
+    /// Hub chain name for on-chain instructions (differs from the config key
+    /// for consensus chains, e.g. testnet `Avalanche`).
+    destination_axelar_id: String,
     num_txs: usize,
     gas_value: u64,
     token_id_override: Option<String>,
@@ -626,6 +628,7 @@ async fn deploy_fresh_token(
         network,
         source_chain: src,
         destination_chain: dest,
+        destination_axelar_id,
         gas_value,
         config,
         evm_gateway: evm_gateway_addr,
@@ -635,7 +638,14 @@ async fn deploy_fresh_token(
     let keypair = keypairs::clone_keypair(keypair)?;
 
     let deployment = spawn_blocking(move || {
-        deploy_fresh_source_token(&solana_rpc, &keypair, network, dest, gas_value)
+        deploy_fresh_source_token(
+            &solana_rpc,
+            &keypair,
+            network,
+            dest,
+            &destination_axelar_id,
+            gas_value,
+        )
     })
     .await??;
 
@@ -672,6 +682,7 @@ fn deploy_fresh_source_token(
     keypair: &Keypair,
     network: Network,
     destination_chain: String,
+    destination_axelar_id: &str,
     gas_value: u64,
 ) -> eyre::Result<FreshTokenDeployment> {
     let salt = generate_salt();
@@ -716,7 +727,7 @@ fn deploy_fresh_source_token(
         keypair,
         network,
         &salt,
-        &destination_chain,
+        destination_axelar_id,
         deploy_gas_value,
     )?;
     ui::tx_hash("remote deploy tx", &remote_signature);
