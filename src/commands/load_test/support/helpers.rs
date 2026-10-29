@@ -39,7 +39,6 @@ use crate::evm::{
 use crate::retry::{FALLBACK_ATTEMPTS, backoff_for_attempt, retry_all, retry_async};
 use crate::stellar::StellarWallet;
 use crate::sui::{SuiWallet, read_sui_chain_config};
-use crate::types::Network;
 use crate::ui;
 
 pub(crate) async fn ensure_sender_receiver_on_evm_chain(
@@ -1019,20 +1018,15 @@ pub(crate) async fn resolve_sui_axe_token(
         ));
     }
 
-    // Fall back to the chain config's AXE entry.
-    let config = ChainsConfig::load(config).await?;
-    let axe = config
-        .chain(sui_chain_id)?
-        .contract(ChainContract::Axe, sui_chain_id)
-        .map_err(|_| {
-            eyre::eyre!(
-                "no `contracts.AXE` entry under chain `{sui_chain_id}` in config — \
+    let axe = axe_entry(config, sui_chain_id).await?.ok_or_else(|| {
+        eyre::eyre!(
+            "no `contracts.AXE` entry under chain `{sui_chain_id}` in config — \
                  either pass --token-id, or pre-register AXE via\n  \
                  cd axelar-contract-deployments && PRIVATE_KEY=$SUI_PRIVATE_KEY \\\n    \
                  SUI_RPC=https://fullnode.testnet.sui.io:443 \\\n    \
                  node sui/its.js register-coin-from-info AXE AXE 9 -e testnet -n {sui_chain_id} -y"
-            )
-        })?;
+        )
+    })?;
     let tid_str = axe
         .objects
         .as_ref()
@@ -1063,68 +1057,52 @@ pub(crate) async fn read_pre_registered_axe_token(
     config: &Path,
     chain_axelar_id: &str,
 ) -> Result<Option<FixedBytes<32>>> {
-    let tid_str =
-        match axe_config_field(config, chain_axelar_id, |axe| axe.token_id.clone()).await? {
-            Some(value) => Some(value),
-            None => axe_overlay_field(config, chain_axelar_id, |axe| axe.token_id.clone()).await,
-        };
-    match tid_str {
-        Some(value) => Ok(Some(FixedBytes::from(parse_token_id_hex(
-            &value,
-            &format!("AXE.tokenId for chain {chain_axelar_id}"),
-        )?))),
-        None => Ok(None),
-    }
+    let Some(tid_str) = axe_entry(config, chain_axelar_id)
+        .await?
+        .and_then(|axe| axe.token_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(FixedBytes::from(parse_token_id_hex(
+        &tid_str,
+        &format!("AXE.tokenId for chain {chain_axelar_id}"),
+    )?)))
 }
 
-/// Read one `chains.<chain>.contracts.AXE.<field>` value from a chains-config
-/// file.
-async fn axe_config_field(
+/// The AXE entry for `chain_axelar_id`. This repo's overlay
+/// (`axe-tokens/<network>.json`, network = the chains-config file stem) wins
+/// as a WHOLE entry, so a stale upstream token (upstream mainnet still lists
+/// the retired v2 AXE on most chains) is never paired with overlay fields.
+/// The upstream chains-config entry is the fallback.
+pub(crate) async fn axe_entry(
     config: &Path,
     chain_axelar_id: &str,
-    pick: fn(&ContractEntry) -> Option<String>,
-) -> Result<Option<String>> {
+) -> Result<Option<ContractEntry>> {
+    let overlay = match config.file_stem().and_then(|stem| stem.to_str()) {
+        Some(network) => overlay_axe_entry(network, chain_axelar_id).await,
+        None => None,
+    };
+    if overlay.is_some() {
+        return Ok(overlay);
+    }
     let config = ChainsConfig::load(config).await?;
     Ok(config
         .chains
         .get(chain_axelar_id)
         .and_then(|chain| chain.contracts.as_ref())
         .and_then(|contracts| contracts.get("AXE"))
-        .and_then(pick))
+        .cloned())
 }
 
-/// Same lookup against this repo's AXE-token overlay,
-/// `axe-tokens/<network>.json` (network = the chains-config file stem). The
-/// upstream chains-config for stagenet / devnet-amplifier records no
-/// `contracts.AXE` entries and axe cannot push there, so tokens deployed on
-/// those networks persist HERE — the CI checkout and local runs both see the
-/// file. Missing/unreadable overlay is simply "no entry".
-async fn axe_overlay_field(
-    config: &Path,
+/// AXE entry recorded for `chain_axelar_id` in `axe-tokens/<network>.json`.
+/// A missing or unreadable overlay is simply "no entry".
+pub(crate) async fn overlay_axe_entry(
+    network: &str,
     chain_axelar_id: &str,
-    pick: fn(&ContractEntry) -> Option<String>,
-) -> Option<String> {
-    let stem = config.file_stem()?.to_str()?;
-    let overlay = Path::new("axe-tokens").join(format!("{stem}.json"));
-    let doc = load_overlay(&overlay).await?;
-    overlay_contract(&doc, chain_axelar_id, "AXE").and_then(pick)
-}
-
-/// AXE `(address, decimals)` recorded for `chain_axelar_id` in this repo's
-/// `axe-tokens/<network>.json` overlay. For callers holding a network rather
-/// than a chains-config path (the wallet preflight).
-pub(crate) async fn overlay_axe_token(
-    network: Network,
-    chain_axelar_id: &str,
-) -> Option<(String, Option<u64>)> {
+) -> Option<ContractEntry> {
     let overlay = Path::new("axe-tokens").join(format!("{network}.json"));
     let doc = load_overlay(&overlay).await?;
-    let entry = overlay_contract(&doc, chain_axelar_id, "AXE")?;
-    let decimals = entry
-        .extra
-        .get("decimals")
-        .and_then(serde_json::Value::as_u64);
-    Some((entry.address.clone()?, decimals))
+    overlay_contract(&doc, chain_axelar_id, "AXE").cloned()
 }
 
 /// Companion to `read_pre_registered_axe_token`: returns the AXE
@@ -1151,11 +1129,9 @@ pub(crate) async fn read_pre_registered_axe_token_address(
     // the caller fell back to ITS.interchainTokenAddress(tokenId), which
     // reverts on the Hedera HTS-fork (its `registeredTokenAddress` view
     // replaces it).
-    let addr_str =
-        match axe_config_field(config, chain_axelar_id, |axe| axe.address.clone()).await? {
-            Some(value) => Some(value),
-            None => axe_overlay_field(config, chain_axelar_id, |axe| axe.address.clone()).await,
-        };
+    let addr_str = axe_entry(config, chain_axelar_id)
+        .await?
+        .and_then(|axe| axe.address);
     match addr_str {
         Some(s) => Ok(Some(s.parse().map_err(|e| {
             eyre::eyre!("invalid AXE.address for chain {chain_axelar_id}: {e}")
@@ -1241,9 +1217,8 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
 /// per-chain deploy helpers right after the source-side deploy succeeds.
 pub(crate) fn hint_persist_axe_token(chain_axelar_id: &str, token_id: &FixedBytes<32>) {
     ui::info(&format!(
-        "💡 To skip the deploy on future runs, add to chains-config (or, for \
-         networks whose upstream config axe can't edit, to this repo's \
-         axe-tokens/<network>.json overlay):\n  \
+        "💡 To skip the deploy on future runs, add to this repo's \
+         axe-tokens/<network>.json overlay (it takes precedence over chains-config):\n  \
          chains.{chain_axelar_id}.contracts.AXE.tokenId = \"{token_id}\"\n  \
          (assumes the destination chains you care about already have the remote registered)"
     ));
@@ -1268,12 +1243,9 @@ pub(crate) async fn resolve_hedera_axe_token(
         return Ok(FixedBytes::from(parse_token_id_hex(t, "token id")?));
     }
 
-    let config = ChainsConfig::load(config).await?;
-    let tid_str = config
-        .chain(hedera_chain_id)?
-        .contract(ChainContract::Axe, hedera_chain_id)?
-        .token_id
-        .as_deref()
+    let tid_str = axe_entry(config, hedera_chain_id)
+        .await?
+        .and_then(|axe| axe.token_id)
         .ok_or_else(|| {
             eyre::eyre!(
                 "no `contracts.AXE.tokenId` entry under chain `{hedera_chain_id}` in config — \
@@ -1288,7 +1260,7 @@ pub(crate) async fn resolve_hedera_axe_token(
             )
         })?;
     Ok(FixedBytes::from(parse_token_id_hex(
-        tid_str,
+        &tid_str,
         &format!("AXE.tokenId for chain {hedera_chain_id}"),
     )?))
 }
@@ -1383,13 +1355,10 @@ pub(crate) async fn read_sui_axe_token_id(
     let hex_str = if let Some(s) = cli_override.filter(|s| !s.is_empty()) {
         s.to_string()
     } else {
-        let config = ChainsConfig::load(config).await?;
-        config
-            .chain(sui_chain_id)?
-            .contract(ChainContract::Axe, sui_chain_id)?
-            .objects
-            .as_ref()
-            .and_then(|objects| objects.token_id.clone())
+        axe_entry(config, sui_chain_id)
+            .await?
+            .and_then(|axe| axe.objects)
+            .and_then(|objects| objects.token_id)
             .ok_or_else(|| {
                 eyre::eyre!("contracts.AXE.objects.TokenId missing for Sui chain {sui_chain_id}")
             })?

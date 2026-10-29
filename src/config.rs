@@ -210,7 +210,7 @@ impl AxelarConfig {
 /// `chains.hedera.contracts.AxelarGateway`). Most callers only read `address`;
 /// the rest of the deployer-side fields are kept as `extra` so we don't
 /// need to model the full `axelar-contract-deployments` shape here.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ContractEntry {
     pub address: Option<String>,
     pub implementation: Option<String>,
@@ -231,7 +231,7 @@ pub struct ContractEntry {
 /// Sui deployments store package-owned object IDs here. Unknown object names
 /// remain accepted through `extra`, but business logic can access the objects
 /// it understands without traversing `serde_json::Value`.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct ContractObjects {
     #[serde(rename = "TokenId")]
     pub token_id: Option<String>,
