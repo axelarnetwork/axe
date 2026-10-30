@@ -122,7 +122,7 @@ runs:
           "Hedera":      {"mainnet": "hedera",   "testnet": "hedera",             "stagenet": "hedera"},
           "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
           "Immutable":   {"mainnet": "immutable",  "testnet": "immutable"},
-          "Kava":        {"mainnet": "kava",       "testnet": "kava",             "stagenet": "kava"},
+          "Kava":        {"mainnet": "kava",       "stagenet": "kava"},
           "Linea":       {"mainnet": "linea",      "testnet": "linea-sepolia",    "stagenet": "linea-sepolia"},
           "Mantle":      {"mainnet": "mantle",     "testnet": "mantle-sepolia",   "stagenet": "mantle-sepolia"},
           "Monad":       {"mainnet": "monad",     "testnet": "monad-3"},
@@ -231,6 +231,28 @@ runs:
             echo "::error::Route not supported: $PROTOCOL $SOURCE_DISPLAY -> $DEST_DISPLAY ($SRC_TYPE -> $DST_TYPE)." >&2
             echo "::error::axe does not implement this combination. See src/commands/load_test/mod.rs:218 for the live dispatch matrix; supported routes for $PROTOCOL are:" >&2
             echo "$ROUTES" | jq -r --arg p "$PROTOCOL" '.[$p] | to_entries[] | "  \(.key) -> [\(.value | join(", "))]"' >&2
+            exit 1
+        fi
+        # Combinations axe implements but the network cannot carry. Failing
+        # here saves the run from sending (or deploying) anything first.
+        # XRPL ITS moves XRP, which exists only where XRPL gateway governance
+        # deployed it; adding a chain needs that deployment first.
+        XRP_PARTNERS=$(cat <<'EOF'
+        {
+          "mainnet": ["XRPL EVM", "Hedera"],
+          "testnet": ["XRPL EVM", "Hedera", "Ethereum"]
+        }
+        EOF
+        )
+        if [ "$PROTOCOL" = its ] && { [ "$SRC_TYPE" = xrpl ] || [ "$DST_TYPE" = xrpl ]; }; then
+            PARTNER=$([ "$SRC_TYPE" = xrpl ] && echo "$DEST_DISPLAY" || echo "$SOURCE_DISPLAY")
+            if [ "$(echo "$XRP_PARTNERS" | jq -r --arg n "$NETWORK" --arg c "$PARTNER" '(.[$n] // []) | index($c)')" = null ]; then
+                echo "::error::XRPL ITS needs XRP deployed on the other chain; on $NETWORK that is only: $(echo "$XRP_PARTNERS" | jq -r --arg n "$NETWORK" '(.[$n] // []) | join(", ")')" >&2
+                exit 1
+            fi
+        fi
+        if [ "$NETWORK" = testnet ] && [ "$DEST_DISPLAY" = Filecoin ]; then
+            echo "::error::The testnet relayer does not execute on Filecoin (filecoin-2); use it as a source only" >&2
             exit 1
         fi
         echo "Route validated: $PROTOCOL $SRC_TYPE -> $DST_TYPE"
