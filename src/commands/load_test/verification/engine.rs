@@ -147,6 +147,26 @@ pub use self::its_deploy::{
 // ---------------------------------------------------------------------------
 
 /// Indices of confirmed transactions in a metrics slice.
+/// Start ITS verification at `Voted` only when the source recorded every
+/// first-leg payload hash (the VotingVerifier query needs it). Sources whose
+/// ITS contract builds the hub payload on-chain (Stellar, Solana) report none,
+/// so they start at `HubApproved`, which needs only the message id (mainnet
+/// stellar -> solana aborted on "missing payload_hash" before this).
+fn its_initial_phase(
+    has_voting_verifier: bool,
+    metrics: &[TxMetrics],
+    confirmed: &[usize],
+) -> Phase {
+    let hashes_known = confirmed
+        .iter()
+        .all(|&index| !metrics[index].payload_hash.is_empty());
+    if has_voting_verifier && hashes_known {
+        Phase::Voted
+    } else {
+        Phase::HubApproved
+    }
+}
+
 fn confirmed_indices(metrics: &[TxMetrics]) -> Vec<usize> {
     metrics
         .iter()
@@ -1179,11 +1199,7 @@ pub async fn verify_onchain_solana_its(
         axelarnet_gateway,
     } = load_its_axelar_config(config, source_chain).await?;
 
-    let initial_phase = if voting_verifier.is_some() {
-        Phase::Voted
-    } else {
-        Phase::HubApproved
-    };
+    let initial_phase = its_initial_phase(voting_verifier.is_some(), metrics, &confirmed);
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -1251,11 +1267,7 @@ pub async fn verify_onchain_sui_its(
     } = load_its_axelar_config(config, source_chain).await?;
     let gateway_pkg = read_sui_gateway_pkg(config, destination_chain).await?;
 
-    let initial_phase = if voting_verifier.is_some() {
-        Phase::Voted
-    } else {
-        Phase::HubApproved
-    };
+    let initial_phase = its_initial_phase(voting_verifier.is_some(), metrics, &confirmed);
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -1377,11 +1389,7 @@ pub async fn verify_onchain_stellar_its(
         axelarnet_gateway,
     } = load_its_axelar_config(config, source_chain).await?;
 
-    let initial_phase = if voting_verifier.is_some() {
-        Phase::Voted
-    } else {
-        Phase::HubApproved
-    };
+    let initial_phase = its_initial_phase(voting_verifier.is_some(), metrics, &confirmed);
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -1512,11 +1520,7 @@ pub async fn verify_onchain_xrpl_its(
         axelarnet_gateway,
     } = load_its_axelar_config(config, source_chain).await?;
 
-    let initial_phase = if voting_verifier.is_some() {
-        Phase::Voted
-    } else {
-        Phase::HubApproved
-    };
+    let initial_phase = its_initial_phase(voting_verifier.is_some(), metrics, &confirmed);
 
     let mut txs: Vec<PendingTx> = confirmed
         .iter()
@@ -1794,5 +1798,35 @@ mod inactivity_budget_tests {
         // the runner a SIGKILL, which is the failure the override prevents.
         assert_eq!(budget_from(Some(1200), true), Duration::from_secs(1200));
         assert_eq!(budget_from(Some(1200), false), Duration::from_secs(1200));
+    }
+}
+
+#[cfg(test)]
+mod its_initial_phase_tests {
+    use super::its_initial_phase;
+    use crate::commands::load_test::metrics::TxMetrics;
+    use crate::commands::load_test::verify::state::Phase;
+
+    fn sent(payload_hash: &str) -> TxMetrics {
+        TxMetrics {
+            payload_hash: payload_hash.to_string(),
+            ..TxMetrics::succeeded("0xabc-1", 1)
+        }
+    }
+
+    #[test]
+    fn starts_at_voted_only_when_every_hash_is_known() {
+        let known = [sent("0x01"), sent("0x02")];
+        assert_eq!(its_initial_phase(true, &known, &[0, 1]), Phase::Voted);
+        let mixed = [sent("0x01"), sent("")];
+        assert_eq!(its_initial_phase(true, &mixed, &[0, 1]), Phase::HubApproved);
+    }
+
+    #[test]
+    fn no_voting_verifier_starts_at_hub_approved() {
+        assert_eq!(
+            its_initial_phase(false, &[sent("0x01")], &[0]),
+            Phase::HubApproved
+        );
     }
 }
