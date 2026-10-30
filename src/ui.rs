@@ -125,6 +125,15 @@ pub fn action_required(lines: &[&str]) {
     println!();
 }
 
+/// Writes need y/n approvals. Redirected stdin cannot give them.
+pub fn require_interactive(what: &str) -> eyre::Result<()> {
+    eyre::ensure!(
+        io::stdin().is_terminal(),
+        "{what} requires an interactive terminal for y/n approvals. Run axe directly in a terminal (use ssh -t remotely); redirected or piped stdin is unsupported. Nothing was submitted"
+    );
+    Ok(())
+}
+
 /// Deployment requires transaction approvals. Redirected stdin cannot approve writes.
 pub fn require_interactive_deployment() -> eyre::Result<()> {
     eyre::ensure!(

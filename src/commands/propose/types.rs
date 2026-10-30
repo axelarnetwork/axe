@@ -3,6 +3,7 @@
 
 use alloy::primitives::{Address, Bytes};
 use clap::{Args, ValueEnum};
+use eyre::Result;
 
 /// A complete governance call and its encoded payload, ready for relaying.
 pub struct RelayPlan {
@@ -10,6 +11,65 @@ pub struct RelayPlan {
     pub target: Address,
     pub calldata: Bytes,
     pub payload: Bytes,
+}
+
+/// One governance call to one edge chain's ASG: the resolved chain config, the
+/// verified ASG, and the inner `(target, calldata)` the ASG will run.
+pub struct EdgeCall {
+    /// JSON key of the chain in the chains config (e.g. `hedera`).
+    pub chain: String,
+    pub cfg: ResolvedConfig,
+    pub asg: super::helpers::AsgInfo,
+    pub target: Address,
+    pub calldata: Bytes,
+}
+
+impl EdgeCall {
+    /// Pair this call with its encoded governance payload for relaying.
+    pub fn relay_plan(&self, ptype: ProposalType, payload: Bytes) -> RelayPlan {
+        RelayPlan {
+            ptype,
+            target: self.target,
+            calldata: self.calldata.clone(),
+            payload,
+        }
+    }
+}
+
+/// Everything one gov proposal carries: one ASG command per edge chain, all of
+/// the same type and action. Hub-side parameters (LCD, gov module, deposits)
+/// are shared by every call and read from the first one.
+pub struct ProposalPlan {
+    pub ptype: ProposalType,
+    pub action_label: String,
+    pub calls: Vec<EdgeCall>,
+}
+
+impl ProposalPlan {
+    /// A plan always carries at least one call, and `hub()` relies on that.
+    pub fn new(ptype: ProposalType, action_label: String, calls: Vec<EdgeCall>) -> Result<Self> {
+        eyre::ensure!(
+            !calls.is_empty(),
+            "a proposal plan needs at least one edge call"
+        );
+        Ok(Self {
+            ptype,
+            action_label,
+            calls,
+        })
+    }
+
+    /// Hub-side config, identical across calls since they come from one chains file.
+    pub fn hub(&self) -> &ResolvedConfig {
+        &self.calls[0].cfg
+    }
+
+    pub fn edge_ids(&self) -> Vec<&str> {
+        self.calls
+            .iter()
+            .map(|call| call.cfg.edge_axelar_id.as_str())
+            .collect()
+    }
 }
 
 /// A terminal governance result, separate from errors while reading its state.
@@ -24,8 +84,15 @@ pub enum ProposalOutcome {
 pub struct ProposeArgs {
     /// Network: testnet | stagenet | devnet-amplifier | mainnet.
     pub network: crate::types::Network,
-    /// Edge chain key the ASG lives on (e.g. `hedera`).
-    pub chain: String,
+    /// Edge chain key the ASG lives on (e.g. `hedera`). Omit with `--chains`.
+    pub chain: Option<String>,
+    /// Edge chains for one multi-call proposal, with `--op`: `all` (every live
+    /// ITS Hub EVM chain whose ITS the ASG owns) or comma-separated chain keys.
+    #[arg(long, value_delimiter = ',', conflicts_with = "chain")]
+    pub chains: Vec<String>,
+    /// Chain keys to leave out of `--chains all`.
+    #[arg(long, value_delimiter = ',')]
+    pub skip: Vec<String>,
     /// Catalog operation to propose. Omit to pass a raw call with `--calldata`/`--target`.
     #[arg(long, value_enum)]
     pub op: Option<Operation>,
@@ -142,7 +209,8 @@ pub struct ResolvedConfig {
     pub its_address: Option<String>,
     pub edge_rpc: String,
     /// Edge chain's `MultisigProver` on the hub — builds the relay proof.
-    pub multisig_prover: String,
+    /// Absent on consensus chains, whose approvals Axelar validators produce.
+    pub multisig_prover: Option<String>,
     /// Axelar Tendermint RPC — for `block_results` (finding the gov GMP message).
     pub axelar_rpc: String,
     /// Cosmos `AxelarnetGateway` contract — the GMP entrypoint on the hub.
@@ -158,6 +226,35 @@ pub struct ResolvedConfig {
     pub deposit_amount: String,
     /// gov deposit for an expedited proposal.
     pub expedited_deposit_amount: String,
+}
+
+impl ResolvedConfig {
+    pub fn route(&self) -> EdgeRoute {
+        if self.multisig_prover.is_some() {
+            EdgeRoute::Amplifier
+        } else {
+            EdgeRoute::Consensus
+        }
+    }
+}
+
+/// How a governance GMP reaches the edge gateway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeRoute {
+    /// Amplifier chain: axe builds the proof on the MultisigProver and submits it.
+    Amplifier,
+    /// Consensus chain: Axelar validators approve on the legacy gateway, and axe
+    /// waits for that approval and then executes.
+    Consensus,
+}
+
+impl EdgeRoute {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Amplifier => "amplifier",
+            Self::Consensus => "consensus",
+        }
+    }
 }
 
 /// The deployed contract an operation targets.

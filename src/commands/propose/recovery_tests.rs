@@ -1,7 +1,10 @@
 use super::*;
 use crate::commands::propose::relay::relay;
 use crate::commands::propose::types::RelayPlan;
-use crate::commands::propose::{helpers, test_support::config};
+use crate::commands::propose::{
+    helpers,
+    test_support::{config, plan},
+};
 use crate::http::tests::{response, serve};
 use crate::types::Network;
 use serde_json::json;
@@ -89,7 +92,9 @@ async fn repeated_completed_relay_is_read_only_and_needs_no_signer() {
 fn args() -> ProposeArgs {
     ProposeArgs {
         network: Network::Testnet,
-        chain: "flow".into(),
+        chain: Some("flow".into()),
+        chains: vec![],
+        skip: vec![],
         op: None,
         calldata: None,
         target: None,
@@ -211,15 +216,19 @@ async fn rerun_finds_existing_proposal_after_pagination() {
     ])
     .await;
     let recovered = find(
-        &config(url.to_string().trim_end_matches('/').into()),
+        &plan(
+            config(url.to_string().trim_end_matches('/').into()),
+            ProposalType::Operator,
+            Address::from([4; 20]),
+            vec![1, 2, 3].into(),
+        ),
         &args(),
-        Address::from([4; 20]),
-        &vec![1, 2, 3].into(),
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(recovered.0.number().unwrap(), 645);
+    assert_eq!(recovered.1.len(), 1);
     let requests = task.await.unwrap();
     assert!(requests.iter().all(|r| r.starts_with("GET ")));
     assert!(requests.iter().all(|r| r.contains("pagination.limit=20&")));
@@ -230,10 +239,13 @@ async fn rerun_finds_existing_proposal_after_pagination() {
 async fn history_outage_does_not_allow_a_new_proposal() {
     let (url, task) = serve(vec![response("403 Forbidden", "{}")]).await;
     let result = find(
-        &config(url.to_string().trim_end_matches('/').into()),
+        &plan(
+            config(url.to_string().trim_end_matches('/').into()),
+            ProposalType::Operator,
+            Address::from([4; 20]),
+            vec![1, 2, 3].into(),
+        ),
         &args(),
-        Address::from([4; 20]),
-        &vec![1, 2, 3].into(),
     )
     .await;
     assert!(result.is_err());
@@ -247,14 +259,84 @@ async fn explicit_resume_cannot_fall_through_to_submit_a_mismatched_call() {
     let mut args = args();
     args.proposal_id = Some(645);
     let result = find(
-        &config(url.to_string().trim_end_matches('/').into()),
+        &plan(
+            config(url.to_string().trim_end_matches('/').into()),
+            ProposalType::Operator,
+            Address::from([5; 20]),
+            vec![1, 2, 3].into(),
+        ),
         &args,
-        Address::from([5; 20]),
-        &vec![1, 2, 3].into(),
     )
     .await;
     assert!(result.is_err());
     assert_eq!(task.await.unwrap().len(), 1);
+}
+
+#[test]
+fn multi_call_plan_matches_messages_in_any_order_but_none_left_over() {
+    let cfg = config(String::new());
+    let mut other = cfg.clone();
+    other.edge_axelar_id = "hedera".into();
+    other.asg_address = Address::from([7; 20]).to_string();
+    let call = |cfg: ResolvedConfig, byte: u8| {
+        plan(
+            cfg,
+            ProposalType::Operator,
+            Address::from([4; 20]),
+            vec![byte].into(),
+        )
+        .calls
+        .remove(0)
+    };
+    let two = ProposalPlan::new(
+        ProposalType::Operator,
+        "test".into(),
+        vec![call(cfg.clone(), 1), call(other.clone(), 2)],
+    )
+    .unwrap();
+    let message = |cfg: &ResolvedConfig, byte: u8| {
+        let payload = helpers::encode_governance_payload(
+            2,
+            Address::from([4; 20]),
+            Bytes::from(vec![byte]),
+            0,
+        );
+        json!({
+            "@type":"/cosmwasm.wasm.v1.MsgExecuteContract", "sender":cfg.gov_module, "contract":cfg.axelarnet_gateway,
+            "msg":{"call_contract":{"destination_chain":cfg.edge_axelar_id, "destination_address":cfg.asg_address, "payload":alloy::hex::encode(payload)}}, "funds":[]
+        })
+    };
+    let record = |messages: Vec<Value>| -> ExistingProposal {
+        serde_json::from_value(
+            json!({"id":"1", "status":"PROPOSAL_STATUS_PASSED", "messages":messages}),
+        )
+        .unwrap()
+    };
+    let swapped = record(vec![message(&other, 2), message(&cfg, 1)]);
+    let payloads = swapped.matching_plan(&two).unwrap();
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(
+        payloads[0],
+        helpers::encode_governance_payload(2, Address::from([4; 20]), vec![1].into(), 0)
+    );
+    assert!(record(vec![message(&cfg, 1)]).matching_plan(&two).is_none());
+    assert!(
+        record(vec![message(&cfg, 1), message(&other, 2), message(&cfg, 1)])
+            .matching_plan(&two)
+            .is_none()
+    );
+    // One message cannot satisfy two identical calls.
+    let twice = ProposalPlan::new(
+        ProposalType::Operator,
+        "test".into(),
+        vec![call(cfg.clone(), 1), call(cfg.clone(), 1)],
+    )
+    .unwrap();
+    assert!(
+        record(vec![message(&cfg, 1), message(&other, 2)])
+            .matching_plan(&twice)
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -279,13 +361,11 @@ async fn recover_flow_645_and_locate_historical_message() {
     let target = cfg.its_address.as_ref().unwrap().parse().unwrap();
     let mut args = args();
     args.proposal_id = Some(645);
-    let (record, payload) = find(&cfg, &args, target, &calldata.into())
-        .await
-        .unwrap()
-        .unwrap();
+    let plan = plan(cfg.clone(), ProposalType::Operator, target, calldata.into());
+    let (record, payloads) = find(&plan, &args).await.unwrap().unwrap();
     let msg = crate::commands::propose::relay_message::find_governance_message(
         &cfg,
-        alloy::primitives::keccak256(payload),
+        alloy::primitives::keccak256(&payloads[0]),
         record.execution_time().unwrap(),
     )
     .await
