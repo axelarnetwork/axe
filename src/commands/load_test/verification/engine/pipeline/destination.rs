@@ -385,45 +385,39 @@ impl DestinationVerifier for StellarDestinationVerifier {
             let mut observations = Vec::with_capacity(indices.len());
             for &index in indices {
                 let tx = &txs[index];
-                let approved = self
-                    .client
-                    .gateway_is_message_approved(MessageApprovalQuery {
-                        signer_account_pk: &self.signer_pk,
-                        gateway_contract: &self.gateway_contract,
-                        source_chain,
-                        message_id: &tx.message_id,
-                        source_address: &tx.source_address,
-                        contract_address: &tx.gmp_destination_address,
-                        payload_hash: required_payload_hash(tx)?.0,
-                    })
-                    .await?
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "Stellar gateway returned non-bool approval result for tx {}",
-                            tx.message_id
-                        )
-                    })?;
+                let approved = stellar_view_or_retry(
+                    self.client
+                        .gateway_is_message_approved(MessageApprovalQuery {
+                            signer_account_pk: &self.signer_pk,
+                            gateway_contract: &self.gateway_contract,
+                            source_chain,
+                            message_id: &tx.message_id,
+                            source_address: &tx.source_address,
+                            contract_address: &tx.gmp_destination_address,
+                            payload_hash: required_payload_hash(tx)?.0,
+                        })
+                        .await,
+                    "approval",
+                    &tx.message_id,
+                )?;
                 let status = match tx.phase() {
-                    Some(Phase::Approved) if approved => {
+                    Some(Phase::Approved) if approved == Some(true) => {
                         DestinationStatus::Approved { command_id: None }
                     }
                     Some(Phase::Executed) => {
-                        let executed = self
-                            .client
-                            .gateway_is_message_executed(
-                                &self.signer_pk,
-                                &self.gateway_contract,
-                                source_chain,
-                                &tx.message_id,
-                            )
-                            .await?
-                            .ok_or_else(|| {
-                                eyre::eyre!(
-                                    "Stellar gateway returned non-bool execution result for tx {}",
-                                    tx.message_id
+                        let executed = stellar_view_or_retry(
+                            self.client
+                                .gateway_is_message_executed(
+                                    &self.signer_pk,
+                                    &self.gateway_contract,
+                                    source_chain,
+                                    &tx.message_id,
                                 )
-                            })?;
-                        if executed {
+                                .await,
+                            "execution",
+                            &tx.message_id,
+                        )?;
+                        if executed == Some(true) {
                             DestinationStatus::Executed { command_id: None }
                         } else {
                             DestinationStatus::Pending
@@ -483,5 +477,49 @@ impl DestinationVerifier for SuiDestinationVerifier {
             }
             Ok(observations)
         })
+    }
+}
+
+/// A Stellar gateway view answered `Some(bool)`, or `None` when the RPC call
+/// failed: the message stays in flight and is checked again next poll, the
+/// way EVM destinations already behave (mainnet solana -> stellar died on a
+/// connection loss after the message had executed). A non-bool answer is a
+/// real error.
+pub(super) fn stellar_view_or_retry(
+    result: Result<Option<bool>>,
+    what: &str,
+    message_id: &str,
+) -> Result<Option<bool>> {
+    match result {
+        Ok(Some(value)) => Ok(Some(value)),
+        Ok(None) => Err(eyre::eyre!(
+            "Stellar gateway returned non-bool {what} result for tx {message_id}"
+        )),
+        Err(error) => {
+            ui::warn(&format!(
+                "Stellar {what} check failed for {message_id} (keeping in-flight): {error}"
+            ));
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod stellar_view_tests {
+    use super::stellar_view_or_retry;
+
+    #[test]
+    fn rpc_failure_keeps_the_message_in_flight() {
+        let failed = stellar_view_or_retry(Err(eyre::eyre!("dns error")), "execution", "m-1");
+        assert_eq!(failed.unwrap(), None);
+        assert_eq!(
+            stellar_view_or_retry(Ok(Some(true)), "execution", "m-1").unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn non_bool_answer_is_an_error() {
+        assert!(stellar_view_or_retry(Ok(None), "approval", "m-1").is_err());
     }
 }

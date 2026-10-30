@@ -898,47 +898,41 @@ impl DestinationVerifier for StellarItsDestinationVerifier {
                 let second_leg = required_second_leg(tx)?;
                 let status = match tx.phase() {
                     Some(Phase::Approved) => {
-                        let approved = self
-                            .client
-                            .gateway_is_message_approved(crate::stellar::MessageApprovalQuery {
-                                signer_account_pk: &self.signer_pk,
-                                gateway_contract: &self.gateway_contract,
-                                source_chain: "axelar",
-                                message_id: &second_leg.message_id,
-                                source_address: &second_leg.source_address,
-                                contract_address: &second_leg.destination_address,
-                                payload_hash: required_second_leg_payload_hash(tx)?.0,
-                            })
-                            .await?
-                            .ok_or_else(|| {
-                                eyre::eyre!(
-                                    "Stellar gateway returned non-bool approval result for tx {}",
-                                    tx.message_id
-                                )
-                            })?;
-                        if approved {
+                        let approved = destination::stellar_view_or_retry(
+                            self.client
+                                .gateway_is_message_approved(crate::stellar::MessageApprovalQuery {
+                                    signer_account_pk: &self.signer_pk,
+                                    gateway_contract: &self.gateway_contract,
+                                    source_chain: "axelar",
+                                    message_id: &second_leg.message_id,
+                                    source_address: &second_leg.source_address,
+                                    contract_address: &second_leg.destination_address,
+                                    payload_hash: required_second_leg_payload_hash(tx)?.0,
+                                })
+                                .await,
+                            "approval",
+                            &tx.message_id,
+                        )?;
+                        if approved == Some(true) {
                             DestinationStatus::Approved { command_id: None }
                         } else {
                             DestinationStatus::Pending
                         }
                     }
                     Some(Phase::Executed) => {
-                        let executed = self
-                            .client
-                            .gateway_is_message_executed(
-                                &self.signer_pk,
-                                &self.gateway_contract,
-                                "axelar",
-                                &second_leg.message_id,
-                            )
-                            .await?
-                            .ok_or_else(|| {
-                                eyre::eyre!(
-                                    "Stellar gateway returned non-bool execution result for tx {}",
-                                    tx.message_id
+                        let executed = destination::stellar_view_or_retry(
+                            self.client
+                                .gateway_is_message_executed(
+                                    &self.signer_pk,
+                                    &self.gateway_contract,
+                                    "axelar",
+                                    &second_leg.message_id,
                                 )
-                            })?;
-                        if executed {
+                                .await,
+                            "execution",
+                            &tx.message_id,
+                        )?;
+                        if executed == Some(true) {
                             DestinationStatus::Executed { command_id: None }
                         } else {
                             DestinationStatus::Pending
