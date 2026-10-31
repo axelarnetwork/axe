@@ -12,14 +12,26 @@ use eyre::{Result, WrapErr};
 
 use crate::config::{AxelarChainContract, AxelarGlobalContract, ChainContract, ChainsConfig};
 use crate::evm::AxelarServiceGovernance;
+use crate::evm::its_trust;
 use crate::types::Network;
 
 use super::types::{Operation, ProposalType, ResolvedConfig, TargetContract};
 
 sol! {
     function setPauseStatus(bool paused);
-    function setTrustedChain(string chainName);
-    function removeTrustedChain(string chainName);
+}
+
+pub use its_trust::TrustApi;
+
+/// Which trusted-chain API the edge ITS has, probed on-chain.
+pub async fn probe_trust_api(cfg: &ResolvedConfig) -> Result<TrustApi> {
+    let its = target_address(TargetContract::Its, cfg)?;
+    let provider = ProviderBuilder::new().connect_http(
+        cfg.edge_rpc
+            .parse()
+            .wrap_err_with(|| format!("invalid rpc url '{}'", cfg.edge_rpc))?,
+    );
+    its_trust::probe(&provider, its, &cfg.edge_axelar_id).await
 }
 
 /// What the on-chain ASG reports about itself — surfaced to the user and used
@@ -35,6 +47,18 @@ pub struct AsgInfo {
 /// Pull every address and parameter the proposal needs out of the chain config.
 /// Errors early (with a chain-specific message) if anything required is absent.
 pub fn resolve(network: Network, config: &ChainsConfig, chain: &str) -> Result<ResolvedConfig> {
+    resolve_with_asg(network, config, chain, None)
+}
+
+/// Like [`resolve`], but with the ASG address supplied by the caller when the
+/// config has no `AxelarServiceGovernance` entry for the chain (its on-chain
+/// ITS owner, for instance). A config entry still wins when present.
+pub fn resolve_with_asg(
+    network: Network,
+    config: &ChainsConfig,
+    chain: &str,
+    asg_fallback: Option<&str>,
+) -> Result<ResolvedConfig> {
     let chain_cfg = config
         .chains
         .get(chain)
@@ -43,7 +67,13 @@ pub fn resolve(network: Network, config: &ChainsConfig, chain: &str) -> Result<R
 
     let asg_address = chain_cfg
         .contract_address(ChainContract::AxelarServiceGovernance, &edge_axelar_id)
-        .wrap_err("target chain has no AxelarServiceGovernance — deploy/transfer ownership first")?
+        .ok()
+        .or(asg_fallback)
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "target chain has no AxelarServiceGovernance — deploy/transfer ownership first"
+            )
+        })?
         .to_string();
     let gateway_address = chain_cfg
         .contract_address(ChainContract::AxelarGateway, &edge_axelar_id)?
@@ -59,8 +89,9 @@ pub fn resolve(network: Network, config: &ChainsConfig, chain: &str) -> Result<R
         .ok_or_else(|| eyre::eyre!("no rpc for chain '{chain}' in config"))?;
     let multisig_prover = config
         .axelar
-        .contract_address(AxelarChainContract::MultisigProver, &edge_axelar_id)?
-        .to_string();
+        .contract_address(AxelarChainContract::MultisigProver, &edge_axelar_id)
+        .ok()
+        .map(str::to_string);
     let axelar_rpc = config.axelar.rpc.clone().ok_or_else(|| {
         eyre::eyre!("no axelar.rpc (Tendermint RPC) in config — needed for relay")
     })?;
@@ -135,15 +166,25 @@ pub fn build_call(
     op: Operation,
     cfg: &ResolvedConfig,
     its_chain: Option<&str>,
+    trust_api: TrustApi,
 ) -> Result<(Address, Bytes)> {
     let target = target_address(op.target_contract(), cfg)?;
     let calldata = match op {
         Operation::Pause | Operation::ItsPause => encode_set_pause(true),
         Operation::Unpause => encode_set_pause(false),
-        Operation::SetTrusted => encode_set_trusted(require_its_chain(op, its_chain)?),
-        Operation::RemoveTrusted => encode_remove_trusted(require_its_chain(op, its_chain)?),
+        Operation::SetTrusted => {
+            its_trust::encode_set(require_its_chain(op, its_chain)?, trust_api)
+        }
+        Operation::RemoveTrusted => {
+            its_trust::encode_remove(require_its_chain(op, its_chain)?, trust_api)
+        }
     };
     Ok((target, calldata))
+}
+
+/// Whether an operation needs the edge ITS's trusted-chain API probed first.
+pub const fn needs_trust_api(op: Operation) -> bool {
+    matches!(op, Operation::SetTrusted | Operation::RemoveTrusted)
 }
 
 fn target_address(target: TargetContract, cfg: &ResolvedConfig) -> Result<Address> {
@@ -162,22 +203,6 @@ fn require_its_chain(op: Operation, its_chain: Option<&str>) -> Result<&str> {
 
 fn encode_set_pause(paused: bool) -> Bytes {
     setPauseStatusCall { paused }.abi_encode().into()
-}
-
-fn encode_set_trusted(chain_name: &str) -> Bytes {
-    setTrustedChainCall {
-        chainName: chain_name.to_string(),
-    }
-    .abi_encode()
-    .into()
-}
-
-fn encode_remove_trusted(chain_name: &str) -> Bytes {
-    removeTrustedChainCall {
-        chainName: chain_name.to_string(),
-    }
-    .abi_encode()
-    .into()
 }
 
 /// `abi.encode(uint256 command, address target, bytes callData, uint256 nativeValue, uint256 eta)`

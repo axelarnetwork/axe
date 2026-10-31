@@ -1,26 +1,34 @@
 //! An interrupted broadcast must not become a second submission while the LCD catches up.
 use std::path::{Path, PathBuf};
 
-use alloy::primitives::{Address, Bytes, keccak256};
+use alloy::primitives::keccak256;
 use eyre::{Result, WrapErr};
 
-use super::types::{ProposalType, ResolvedConfig};
+use super::types::ProposalPlan;
 
-pub fn path(
-    cfg: &ResolvedConfig,
-    ptype: ProposalType,
-    target: Address,
-    calldata: &Bytes,
-) -> Result<PathBuf> {
+/// One marker per distinct proposal: the hub route, the command, and every
+/// edge call it carries. Two plans with the same calls in any order share it.
+pub fn path(plan: &ProposalPlan) -> Result<PathBuf> {
+    let hub = plan.hub();
+    let mut calls: Vec<_> = plan
+        .calls
+        .iter()
+        .map(|call| {
+            (
+                call.cfg.edge_axelar_id.clone(),
+                call.cfg.asg_address.to_lowercase(),
+                call.target,
+                call.calldata.clone(),
+            )
+        })
+        .collect();
+    calls.sort();
     let operation = serde_json::to_vec(&(
-        &cfg.chain_id,
-        &cfg.edge_axelar_id,
-        &cfg.asg_address.to_lowercase(),
-        &cfg.axelarnet_gateway,
-        &cfg.gov_module,
-        ptype.command(),
-        target,
-        calldata,
+        &hub.chain_id,
+        &hub.axelarnet_gateway,
+        &hub.gov_module,
+        plan.ptype.command(),
+        calls,
     ))?;
     Ok(crate::state::data_dir()?
         .join("proposals")
@@ -64,6 +72,9 @@ pub async fn claim(path: &Path, new_proposal: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::propose::test_support::{config, plan};
+    use crate::commands::propose::types::ProposalType;
+    use alloy::primitives::Address;
 
     #[tokio::test]
     async fn interrupted_or_concurrent_submission_cannot_be_claimed_twice() {
@@ -80,5 +91,29 @@ mod tests {
         check(&path, true).await.unwrap();
         claim(&path, true).await.unwrap();
         tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[test]
+    fn marker_depends_on_every_call_but_not_their_order() {
+        let call = |edge: &str, byte: u8| {
+            let mut cfg = config(String::new());
+            cfg.edge_axelar_id = edge.into();
+            plan(
+                cfg,
+                ProposalType::Operator,
+                Address::from([byte; 20]),
+                vec![byte].into(),
+            )
+            .calls
+            .remove(0)
+        };
+        let plan_of = |calls| ProposalPlan::new(ProposalType::Operator, "test".into(), calls);
+        let one = plan_of(vec![call("a", 1)]).unwrap();
+        let ab = plan_of(vec![call("a", 1), call("b", 2)]).unwrap();
+        let ba = plan_of(vec![call("b", 2), call("a", 1)]).unwrap();
+        let changed = plan_of(vec![call("a", 1), call("b", 9)]).unwrap();
+        assert_ne!(path(&one).unwrap(), path(&ab).unwrap());
+        assert_eq!(path(&ab).unwrap(), path(&ba).unwrap());
+        assert_ne!(path(&ab).unwrap(), path(&changed).unwrap());
     }
 }

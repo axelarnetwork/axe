@@ -13,6 +13,7 @@ pub mod info_block;
 pub mod init;
 pub mod intents;
 pub mod its_ownership;
+pub mod its_trust;
 pub mod load_test;
 pub mod propose;
 pub mod status;

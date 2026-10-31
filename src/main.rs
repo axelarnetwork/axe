@@ -8,6 +8,7 @@ mod evm;
 mod gmp_api;
 mod http;
 mod hyperliquid;
+mod its_hub;
 mod mcp;
 mod preflight;
 mod retry;
@@ -372,6 +373,12 @@ async fn run_cli() -> Result<()> {
             let network = cli::network_or_default(network, cli.network)?;
             commands::its_ownership::run(network, json).await
         }
+        cli::Commands::ItsTrust {
+            network,
+            chain,
+            skip,
+            apply,
+        } => commands::its_trust::run(network, &chain, &skip, apply).await,
         cli::Commands::CheckBalances { network } => {
             let network = cli::network_or_default(network, cli.network)?;
             commands::check_balances::run(network).await
