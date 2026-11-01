@@ -533,22 +533,23 @@ async fn reusable_config_token(
     let (mint, _) = solana::find_interchain_token_pda(request.network, &its_root, &token_id.0);
 
     let Some((balance, needed)) = inspect_token_balance(keypair, request, mint).await? else {
-        return Ok(None);
+        eyre::bail!(
+            "configured AXE {token_id} has no mint account on {} ({mint}); fix the \
+             axe-tokens entry instead of deploying a new token",
+            request.source_chain
+        );
     };
-
-    if balance >= needed {
-        ui::kv("token ID (chains-config)", &format!("{token_id}"));
-        ui::address("mint", &mint.to_string());
-
-        return Ok(Some((token_id.0, [0; 32], mint)));
+    if balance < needed {
+        return Err(super::helpers::underfunded_config_axe(
+            &request.source_chain,
+            keypair.pubkey(),
+            balance,
+            needed,
+        ));
     }
-
-    ui::warn(&format!(
-        "chains-config AXE balance too low ({balance} < {needed}); configured wallet \
-         isn't the workflow deployer — deploying fresh..."
-    ));
-
-    Ok(None)
+    ui::kv("token ID (chains-config)", &format!("{token_id}"));
+    ui::address("mint", &mint.to_string());
+    Ok(Some((token_id.0, [0; 32], mint)))
 }
 
 fn required_solana_token_balance(decimals: u8, transfers: usize) -> u64 {

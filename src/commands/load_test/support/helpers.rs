@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Display;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1140,16 +1141,10 @@ pub(crate) async fn read_pre_registered_axe_token_address(
     }
 }
 
-/// Reuse the chains-config pre-registered AXE token *only* when the configured
-/// wallet actually holds enough of it to run. Returns `Some((tokenId, addr))`
-/// when reuse is viable, or `None` (so the caller falls through to its local
-/// cache / fresh-deploy path) when there's no config entry or the holder's
-/// balance is below `needed`.
-///
-/// This keeps the two intended cases working: a workflow / CI run whose wallet
-/// already holds the AXE supply reuses the deployed token (no source + remote
-/// deploy), while a different wallet with no AXE balance deploys fresh exactly
-/// as the manual path does today.
+/// The configured AXE token for `chain_axelar_id`, when one is configured.
+/// Returns `None` (the caller falls through to its local cache / fresh-deploy
+/// path) only when there is no entry at all. A configured token the wallet
+/// cannot fund the run with is an error, never a reason to deploy.
 pub(crate) async fn reusable_config_axe<P: Provider>(
     config: &Path,
     chain_axelar_id: &str,
@@ -1203,13 +1198,29 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
     if balance >= scaled_needed {
         Ok(Some((tid, addr)))
     } else {
-        ui::warn(&format!(
-            "chains-config AXE balance too low for {holder} \
-             ({balance} < {scaled_needed} at {decimals} decimals); \
-             configured wallet isn't the workflow deployer — deploying fresh..."
-        ));
-        Ok(None)
+        Err(underfunded_config_axe(
+            chain_axelar_id,
+            holder,
+            balance,
+            scaled_needed,
+        ))
     }
+}
+
+/// A configured AXE token is the one to test with: when the wallet cannot
+/// cover the run, fail and say so rather than deploy a throwaway token (a
+/// fresh deploy per CI run is what the axe-tokens overlay exists to prevent).
+pub(crate) fn underfunded_config_axe(
+    chain: &str,
+    holder: impl Display,
+    balance: impl Display,
+    needed: impl Display,
+) -> eyre::Report {
+    eyre::eyre!(
+        "configured AXE on {chain}: wallet {holder} holds {balance} but the run needs {needed} \
+         (smallest units). Send AXE to it from the home chain (Avalanche) instead of deploying \
+         a new token."
+    )
 }
 
 /// Print a hint suggesting the caller add the freshly-deployed AXE tokenId to
