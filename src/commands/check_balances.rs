@@ -778,7 +778,7 @@ async fn probe_sui(rpc_url: &str) -> Result<(String, f64)> {
     let key = std::env::var("SUI_PRIVATE_KEY").wrap_err("SUI_PRIVATE_KEY env not set")?;
     let wallet = SuiWallet::from_secret_str(&key)?;
     let client = SuiClient::new(rpc_url);
-    // No outer retry: `SuiClient::call` already runs the full retry ladder
+    // No outer retry: `SuiClient` methods already run the full retry ladder
     // across its endpoint fallbacks. Wrapping it again multiplies the
     // ladders (6x6 = ~13 min against a dead endpoint - observed blowing the
     // preflight timeout in run 33412443275 on the XRPL twin of this probe).

@@ -100,7 +100,14 @@ async fn wait_until_voting_ends(
     let result = async {
         while proposal["status"] == "PROPOSAL_STATUS_VOTING_PERIOD" {
             tokio::time::sleep(interval).await;
-            proposal = lcd_query_proposal(lcd, id).await?;
+            let updated = lcd_query_proposal(lcd, id).await?;
+            if proposal["expedited"] == true && updated["expedited"] == false {
+                spinner.println(format!(
+                    "Proposal {id} converted to regular governance. Updated voting end: {}. Axe will keep monitoring this same proposal; Ctrl+C is safe.",
+                    updated["voting_end_time"].as_str().unwrap_or("check deploy status")
+                ));
+            }
+            proposal = updated;
             spinner.set_message(format!(
                 "Proposal {id}: last checked {}; Ctrl+C is safe",
                 chrono::Utc::now().format("%H:%M:%S UTC")
@@ -124,6 +131,11 @@ fn print_proposal(id: u64, proposal: &Value) {
         "failed_reason",
     ] {
         ui::kv(field, &proposal[field].to_string());
+    }
+    if proposal["expedited"] == false {
+        ui::info(
+            "This proposal is now using regular governance rules. An expedited proposal can convert to regular voting; its execution messages must still match the saved submission. Follow the updated voting end time above.",
+        );
     }
 }
 
@@ -200,7 +212,6 @@ async fn validate_identity(
 ) -> Result<()> {
     let name = match key {
         "instantiate" => "InstantiateChainContracts",
-        "register" => "RegisterDeployment",
         "itsHubRegister" => "RegisterItsOnHub",
         _ => {
             eyre::bail!("unexpected proposal key");
@@ -227,7 +238,7 @@ async fn validate_identity(
     Ok(())
 }
 
-pub(super) fn validate_payload(raw: &[u8], proposal: &Value) -> Result<()> {
+pub(crate) fn validate_payload(raw: &[u8], proposal: &Value) -> Result<()> {
     let tx = cosmos_sdk_proto::cosmos::tx::v1beta1::TxRaw::decode(raw)?;
     let body = cosmos_sdk_proto::cosmos::tx::v1beta1::TxBody::decode(tx.body_bytes.as_slice())?;
     eyre::ensure!(
@@ -247,7 +258,7 @@ pub(super) fn validate_payload(raw: &[u8], proposal: &Value) -> Result<()> {
     eyre::ensure!(
         actual.len() == expected.messages.len()
             && proposal["title"] == expected.title
-            && proposal["expedited"] == expected.expedited,
+            && valid_expedited_transition(expected.expedited, proposal["expedited"].as_bool()),
         "proposal content differs from approved submission"
     );
     for (actual, message) in actual.iter().zip(expected.messages) {
@@ -279,6 +290,10 @@ pub(super) fn validate_payload(raw: &[u8], proposal: &Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn valid_expedited_transition(submitted: bool, current: Option<bool>) -> bool {
+    matches!(current, Some(actual) if submitted || !actual)
 }
 
 #[cfg(test)]

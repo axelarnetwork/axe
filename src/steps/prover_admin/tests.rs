@@ -16,26 +16,24 @@ fn mnemonic(seed: u8) -> String {
 }
 
 #[test]
-fn matching_deployer_mnemonic_supplies_admin_without_a_second_secret() {
+fn admin_mnemonic_is_required_even_when_proposer_would_match() {
     let phrase = mnemonic(42);
     let (_, address) = derive_axelar_wallet(&phrase).unwrap();
-    assert_eq!(select_mnemonic(None, &phrase, &address).unwrap(), phrase);
-    assert_eq!(
-        select_mnemonic(Some(" "), &phrase, &address).unwrap(),
-        phrase
-    );
+    for missing in [None, Some(" ")] {
+        let error = select_mnemonic(missing, &address).unwrap_err().to_string();
+        assert!(error.contains("Set MULTISIG_PROVER_MNEMONIC"));
+        assert!(error.contains(&address));
+    }
+    assert_eq!(select_mnemonic(Some(&phrase), &address).unwrap(), phrase);
 }
 
 #[test]
-fn explicit_admin_must_match_even_if_deployer_matches() {
+fn explicit_admin_must_match_the_onchain_account() {
     let admin = mnemonic(42);
     let other = mnemonic(43);
     let (_, expected) = derive_axelar_wallet(&admin).unwrap();
-    assert_eq!(
-        select_mnemonic(Some(&admin), &other, &expected).unwrap(),
-        admin
-    );
-    let error = select_mnemonic(Some(&other), &admin, &expected)
+    assert_eq!(select_mnemonic(Some(&admin), &expected).unwrap(), admin);
+    let error = select_mnemonic(Some(&other), &expected)
         .unwrap_err()
         .to_string();
     assert!(error.contains("MULTISIG_PROVER_MNEMONIC"));
@@ -45,31 +43,16 @@ fn explicit_admin_must_match_even_if_deployer_matches() {
 }
 
 #[test]
-fn missing_admin_with_unrelated_deployer_fails_with_expected_address() {
-    let phrase = mnemonic(42);
-    let expected = "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf";
-    let error = select_mnemonic(None, &phrase, expected)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains(expected));
-    assert!(error.contains("Set MULTISIG_PROVER_MNEMONIC"));
-    assert!(!error.contains(&phrase));
-}
-
-#[test]
 fn malformed_mnemonic_fails_without_disclosing_it() {
     let invalid = "sensitive invalid input";
-    for admin in [None, Some(invalid)] {
-        let error = select_mnemonic(
-            admin,
-            invalid,
-            "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("cannot derive"));
-        assert!(!error.contains(invalid));
-    }
+    let error = select_mnemonic(
+        Some(invalid),
+        "axelar1w7y7v26rtnrj4vrx6q3qq4hfsmc68hhsxnadlf",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("cannot derive"));
+    assert!(!error.contains(invalid));
 }
 
 fn serve_raw_response(status: &str, data: &str) -> (String, thread::JoinHandle<()>) {

@@ -15,7 +15,11 @@ use crate::ui;
 fn print_deployer_addresses(state: &State) -> Result<()> {
     ui::section("Deployer Addresses");
     let (_, axelar_address) = derive_axelar_wallet(&state.mnemonic)?;
-    ui::address("axelar deployer", &axelar_address);
+    ui::address("Axelar proposer (MNEMONIC)", &axelar_address);
+    ui::address(
+        "Reward-pool funder (REWARDS_FUNDER_MNEMONIC)",
+        &crate::commands::deploy::cosmos_signer::rewards_funder_address(state)?,
+    );
 
     if let Some(mnemonic) = &state.admin_mnemonic {
         let (_, address) = derive_axelar_wallet(mnemonic)?;
@@ -121,6 +125,7 @@ pub async fn run(plan: crate::commands::deploy::hardened::types::Plan) -> Result
         env: env_parsed,
         cosm_salt: salt,
         admin_mnemonic: None,
+        rewards_funder_mnemonic: None,
         deployer_private_key: None,
         gateway_deployer_private_key: None,
         gateway_deployer: None,

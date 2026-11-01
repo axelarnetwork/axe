@@ -56,7 +56,6 @@ pub async fn retry_failed(
                     "WaitForVerifierSet/cosmos"
                         | "AddRewards/cosmos"
                         | "InstantiateChainContracts/cosmos"
-                        | "RegisterDeployment/cosmos"
                         | "RegisterItsOnHub/cosmos"
                 ),
                 "unsupported Cosmos retry action"
@@ -109,7 +108,6 @@ pub(super) fn validate_progress(ctx: &DeployContext, key: &str) -> Result<()> {
     );
     let proposal = match step {
         "InstantiateChainContracts" => Some("instantiate"),
-        "RegisterDeployment" => Some("register"),
         "RegisterItsOnHub" => Some("itsHubRegister"),
         _ => None,
     };

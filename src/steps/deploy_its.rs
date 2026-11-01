@@ -334,22 +334,7 @@ async fn deploy_its_service<P: Provider>(
         helpers.token_handler,
     )
         .abi_encode_params();
-    let implementation = deploy_via_create2(
-        &ConstAddressDeployer::new(plan.const_deployer, provider),
-        provider,
-        Create2Deployment {
-            deployer: plan.deployer,
-            name: "InterchainTokenServiceImpl",
-            bytecode: read_artifact_bytecode(
-                &plan.artifact("InterchainTokenService.sol/InterchainTokenService.json"),
-            )
-            .await?,
-            constructor_args: Some(constructor_args),
-            salt: plan.implementation_salt,
-            step: &plan.step,
-        },
-    )
-    .await?;
+    let implementation = deploy_service_implementation(plan, provider, constructor_args).await?;
     save_its_address(ctx, step_idx, "InterchainTokenServiceImpl", implementation).await?;
 
     ui::section("deploying InterchainTokenService proxy");
@@ -380,6 +365,32 @@ async fn deploy_its_service<P: Provider>(
     })
 }
 
+async fn deploy_service_implementation<P: Provider>(
+    plan: &ItsDeploymentPlan,
+    provider: &P,
+    constructor_args: Vec<u8>,
+) -> Result<Address> {
+    let create3 = Create3Deployer::new(plan.create3_deployer, provider);
+    let predicted = create3
+        .deployedAddress(Bytes::new(), plan.deployer, plan.implementation_salt)
+        .call()
+        .await?;
+    ui::address("predicted ITS implementation", &predicted.to_string());
+    deploy_via_create3(
+        &create3,
+        provider,
+        "InterchainTokenServiceImpl",
+        read_artifact_bytecode(
+            &plan.artifact("InterchainTokenService.sol/InterchainTokenService.json"),
+        )
+        .await?,
+        constructor_args,
+        plan.implementation_salt,
+        predicted,
+    )
+    .await
+}
+
 async fn deploy_its_factory<P: Provider>(
     ctx: &mut DeployContext,
     step_idx: usize,
@@ -398,7 +409,7 @@ async fn deploy_its_factory<P: Provider>(
             )
             .await?,
             constructor_args: Some(plan.its_proxy.abi_encode()),
-            salt: plan.implementation_salt,
+            salt: plan.helper_salt,
             step: &plan.step,
         },
     )
@@ -529,6 +540,8 @@ async fn deploy_via_create2<P: Provider>(
         .deployedAddress(deploy_bytes.clone(), deployer_addr, salt)
         .call()
         .await?;
+
+    ui::address(&format!("predicted {name}"), &predicted.to_string());
 
     // Check step state — only trust it if the saved address matches the predicted one
     if let Some(saved) = step.its_address(name)

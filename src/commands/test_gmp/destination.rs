@@ -1,3 +1,5 @@
+mod approval;
+
 use alloy::{
     primitives::{Address, B256, Bytes, keccak256},
     providers::Provider,
@@ -7,7 +9,7 @@ use eyre::Result;
 use solana_axelar_std::{CrossChainId, Message};
 use tokio::task::spawn_blocking;
 
-use crate::evm::{AxelarAmplifierGateway, SenderReceiver};
+use crate::evm::SenderReceiver;
 use crate::solana::{
     approve_messages_on_gateway, decode_execute_data, execute_on_memo, load_keypair,
 };
@@ -58,7 +60,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
         message_id,
         execute_data_hex,
         payload_bytes,
-        payload_hash,
+        payload_hash: _,
         step_idx_approve,
         step_idx_execute,
         total_steps,
@@ -73,27 +75,7 @@ pub async fn approve_and_execute_evm<P: Provider>(
     let approve_receipt = crate::evm::broadcast_and_log(pending_approve, "tx").await?;
     let approve_tx_hash = format!("{:#x}", approve_receipt.transaction_hash);
 
-    // Use the modern Amplifier `isMessageApproved` view — keyed on
-    // (sourceChain, messageId, sourceAddress, contractAddress, payloadHash)
-    // — instead of the legacy `isContractCallApproved` which needs a
-    // commandId we'd have to derive from a non-trivial formula that
-    // varies across gateway versions. This is what `load-test` checks too.
-    let gw_contract = AxelarAmplifierGateway::new(gateway, provider);
-    let approved = gw_contract
-        .isMessageApproved(
-            source_chain.to_string(),
-            message_id.to_string(),
-            source_address.to_string(),
-            sender_receiver,
-            payload_hash,
-        )
-        .call()
-        .await?;
-    ui::kv("isMessageApproved", &format!("{approved}"));
-
-    if !approved {
-        return Err(eyre::eyre!("message not approved on EVM gateway"));
-    }
+    approval::wait(&request, &approve_receipt).await?;
 
     // SenderReceiver.execute(commandId, ...) needs the gateway's internal
     // approval key. The Amplifier EVM gateway uses

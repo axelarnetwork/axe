@@ -20,9 +20,7 @@
 //! );
 //! ```
 
-use base64::Engine;
 use eyre::{Result, eyre};
-use serde_json::{Value, json};
 use sui_sdk_types::{
     Address as SuiAddress, Argument, GasPayment, ObjectReference, Transaction, TypeTag,
 };
@@ -171,7 +169,7 @@ impl SuiClient {
     }
 
     /// Resolve the Move coin type tag T from a 32-byte ITS token id by
-    /// `sui_devInspectTransactionBlock` of `interchain_token_service::registered_coin_type`.
+    /// simulating `interchain_token_service::registered_coin_type`.
     /// The return value is the BCS-encoded `std::ascii::String` containing
     /// the type-tag-without-leading-`0x`.
     pub async fn dev_inspect_registered_coin_type(
@@ -196,54 +194,18 @@ impl SuiClient {
             vec![],
             vec![its, tid_obj],
         )?;
-        let kind = b.into_transaction_kind();
-        let kind_bcs = bcs::to_bytes(&kind).map_err(|e| eyre!("bcs encode kind: {e}"))?;
-        let kind_b64 = base64::engine::general_purpose::STANDARD.encode(&kind_bcs);
-
-        let r = self
-            .call(
-                "sui_devInspectTransactionBlock",
-                json!([owner_addr_hex(sender), kind_b64, null, null]),
-            )
+        // `registered_coin_type` is the second command; its return value is
+        // the BCS-encoded `std::ascii::String` type tag.
+        let raw = self
+            .simulate_return_value(sender, b.into_transaction_kind().into(), 1)
             .await?;
-        // `results[1].returnValues[0]` = [<bcs bytes>, <type-tag-string>].
-        // The bytes encode `std::ascii::String` = ULEB128(len) || bytes.
-        let bytes_val = r
-            .pointer("/results/1/returnValues/0/0")
-            .ok_or_else(|| eyre!("dev-inspect returnValues missing: {r}"))?;
-        let bytes_arr = bytes_val
-            .as_array()
-            .ok_or_else(|| eyre!("dev-inspect returnValues bytes not array: {bytes_val}"))?;
-        let raw: Vec<u8> = bytes_arr
-            .iter()
-            .filter_map(|v| v.as_u64().map(|n| n as u8))
-            .collect();
-        // Strip leading ULEB128 length prefix.
-        let mut i = 0usize;
-        let mut len: u64 = 0;
-        let mut shift: u32 = 0;
-        loop {
-            let b = *raw.get(i).ok_or_else(|| eyre!("uleb128 truncated"))?;
-            len |= ((b & 0x7f) as u64) << shift;
-            i += 1;
-            if (b & 0x80) == 0 {
-                break;
-            }
-            shift += 7;
-            if shift > 63 {
-                return Err(eyre!("uleb128 overflow"));
-            }
-        }
-        let s_bytes = raw
-            .get(i..i + len as usize)
-            .ok_or_else(|| eyre!("type tag bytes truncated"))?;
-        let s = std::str::from_utf8(s_bytes).map_err(|e| eyre!("type tag utf8: {e}"))?;
+        let s: String = bcs::from_bytes(&raw).map_err(|e| eyre!("type tag bcs: {e}"))?;
         // Sui returns the type tag without a leading `0x` for the address.
         // Re-prefix so it round-trips through `TypeTag::from_str`.
         if let Some((addr, rest)) = s.split_once("::") {
             Ok(format!("0x{addr}::{rest}"))
         } else {
-            Ok(s.to_string())
+            Ok(s)
         }
     }
 }
@@ -419,33 +381,6 @@ fn build_interchain_transfer(
     ))
 }
 
-fn extract_contract_call(events: &[Value]) -> (u32, String, String) {
-    events
-        .iter()
-        .enumerate()
-        .find(|(_, event)| {
-            event["type"]
-                .as_str()
-                .is_some_and(|event_type| event_type.ends_with("::events::ContractCall"))
-        })
-        .map(|(index, event)| {
-            let field = |pointer| {
-                event
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim_start_matches("0x")
-                    .to_string()
-            };
-            (
-                index as u32,
-                field("/parsedJson/source_id"),
-                field("/parsedJson/payload_hash"),
-            )
-        })
-        .unwrap_or_default()
-}
-
 pub async fn send_its_interchain_transfer(
     request: InterchainTransferRequest<'_>,
 ) -> Result<ItsSendResult> {
@@ -466,15 +401,14 @@ pub async fn send_its_interchain_transfer(
         gas_price,
     )?;
     let submitted = sign_and_submit(request.client, request.wallet, transaction).await?;
-    let (event_index, source_address_hex, payload_hash_hex) =
-        extract_contract_call(&submitted.events);
+    let call = submitted.contract_call();
 
     Ok(ItsSendResult {
         digest: submitted.digest,
         success: submitted.success,
         error: submitted.error,
-        event_index,
-        source_address_hex,
-        payload_hash_hex,
+        event_index: call.event_index,
+        source_address_hex: call.source_address_hex,
+        payload_hash_hex: call.payload_hash_hex,
     })
 }

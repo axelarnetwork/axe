@@ -99,6 +99,7 @@ impl Session {
             Journal {
                 version: 2,
                 fingerprint,
+                cosmos_deployment: None,
                 inputs_hash: None,
                 evm_confirmations: Default::default(),
                 actions: BTreeMap::new(),

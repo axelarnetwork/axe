@@ -23,14 +23,18 @@ pub async fn approve(
         amount,
     )
     .await?;
-    ui::section("Cosmos transaction");
+    let is_proposal = messages
+        .iter()
+        .any(|m| m.type_url == "/cosmos.gov.v1.MsgSubmitProposal");
+    ui::section(if is_proposal {
+        "Governance proposal submission"
+    } else {
+        "Cosmos transaction"
+    });
     ui::kv("chain", chain);
     ui::address("signer", address);
     ui::kv("fee", &format!("{fee} {denom}"));
-    if messages
-        .iter()
-        .any(|m| m.type_url == "/cosmos.gov.v1.MsgSubmitProposal")
-    {
+    if is_proposal {
         ui::kv(
             "expedited voting period",
             &super::governance::parameters(lcd)
@@ -41,7 +45,18 @@ pub async fn approve(
     for message in messages {
         super::cosmos::preview(message)?;
     }
-    Ok(ui::confirm("Submit this transaction?").await)
+    let prompt = if is_proposal {
+        ui::section("Ready to submit governance proposal");
+        ui::info(
+            "Approving submits the proposal and pays the deposit and transaction fee shown above.",
+        );
+        ui::info("The proposed actions execute only if governance passes the proposal.");
+        ui::info("Axe will show the proposal ID and voting instructions after submission.");
+        "Submit this governance proposal?"
+    } else {
+        "Submit this transaction?"
+    };
+    Ok(ui::confirm(prompt).await)
 }
 
 pub(super) fn required(messages: &[cosmrs::Any], denom: &str) -> Result<u128> {

@@ -19,6 +19,7 @@ pub(super) struct InstantiatePlan {
     pub execute_msg: Value,
     pub deployment_name: String,
     pub salt_key: String,
+    pub salt: String,
     pub domain_separator: String,
     pub contract_admin: &'static str,
     pub codes: ChainCodeIds,
@@ -43,11 +44,6 @@ pub(super) struct ContractInfo {
 pub(super) struct QueryErrorBody {
     pub code: u32,
     pub message: String,
-}
-
-#[derive(Deserialize)]
-pub(super) struct StoredCode {
-    pub code_info: CodePermissions,
 }
 
 #[derive(Deserialize)]

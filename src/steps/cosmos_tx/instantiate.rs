@@ -18,8 +18,12 @@ use crate::state::{State, StepStatus};
 use crate::ui;
 use crate::utils::compute_domain_separator;
 
+mod batch;
 mod permissions;
 mod reconcile;
+mod settings;
+#[cfg(test)]
+mod tests;
 mod types;
 
 use types::{ChainCodeIds, ChainContractAddresses, InstantiatePlan};
@@ -123,7 +127,7 @@ pub(crate) fn contract_admin(env: &str) -> &'static str {
     match env {
         "devnet-amplifier" => "axelar1zlr7e5qf3sz7yf890rkh9tcnu87234k6k7ytd9",
         "testnet" => "axelar1wxej3l9aczsns3harrtdzk7rct29jl47tvu8mp",
-        "mainnet" => "axelar1nctnr9x0qexemeld5w7w752rmqdsqqv92dw9am",
+        "mainnet" => "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj",
         _ => "axelar12qvsvse32cjyw60ztysd3v655aj5urqeup82ky",
     }
 }
@@ -148,6 +152,7 @@ async fn build_instantiate_plan(
             tx.chain_axelar_id
         ))
         .ok_or_else(|| eyre::eyre!("no MultisigProver.{} config", tx.chain_axelar_id))?;
+    settings::validate(&ctx.state, &addresses.governance, verifier, prover)?;
     let salt_key = reconcile::chain_salt_key(tx.chain_axelar_id, &ctx.state.cosm_salt);
     let salt =
         base64::engine::general_purpose::STANDARD.encode(get_salt_from_key(&salt_key).as_slice());
@@ -191,8 +196,7 @@ async fn build_instantiate_plan(
                         "source_chain": tx.chain_axelar_id,
                         "rewards_address": addresses.rewards,
                         "msg_id_format": verifier["msgIdFormat"],
-                        "chain_codec_address": addresses.codec,
-                        "address_format": verifier["addressFormat"]
+                        "chain_codec_address": addresses.codec
                     },
                     "contract_admin": admin
                 },
@@ -223,6 +227,7 @@ async fn build_instantiate_plan(
         execute_msg,
         deployment_name,
         salt_key,
+        salt,
         domain_separator,
         contract_admin: admin,
         codes,
@@ -327,7 +332,22 @@ async fn submit_instantiate(
     } else {
         tx.axelar_address
     };
-    let inner_msg = build_execute_msg_any(sender, &addresses.coordinator, &plan.execute_msg)?;
-    let title = format!("Instantiate chain contracts for {}", tx.chain_axelar_id);
-    super::submission::submit(ctx, tx, vec![inner_msg], &title).await
+    let mut messages = vec![build_execute_msg_any(
+        sender,
+        &addresses.coordinator,
+        &plan.execute_msg,
+    )?];
+    let predicted = batch::prepare(ctx, &tx, addresses, plan).await?;
+    messages.extend(batch::registration_messages(
+        sender,
+        tx.env,
+        tx.chain_axelar_id,
+        addresses,
+        &predicted,
+    )?);
+    let title = format!(
+        "Instantiate and register {} with reward pools",
+        tx.chain_axelar_id
+    );
+    super::submission::submit(ctx, tx, messages, &title).await
 }
