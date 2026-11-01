@@ -279,12 +279,46 @@ async fn run_load_test(
     .await
 }
 
+async fn run_relay(
+    command: cli::TestCommands,
+    global_network: Option<types::Network>,
+) -> Result<()> {
+    let cli::TestCommands::Relay {
+        config,
+        source_chain,
+        destination_chain,
+        message_id,
+        source_address,
+        destination_address,
+        payload_hash,
+        mnemonic,
+    } = command
+    else {
+        unreachable!("run_relay called with another test command")
+    };
+    let (_network, config) = resolve_test_config(global_network, config).await?;
+    commands::test_gmp::run_relay(
+        config,
+        commands::test_gmp::RelayArgs {
+            source_chain,
+            destination_chain,
+            message_id,
+            source_address,
+            destination_address,
+            payload_hash,
+            mnemonic,
+        },
+    )
+    .await
+}
+
 async fn run_test(
     command: cli::TestCommands,
     global_network: Option<types::Network>,
 ) -> Result<()> {
     match command {
         command @ cli::TestCommands::Gmp { .. } => run_gmp_test(command, global_network).await,
+        command @ cli::TestCommands::Relay { .. } => run_relay(command, global_network).await,
         command @ cli::TestCommands::Its { .. } => run_its_test(command, global_network).await,
         command @ cli::TestCommands::LoadTest { .. } => {
             run_load_test(command, global_network).await
