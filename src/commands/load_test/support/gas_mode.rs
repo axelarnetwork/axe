@@ -17,11 +17,10 @@ use eyre::Result;
 pub(crate) enum EvmFeeMode {
     /// EIP-1559 chain. Carries the node's own `eth_gasPrice` quote and the
     /// latest base fee so `apply` can floor the tip and max fee at what the
-    /// mempool actually accepts: some chains (the Blast family) enforce a
-    /// minimum gas price orders of magnitude above `2 x baseFee`, and a
-    /// base-fee-derived estimate is accepted by the node, silently dropped,
-    /// and never mined (observed on blast-sepolia: base fee 252 wei, node
-    /// floor ~0.001 gwei). On chains without such a floor the quote is
+    /// mempool actually accepts: some chains enforce a minimum gas price
+    /// orders of magnitude above `2 x baseFee`, and a base-fee-derived
+    /// estimate is accepted by the node, silently dropped, and never mined
+    /// (observed: base fee 252 wei, node floor ~0.001 gwei). On chains without such a floor the quote is
     /// `baseFee + market tip`, so the floor collapses into the normal
     /// estimate and nothing overpays.
     Eip1559 {
@@ -38,7 +37,7 @@ impl EvmFeeMode {
     /// has no EIP-1559, so fetch the legacy `gas_price` to use instead.
     ///
     /// Reads the block as raw JSON rather than alloy's typed `Block` — some
-    /// chains (e.g. Moonbeam) return blocks missing fields alloy requires
+    /// chains return blocks missing fields alloy requires
     /// (`mixHash`), which would fail typed deserialization even though all we
     /// need is the optional `baseFeePerGas`.
     pub(crate) async fn detect<P: Provider>(provider: &P) -> Result<Self> {

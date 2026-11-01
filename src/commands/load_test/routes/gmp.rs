@@ -38,13 +38,13 @@ use super::sustained;
 use super::verification_session;
 use super::verify;
 use super::{
-    LoadTestArgs, check_evm_balance, deploy_or_reuse_sender_receiver, deploy_sender_receiver,
-    ensure_evm_contract_deployed, ensure_sender_receiver, finish_report, load_stellar_main_wallet,
-    load_sui_main_wallet, read_cache, read_stellar_contract_address, read_stellar_network_type,
-    read_stellar_token_address, save_cache, validate_evm_rpc, validate_solana_rpc,
+    LoadTestArgs, check_evm_balance, deploy_or_reuse_sender_receiver, ensure_evm_contract_deployed,
+    ensure_sender_receiver, finish_report, load_stellar_main_wallet, load_sui_main_wallet,
+    read_cache, read_stellar_contract_address, read_stellar_network_type,
+    read_stellar_token_address, validate_evm_rpc, validate_solana_rpc,
 };
 use crate::config::{AxelarChainContract, ChainContract, ChainsConfig};
-use crate::evm::{EvmEndpoints, SenderReceiver, connect_evm, connect_evm_signed};
+use crate::evm::{EvmEndpoints, connect_evm, connect_evm_signed};
 use crate::retry::retry_with_fallback_all;
 use crate::stellar::{StellarClient, StellarWallet};
 use crate::sui::{SuiClient, SuiContractsConfig, SuiWallet, read_sui_chain_config};
@@ -99,89 +99,6 @@ async fn load_evm_signer(
     Ok((signer, main_key))
 }
 
-async fn prepare_sol_to_evm_destination(
-    args: &LoadTestArgs,
-    rpc_url: &str,
-    gateway_addr: Address,
-    gas_service_addr: Address,
-) -> Result<(Address, impl Provider)> {
-    let destination = &args.destination_chain;
-    let mut cache = read_cache(destination).await;
-
-    if let Some(addr_str) = cache.sender_receiver_address.as_deref() {
-        let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-        let addr = addr_str.parse()?;
-        let code = read_provider.get_code_at(addr).await?;
-        let needs_redeploy = if code.is_empty() {
-            ui::warn("cached SenderReceiver has no code, redeploying...");
-            true
-        } else {
-            let sender_receiver = SenderReceiver::new(addr, &read_provider);
-            match sender_receiver.gateway().call().await {
-                Ok(onchain_gateway) if onchain_gateway != gateway_addr => {
-                    ui::warn(&format!(
-                        "cached SenderReceiver points to old gateway {onchain_gateway}, expected \
-                         {gateway_addr}, redeploying..."
-                    ));
-                    true
-                }
-                Err(_) => {
-                    ui::warn("cached SenderReceiver gateway check failed, redeploying...");
-                    true
-                }
-                _ => false,
-            }
-        };
-        if !needs_redeploy {
-            ui::info(&format!("SenderReceiver: reusing {addr}"));
-            let private_key = args.private_key.as_deref().ok_or_else(|| {
-                eyre::eyre!(
-                    "EVM private key required to use the cached SenderReceiver. \
-                     Set EVM_PRIVATE_KEY env var or use --private-key"
-                )
-            })?;
-            let signer = private_key.parse::<PrivateKeySigner>()?;
-            let provider = ProviderBuilder::new()
-                .wallet(signer)
-                .connect_http(rpc_url.parse()?);
-            return Ok((addr, provider));
-        }
-        let signer = deployment_signer(args, &read_provider).await?;
-        let provider = ProviderBuilder::new()
-            .wallet(signer)
-            .connect_http(rpc_url.parse()?);
-        let addr = deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?;
-        cache.sender_receiver_address = Some(addr.to_string());
-        save_cache(destination, &cache).await?;
-        return Ok((addr, provider));
-    }
-
-    let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-    let signer = deployment_signer(args, &read_provider).await?;
-    ui::info("deploying SenderReceiver on destination chain...");
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(rpc_url.parse()?);
-    let addr = deploy_sender_receiver(&provider, gateway_addr, gas_service_addr).await?;
-    cache.sender_receiver_address = Some(addr.to_string());
-    save_cache(destination, &cache).await?;
-    Ok((addr, provider))
-}
-
-async fn deployment_signer<P: Provider>(
-    args: &LoadTestArgs,
-    provider: &P,
-) -> Result<PrivateKeySigner> {
-    let private_key = args.private_key.as_ref().ok_or_else(|| {
-        eyre::eyre!(
-            "EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
-        )
-    })?;
-    let signer: PrivateKeySigner = private_key.parse()?;
-    check_evm_balance(provider, signer.address()).await?;
-    Ok(signer)
-}
-
 pub(super) async fn run_sol_to_evm(args: LoadTestArgs, sizing: RunSizing) -> Result<()> {
     let dest = &args.destination_chain;
     let src = &args.source_chain;
@@ -228,7 +145,7 @@ pub(super) async fn run_sol_to_evm(args: LoadTestArgs, sizing: RunSizing) -> Res
     ensure_evm_contract_deployed(rpc_url, "destination AxelarGateway", gateway_addr).await?;
 
     let (sender_receiver_addr, provider) =
-        prepare_sol_to_evm_destination(&args, rpc_url, gateway_addr, gas_service_addr).await?;
+        ensure_sender_receiver(&args, dest, rpc_url, gateway_addr, gas_service_addr, None).await?;
     ui::address("SenderReceiver", &format!("{sender_receiver_addr}"));
     let destination_address = format!("{sender_receiver_addr}");
 
@@ -673,17 +590,15 @@ async fn prepare_cached_evm_destination(
         .private_key
         .clone()
         .or_else(|| env::var("EVM_PRIVATE_KEY").ok());
-    let cache = read_cache(destination).await;
-
-    if cache.sender_receiver_address.is_none() && private_key.is_none() {
+    if private_key.is_none() {
         eyre::bail!("{missing_key_error}");
     }
     let (sender_receiver, provider) = ensure_sender_receiver(
         args,
+        destination,
         &args.destination_rpc,
         contracts.gateway,
         contracts.gas_service,
-        cache,
         private_key.as_deref(),
     )
     .await?;
@@ -975,14 +890,13 @@ pub(super) async fn run_evm_to_stellar(args: LoadTestArgs, sizing: RunSizing) ->
     ui::address("EVM gateway", &format!("{evm_gateway_addr}"));
 
     // Deploy/reuse SenderReceiver as the EVM-side caller (existing pattern).
-    let cache = read_cache(src).await;
     let evm_pk = args.private_key.clone();
     let (sender_receiver_addr, _provider) = ensure_sender_receiver(
         &args,
+        src,
         &evm_rpc_url,
         evm_gateway_addr,
         evm_gas_service_addr,
-        cache,
         evm_pk.as_deref(),
     )
     .await?;

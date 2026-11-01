@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Display;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,7 +40,6 @@ use crate::evm::{
 use crate::retry::{FALLBACK_ATTEMPTS, backoff_for_attempt, retry_all, retry_async};
 use crate::stellar::StellarWallet;
 use crate::sui::{SuiWallet, read_sui_chain_config};
-use crate::types::Network;
 use crate::ui;
 
 pub(crate) async fn ensure_sender_receiver_on_evm_chain(
@@ -162,6 +162,10 @@ async fn overlay_sender_receiver(cache_key: &str) -> Option<Address> {
 
 /// Verify a candidate SenderReceiver is live and wired to the expected
 /// gateway. Shared by the overlay and local-cache reuse paths.
+///
+/// RPC failures are errors, not "invalid": a flaky endpoint must fail the run
+/// rather than redeploy a receiver that is actually live (filecoin run
+/// 39259394188 discarded a valid configured receiver on one failed read).
 async fn sender_receiver_is_valid<R: Provider>(
     read_provider: &R,
     addr: Address,
@@ -172,7 +176,11 @@ async fn sender_receiver_is_valid<R: Provider>(
         return Ok(false);
     }
     let sr = SenderReceiver::new(addr, read_provider);
-    Ok(matches!(sr.gateway().call().await, Ok(gw) if gw == gateway_addr))
+    let onchain_gateway = retry_all("SenderReceiver gateway check", || async {
+        sr.gateway().call().await
+    })
+    .await?;
+    Ok(onchain_gateway == gateway_addr)
 }
 
 pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
@@ -213,55 +221,22 @@ pub(crate) async fn deploy_or_reuse_sender_receiver<R: Provider, W: Provider>(
     }
     if let Some(addr_str) = cache.sender_receiver_address.as_deref() {
         let addr: Address = addr_str.parse()?;
-        let code = get_code_with_retry(read_provider, addr).await?;
-        let needs_redeploy = if code.is_empty() {
-            ui::warn(&format!(
-                "cached SenderReceiver ({label}) has no code, redeploying..."
-            ));
-            true
-        } else {
-            // Verify the cached contract's gateway matches the current config.
-            let sr = SenderReceiver::new(addr, read_provider);
-            match sr.gateway().call().await {
-                Ok(onchain_gw) => {
-                    if onchain_gw != gateway_addr {
-                        ui::warn(&format!(
-                            "cached SenderReceiver ({label}) points to old gateway {onchain_gw}, expected {gateway_addr}, redeploying..."
-                        ));
-                        true
-                    } else {
-                        false
-                    }
-                }
-                Err(_) => {
-                    ui::warn(&format!(
-                        "cached SenderReceiver ({label}) gateway check failed, redeploying..."
-                    ));
-                    true
-                }
-            }
-        };
-        if needs_redeploy {
-            let new_addr =
-                deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
-            let mut cache = cache.clone();
-            cache.sender_receiver_address = Some(new_addr.to_string());
-            save_cache(cache_key, &cache).await?;
-            hint_persist_sender_receiver(cache_key, new_addr);
-            Ok(new_addr)
-        } else {
+        if sender_receiver_is_valid(read_provider, addr, gateway_addr).await? {
             ui::info(&format!("SenderReceiver ({label}): reusing {addr}"));
-            Ok(addr)
+            return Ok(addr);
         }
-    } else {
-        ui::info(&format!("deploying SenderReceiver on {label} chain..."));
-        let addr = deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
-        let mut cache = cache.clone();
-        cache.sender_receiver_address = Some(addr.to_string());
-        save_cache(cache_key, &cache).await?;
-        hint_persist_sender_receiver(cache_key, addr);
-        Ok(addr)
+        ui::warn(&format!(
+            "cached SenderReceiver ({label}) at {addr} has no code or points at another \
+             gateway, redeploying..."
+        ));
     }
+    ui::info(&format!("deploying SenderReceiver on {label} chain..."));
+    let addr = deploy_sender_receiver(write_provider, gateway_addr, gas_service_addr).await?;
+    let mut cache = cache.clone();
+    cache.sender_receiver_address = Some(addr.to_string());
+    save_cache(cache_key, &cache).await?;
+    hint_persist_sender_receiver(cache_key, addr);
+    Ok(addr)
 }
 
 /// Print a hint suggesting the fresh SenderReceiver be recorded in the
@@ -671,7 +646,7 @@ async fn deploy_with_artifact<P: Provider>(
         Err(error) if is_pending_state_error(&error) => {
             deploy_pinned(provider, &deploy_code, fee_mode, None).await?
         }
-        // Stale-nonce node (Blast sepolia observed): the fill's nonce query
+        // Stale-nonce node: the fill's nonce query
         // lags the tx pool, but the rejection carries the true next nonce —
         // pin it and re-send.
         Err(error) if parse_expected_nonce(&error.to_string()).is_some() => {
@@ -989,59 +964,40 @@ pub(crate) fn load_stellar_main_wallet(private_key: Option<&str>) -> Result<Stel
         StellarWallet::from_hex_seed(&key)
     }
 }
+/// Resolve the SenderReceiver on `chain` (configured overlay first, then the
+/// local cache, deploying only when neither holds a live receiver) and return
+/// it with a wallet provider the caller may submit through.
 pub(crate) async fn ensure_sender_receiver(
     args: &LoadTestArgs,
+    chain: &str,
     rpc_url: &str,
     gateway_addr: Address,
     gas_service_addr: Address,
-    cache: GmpCache,
     evm_private_key: Option<&str>,
 ) -> Result<(Address, impl Provider + use<>)> {
-    if let Some(addr_str) = cache.sender_receiver_address.as_deref() {
-        let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-        let addr: Address = addr_str.parse()?;
-        let code = get_code_with_retry(&read_provider, addr).await?;
-        let needs_redeploy = if code.is_empty() {
-            true
-        } else {
-            let sr = SenderReceiver::new(addr, &read_provider);
-            !matches!(sr.gateway().call().await, Ok(onchain_gw) if onchain_gw == gateway_addr)
-        };
-        if !needs_redeploy {
-            // Wallet provider — caller may submit txs through it. Fail loud
-            // when no key is configured rather than substitute the historic
-            // `0x0…01` placeholder, which was a sweepable-funds footgun.
-            let pk = args
-                .private_key
-                .as_deref()
-                .or(evm_private_key)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "EVM private key required to reuse the cached SenderReceiver. \
-                     Set EVM_PRIVATE_KEY env var or use --private-key"
-                    )
-                })?;
-            let signer: PrivateKeySigner = pk.parse()?;
-            let provider = ProviderBuilder::new()
-                .wallet(signer)
-                .connect_http(rpc_url.parse()?);
-            return Ok((addr, provider));
-        }
-    }
-
+    // Fail loud when no key is configured rather than substitute the historic
+    // `0x0...01` placeholder, which was a sweepable-funds footgun.
     let pk = args.private_key.as_deref().or(evm_private_key).ok_or_else(|| {
         eyre::eyre!(
-            "EVM private key required to deploy SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
+            "EVM private key required for the SenderReceiver. Set EVM_PRIVATE_KEY env var or use --private-key"
         )
     })?;
     let signer: PrivateKeySigner = pk.parse()?;
+    let read_provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
     let write_provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(rpc_url.parse()?);
-    let addr = deploy_sender_receiver(&write_provider, gateway_addr, gas_service_addr).await?;
-    let mut cache = cache;
-    cache.sender_receiver_address = Some(addr.to_string());
-    save_cache(&args.destination_chain, &cache).await?;
+    let cache = read_cache(chain).await;
+    let addr = deploy_or_reuse_sender_receiver(
+        &cache,
+        chain,
+        &read_provider,
+        &write_provider,
+        gateway_addr,
+        gas_service_addr,
+        chain,
+    )
+    .await?;
     Ok((addr, write_provider))
 }
 /// Resolve the Sui-side ITS token id (32B) and optional coin type tag for
@@ -1063,20 +1019,15 @@ pub(crate) async fn resolve_sui_axe_token(
         ));
     }
 
-    // Fall back to the chain config's AXE entry.
-    let config = ChainsConfig::load(config).await?;
-    let axe = config
-        .chain(sui_chain_id)?
-        .contract(ChainContract::Axe, sui_chain_id)
-        .map_err(|_| {
-            eyre::eyre!(
-                "no `contracts.AXE` entry under chain `{sui_chain_id}` in config — \
+    let axe = axe_entry(config, sui_chain_id).await?.ok_or_else(|| {
+        eyre::eyre!(
+            "no `contracts.AXE` entry under chain `{sui_chain_id}` in config — \
                  either pass --token-id, or pre-register AXE via\n  \
                  cd axelar-contract-deployments && PRIVATE_KEY=$SUI_PRIVATE_KEY \\\n    \
                  SUI_RPC=https://fullnode.testnet.sui.io:443 \\\n    \
                  node sui/its.js register-coin-from-info AXE AXE 9 -e testnet -n {sui_chain_id} -y"
-            )
-        })?;
+        )
+    })?;
     let tid_str = axe
         .objects
         .as_ref()
@@ -1107,68 +1058,52 @@ pub(crate) async fn read_pre_registered_axe_token(
     config: &Path,
     chain_axelar_id: &str,
 ) -> Result<Option<FixedBytes<32>>> {
-    let tid_str =
-        match axe_config_field(config, chain_axelar_id, |axe| axe.token_id.clone()).await? {
-            Some(value) => Some(value),
-            None => axe_overlay_field(config, chain_axelar_id, |axe| axe.token_id.clone()).await,
-        };
-    match tid_str {
-        Some(value) => Ok(Some(FixedBytes::from(parse_token_id_hex(
-            &value,
-            &format!("AXE.tokenId for chain {chain_axelar_id}"),
-        )?))),
-        None => Ok(None),
-    }
+    let Some(tid_str) = axe_entry(config, chain_axelar_id)
+        .await?
+        .and_then(|axe| axe.token_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(FixedBytes::from(parse_token_id_hex(
+        &tid_str,
+        &format!("AXE.tokenId for chain {chain_axelar_id}"),
+    )?)))
 }
 
-/// Read one `chains.<chain>.contracts.AXE.<field>` value from a chains-config
-/// file.
-async fn axe_config_field(
+/// The AXE entry for `chain_axelar_id`. This repo's overlay
+/// (`axe-tokens/<network>.json`, network = the chains-config file stem) wins
+/// as a WHOLE entry, so a stale upstream token (upstream mainnet still lists
+/// the retired v2 AXE on most chains) is never paired with overlay fields.
+/// The upstream chains-config entry is the fallback.
+pub(crate) async fn axe_entry(
     config: &Path,
     chain_axelar_id: &str,
-    pick: fn(&ContractEntry) -> Option<String>,
-) -> Result<Option<String>> {
+) -> Result<Option<ContractEntry>> {
+    let overlay = match config.file_stem().and_then(|stem| stem.to_str()) {
+        Some(network) => overlay_axe_entry(network, chain_axelar_id).await,
+        None => None,
+    };
+    if overlay.is_some() {
+        return Ok(overlay);
+    }
     let config = ChainsConfig::load(config).await?;
     Ok(config
         .chains
         .get(chain_axelar_id)
         .and_then(|chain| chain.contracts.as_ref())
         .and_then(|contracts| contracts.get("AXE"))
-        .and_then(pick))
+        .cloned())
 }
 
-/// Same lookup against this repo's AXE-token overlay,
-/// `axe-tokens/<network>.json` (network = the chains-config file stem). The
-/// upstream chains-config for stagenet / devnet-amplifier records no
-/// `contracts.AXE` entries and axe cannot push there, so tokens deployed on
-/// those networks persist HERE — the CI checkout and local runs both see the
-/// file. Missing/unreadable overlay is simply "no entry".
-async fn axe_overlay_field(
-    config: &Path,
+/// AXE entry recorded for `chain_axelar_id` in `axe-tokens/<network>.json`.
+/// A missing or unreadable overlay is simply "no entry".
+pub(crate) async fn overlay_axe_entry(
+    network: &str,
     chain_axelar_id: &str,
-    pick: fn(&ContractEntry) -> Option<String>,
-) -> Option<String> {
-    let stem = config.file_stem()?.to_str()?;
-    let overlay = Path::new("axe-tokens").join(format!("{stem}.json"));
-    let doc = load_overlay(&overlay).await?;
-    overlay_contract(&doc, chain_axelar_id, "AXE").and_then(pick)
-}
-
-/// AXE `(address, decimals)` recorded for `chain_axelar_id` in this repo's
-/// `axe-tokens/<network>.json` overlay. For callers holding a network rather
-/// than a chains-config path (the wallet preflight).
-pub(crate) async fn overlay_axe_token(
-    network: Network,
-    chain_axelar_id: &str,
-) -> Option<(String, Option<u64>)> {
+) -> Option<ContractEntry> {
     let overlay = Path::new("axe-tokens").join(format!("{network}.json"));
     let doc = load_overlay(&overlay).await?;
-    let entry = overlay_contract(&doc, chain_axelar_id, "AXE")?;
-    let decimals = entry
-        .extra
-        .get("decimals")
-        .and_then(serde_json::Value::as_u64);
-    Some((entry.address.clone()?, decimals))
+    overlay_contract(&doc, chain_axelar_id, "AXE").cloned()
 }
 
 /// Companion to `read_pre_registered_axe_token`: returns the AXE
@@ -1195,11 +1130,9 @@ pub(crate) async fn read_pre_registered_axe_token_address(
     // the caller fell back to ITS.interchainTokenAddress(tokenId), which
     // reverts on the Hedera HTS-fork (its `registeredTokenAddress` view
     // replaces it).
-    let addr_str =
-        match axe_config_field(config, chain_axelar_id, |axe| axe.address.clone()).await? {
-            Some(value) => Some(value),
-            None => axe_overlay_field(config, chain_axelar_id, |axe| axe.address.clone()).await,
-        };
+    let addr_str = axe_entry(config, chain_axelar_id)
+        .await?
+        .and_then(|axe| axe.address);
     match addr_str {
         Some(s) => Ok(Some(s.parse().map_err(|e| {
             eyre::eyre!("invalid AXE.address for chain {chain_axelar_id}: {e}")
@@ -1208,16 +1141,10 @@ pub(crate) async fn read_pre_registered_axe_token_address(
     }
 }
 
-/// Reuse the chains-config pre-registered AXE token *only* when the configured
-/// wallet actually holds enough of it to run. Returns `Some((tokenId, addr))`
-/// when reuse is viable, or `None` (so the caller falls through to its local
-/// cache / fresh-deploy path) when there's no config entry or the holder's
-/// balance is below `needed`.
-///
-/// This keeps the two intended cases working: a workflow / CI run whose wallet
-/// already holds the AXE supply reuses the deployed token (no source + remote
-/// deploy), while a different wallet with no AXE balance deploys fresh exactly
-/// as the manual path does today.
+/// The configured AXE token for `chain_axelar_id`, when one is configured.
+/// Returns `None` (the caller falls through to its local cache / fresh-deploy
+/// path) only when there is no entry at all. A configured token the wallet
+/// cannot fund the run with is an error, never a reason to deploy.
 pub(crate) async fn reusable_config_axe<P: Provider>(
     config: &Path,
     chain_axelar_id: &str,
@@ -1271,13 +1198,29 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
     if balance >= scaled_needed {
         Ok(Some((tid, addr)))
     } else {
-        ui::warn(&format!(
-            "chains-config AXE balance too low for {holder} \
-             ({balance} < {scaled_needed} at {decimals} decimals); \
-             configured wallet isn't the workflow deployer — deploying fresh..."
-        ));
-        Ok(None)
+        Err(underfunded_config_axe(
+            chain_axelar_id,
+            holder,
+            balance,
+            scaled_needed,
+        ))
     }
+}
+
+/// A configured AXE token is the one to test with: when the wallet cannot
+/// cover the run, fail and say so rather than deploy a throwaway token (a
+/// fresh deploy per CI run is what the axe-tokens overlay exists to prevent).
+pub(crate) fn underfunded_config_axe(
+    chain: &str,
+    holder: impl Display,
+    balance: impl Display,
+    needed: impl Display,
+) -> eyre::Report {
+    eyre::eyre!(
+        "configured AXE on {chain}: wallet {holder} holds {balance} but the run needs {needed} \
+         (smallest units). Send AXE to it from the home chain (Avalanche) instead of deploying \
+         a new token."
+    )
 }
 
 /// Print a hint suggesting the caller add the freshly-deployed AXE tokenId to
@@ -1285,9 +1228,8 @@ pub(crate) async fn reusable_config_axe<P: Provider>(
 /// per-chain deploy helpers right after the source-side deploy succeeds.
 pub(crate) fn hint_persist_axe_token(chain_axelar_id: &str, token_id: &FixedBytes<32>) {
     ui::info(&format!(
-        "💡 To skip the deploy on future runs, add to chains-config (or, for \
-         networks whose upstream config axe can't edit, to this repo's \
-         axe-tokens/<network>.json overlay):\n  \
+        "💡 To skip the deploy on future runs, add to this repo's \
+         axe-tokens/<network>.json overlay (it takes precedence over chains-config):\n  \
          chains.{chain_axelar_id}.contracts.AXE.tokenId = \"{token_id}\"\n  \
          (assumes the destination chains you care about already have the remote registered)"
     ));
@@ -1312,12 +1254,9 @@ pub(crate) async fn resolve_hedera_axe_token(
         return Ok(FixedBytes::from(parse_token_id_hex(t, "token id")?));
     }
 
-    let config = ChainsConfig::load(config).await?;
-    let tid_str = config
-        .chain(hedera_chain_id)?
-        .contract(ChainContract::Axe, hedera_chain_id)?
-        .token_id
-        .as_deref()
+    let tid_str = axe_entry(config, hedera_chain_id)
+        .await?
+        .and_then(|axe| axe.token_id)
         .ok_or_else(|| {
             eyre::eyre!(
                 "no `contracts.AXE.tokenId` entry under chain `{hedera_chain_id}` in config — \
@@ -1332,7 +1271,7 @@ pub(crate) async fn resolve_hedera_axe_token(
             )
         })?;
     Ok(FixedBytes::from(parse_token_id_hex(
-        tid_str,
+        &tid_str,
         &format!("AXE.tokenId for chain {hedera_chain_id}"),
     )?))
 }
@@ -1427,13 +1366,10 @@ pub(crate) async fn read_sui_axe_token_id(
     let hex_str = if let Some(s) = cli_override.filter(|s| !s.is_empty()) {
         s.to_string()
     } else {
-        let config = ChainsConfig::load(config).await?;
-        config
-            .chain(sui_chain_id)?
-            .contract(ChainContract::Axe, sui_chain_id)?
-            .objects
-            .as_ref()
-            .and_then(|objects| objects.token_id.clone())
+        axe_entry(config, sui_chain_id)
+            .await?
+            .and_then(|axe| axe.objects)
+            .and_then(|objects| objects.token_id)
             .ok_or_else(|| {
                 eyre::eyre!("contracts.AXE.objects.TokenId missing for Sui chain {sui_chain_id}")
             })?
@@ -1491,7 +1427,52 @@ pub(crate) async fn finalize_sui_dest_run_its(
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayDoc, overlay_contract, parse_token_id_hex};
+    use alloy::primitives::{Address, Bytes};
+    use alloy::providers::ProviderBuilder;
+    use alloy::rpc::client::RpcClient;
+    use alloy::sol_types::SolValue;
+    use alloy::transports::mock::Asserter;
+
+    use super::{OverlayDoc, overlay_contract, parse_token_id_hex, sender_receiver_is_valid};
+    use crate::retry::DEFAULT_ATTEMPTS;
+
+    const RECEIVER: Address = Address::repeat_byte(0x11);
+    const GATEWAY: Address = Address::repeat_byte(0x22);
+
+    fn receiver_with_code() -> Asserter {
+        let mock = Asserter::new();
+        mock.push_success(&"0x6080");
+        mock
+    }
+
+    async fn check(mock: Asserter) -> eyre::Result<bool> {
+        let provider = ProviderBuilder::new().connect_client(RpcClient::mocked(mock));
+        sender_receiver_is_valid(&provider, RECEIVER, GATEWAY).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_fails_the_run_when_the_gateway_read_keeps_failing() {
+        let mock = receiver_with_code();
+        for _ in 0..DEFAULT_ATTEMPTS {
+            mock.push_failure_msg("upstream timeout");
+        }
+        assert!(check(mock).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_survives_a_transient_gateway_read_failure() {
+        let mock = receiver_with_code();
+        mock.push_failure_msg("upstream timeout");
+        mock.push_success(&Bytes::from(GATEWAY.abi_encode()));
+        assert!(check(mock).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn receiver_wired_to_another_gateway_is_invalid() {
+        let mock = receiver_with_code();
+        mock.push_success(&Bytes::from(Address::repeat_byte(0x33).abi_encode()));
+        assert!(!check(mock).await.unwrap());
+    }
 
     #[test]
     fn token_id_parser_accepts_prefixed_and_unprefixed_32_byte_hex() {

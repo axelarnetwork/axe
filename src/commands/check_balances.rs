@@ -17,7 +17,7 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
 use eyre::{Result, WrapErr, eyre};
 use solana_sdk::signature::Signer;
 
-use crate::commands::load_test::overlay_axe_token;
+use crate::commands::load_test::overlay_axe_entry;
 use crate::config::{ChainConfig, ChainsConfig};
 use crate::config_source;
 use crate::solana::{load_keypair, rpc_client};
@@ -540,30 +540,32 @@ async fn probe_row(
     }
 }
 
-/// AXE token address and decimals for a chain: the chains-config
-/// `contracts.AXE` entry, else this repo's axe-tokens overlay (chains whose
-/// upstream config axe can't edit, e.g. arc-8 and robinhood on testnet).
+/// AXE token address and decimals for a chain: this repo's axe-tokens overlay
+/// entry when present (it wins as a whole entry, matching the load test), else
+/// the chains-config `contracts.AXE` entry.
 async fn axe_token(
     chain: &ChainConfig,
     chain_key: &str,
     network: Network,
 ) -> Result<(String, u32)> {
-    if let Some(axe) = chain.contracts.as_ref().and_then(|m| m.get("AXE")) {
-        let token = axe
-            .address
-            .clone()
-            .ok_or_else(|| eyre!("contracts.AXE.address missing for {chain_key}"))?;
-        let decimals = axe
-            .extra
-            .get("decimals")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(18) as u32;
-        return Ok((token, decimals));
-    }
-    let (token, decimals) = overlay_axe_token(network, chain_key)
-        .await
-        .ok_or_else(|| eyre!("no contracts.AXE entry for {chain_key}"))?;
-    Ok((token, decimals.unwrap_or(18) as u32))
+    let axe = match overlay_axe_entry(&network.to_string(), chain_key).await {
+        Some(entry) => entry,
+        None => chain
+            .contracts
+            .as_ref()
+            .and_then(|contracts| contracts.get("AXE"))
+            .cloned()
+            .ok_or_else(|| eyre!("no contracts.AXE entry for {chain_key}"))?,
+    };
+    let token = axe
+        .address
+        .ok_or_else(|| eyre!("contracts.AXE.address missing for {chain_key}"))?;
+    let decimals = axe
+        .extra
+        .get("decimals")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(18) as u32;
+    Ok((token, decimals))
 }
 
 /// Read the cron wallet's AXE-token balance (whole tokens) on `target`'s chain.

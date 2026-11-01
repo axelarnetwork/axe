@@ -13,7 +13,7 @@ This mirrors [AXE_STATE.md](../AXE_STATE.md) §2. See
 [load-test-coverage.md](load-test-coverage.md) for per-cell verified-on-chain
 status, env-var requirements, and the outstanding Sui work.
 
-## 1. The 29 wired chains, by type
+## 1. The 27 wired chains, by type
 
 The authoritative wired set is the `CHAIN_MAP` in
 [`.github/actions/run-loadtest/action.yml`](../.github/actions/run-loadtest/action.yml).
@@ -27,7 +27,6 @@ The `✓` columns mark the networks each chain is configured for.
 | Base        | EVM     | ✓ | ✓ | ✓ |   |
 | Berachain   | EVM     |   |   | ✓ | ✓ |
 | Binance     | EVM     | ✓ | ✓ |   |   |
-| Blast       | EVM     | ✓ | ✓ | ✓ |   |
 | Celo        | EVM     |   |   | ✓ |   |
 | Ethereum    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Filecoin    | EVM     | ✓ | ✓ |   |   |
@@ -35,16 +34,15 @@ The `✓` columns mark the networks each chain is configured for.
 | Hedera      | EVM     | ✓ | ✓ | ✓ |   |
 | Hyperliquid | EVM     | ✓ | ✓ | ✓ |   |
 | Immutable   | EVM     | ✓ | ✓ |   |   |
-| Kava        | EVM     | ✓ | ✓ | ✓ |   |
+| Kava        | EVM     | ✓ |   | ✓ |   |
 | Linea       | EVM     | ✓ | ✓ | ✓ |   |
 | Mantle      | EVM     | ✓ | ✓ | ✓ |   |
 | Monad       | EVM     | ✓ | ✓ |   |   |
-| Moonbeam    | EVM     | ✓ | ✓ | ✓ |   |
 | Optimism    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Plume       | EVM     |   |   | ✓ | ✓ |
 | Polygon     | EVM     | ✓ | ✓ | ✓ |   |
 | Robinhood   | EVM     |   | ✓ |   |   |
-| Scroll      | EVM     | ✓ | ✓ |   |   |
+| Scroll      | EVM     | ✓ |   |   |   |
 | XRPL EVM    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Solana      | Solana  | ✓ | ✓ | ✓ | ✓ |
 | Stellar     | Stellar | ✓ | ✓ |   |   |
@@ -53,6 +51,16 @@ The `✓` columns mark the networks each chain is configured for.
 
 XRPL EVM is an ordinary EVM chain (it has a `VotingVerifier` on testnet); only
 **XRPL** itself is the contract-less `XRPL` type.
+
+Network limits the matrix below cannot show (the run action rejects these
+before sending anything):
+
+- XRPL ITS moves XRP, which exists only where XRPL gateway governance deployed
+  it: XRPL EVM and Hedera on mainnet, plus Ethereum on testnet.
+- The testnet relayer does not execute on Filecoin, so testnet Filecoin works
+  only as a source.
+- Testnet Kava and testnet Scroll are unmapped: Scroll is deprecated and Kava
+  stopped executing inbound messages.
 
 ## 2. Dispatch matrix (by chain type)
 

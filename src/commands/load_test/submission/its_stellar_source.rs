@@ -168,7 +168,11 @@ async fn resolve_config_token(
         .its_query_token_address(wallet, &request.its_contract, token_id.0)
         .await?
     else {
-        return Ok(None);
+        eyre::bail!(
+            "configured AXE {token_id} is not registered on {}; fix the axe-tokens entry \
+             instead of deploying a new token",
+            request.source_chain
+        );
     };
     let decimals = client
         .token_decimals(&wallet.public_key_bytes, &token_address)
@@ -179,11 +183,12 @@ async fn resolve_config_token(
         .await
         .unwrap_or(0);
     if balance < needed {
-        ui::warn(&format!(
-            "chains-config AXE balance too low ({balance} < {needed}); configured wallet \
-             isn't the workflow deployer — deploying fresh..."
+        return Err(super::helpers::underfunded_config_axe(
+            &request.source_chain,
+            wallet.address(),
+            balance,
+            needed,
         ));
-        return Ok(None);
     }
     ui::kv("token ID (chains-config)", &format!("{token_id}"));
     ui::address("token contract (Stellar)", &token_address);

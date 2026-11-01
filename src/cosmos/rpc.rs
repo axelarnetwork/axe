@@ -442,6 +442,20 @@ impl CosmwasmQueryError {
         }
     }
 
+    /// Endpoint-level failure (dropped connection, rate limit, gateway error,
+    /// proxy error page) that says nothing about the contract: a poller can
+    /// ask again on its next tick. Contract errors stay non-transient.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Transport { .. }
+            | Self::BodyRead { .. }
+            | Self::InvalidJson { .. }
+            | Self::Exhausted => true,
+            Self::Http { status, .. } => matches!(status.as_u16(), 429 | 502 | 503 | 504),
+            Self::Encode(_) | Self::MissingData { .. } => false,
+        }
+    }
+
     pub fn is_pending(&self, query: CosmwasmQueryPending) -> bool {
         let Some(body) = self.contract_error_body() else {
             return false;
@@ -928,6 +942,27 @@ mod tests {
 
         assert!(!malformed.is_pending(CosmwasmQueryPending::OutgoingMessage));
         assert!(!CosmwasmQueryError::Exhausted.is_pending(CosmwasmQueryPending::ExecutableMessage));
+    }
+
+    #[test]
+    fn endpoint_failures_are_transient_but_contract_errors_are_not() {
+        let gateway_error = |status| CosmwasmQueryError::Http {
+            role: "fallback LCD",
+            status,
+            body: "<html>".to_string(),
+        };
+
+        assert!(CosmwasmQueryError::Exhausted.is_transient());
+        assert!(gateway_error(reqwest::StatusCode::TOO_MANY_REQUESTS).is_transient());
+        assert!(gateway_error(reqwest::StatusCode::BAD_GATEWAY).is_transient());
+        assert!(!contract_error("query wasm contract failed: unknown variant").is_transient());
+        assert!(
+            !CosmwasmQueryError::MissingData {
+                role: "primary LCD",
+                body: String::new(),
+            }
+            .is_transient()
+        );
     }
 }
 

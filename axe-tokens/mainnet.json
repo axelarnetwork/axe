@@ -4,6 +4,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x69484e0C70a54F18376EF89269bF4fC1751ccCda"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -11,6 +16,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xA3509e690a430F05BD5aaA5dd7786154374F9f4a"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -18,6 +28,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x3790d8D666039b22c7Ca76F5c829574DAe97BB6e"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -25,13 +40,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x93540654402A2e18A1B5c9857898871D5298C0Ee"
-        }
-      }
-    },
-    "blast": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0xcfB3781c4Ee2CF54fCeb71113da97D650505EA70"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -39,6 +52,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xE92e795cad574077342bD2e8E5A6Cc4D9B10e13F"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -46,6 +64,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xB78ebE401B54849Ce9C829d1236328D16f2ebCfC"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -53,6 +76,17 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x361EfDfF1De6fF0a7087f23e34Db2044dab08203"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "name": "AXE",
+          "symbol": "AXE",
+          "originChain": "avalanche",
+          "salt": "0x0c198226f1a20dc54d3378c6483543377e23ec0a9e5ff35507f5dfe77f91dd39",
+          "saltKey": "axe_AXE_mainnet_v3",
+          "decimals": 6,
+          "address": "0x0000000000000000000000000000000000A60D5E",
+          "notes": "Canonical AXE v3 (home avalanche, deployer+minter 0x16A4E49030E2D07D1D58590533651b761841f316). One tokenId across the whole axe mainnet ITS route fleet; replaces v2 0xbe1d7843. HTS token 0.0.10882398; deploy+transfer legs were relayer EstimationReverted and replayed by hand via gateway.js execute."
         }
       }
     },
@@ -60,6 +94,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x4070803ED966388B720c2d37f72D19639829F81D"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -67,6 +106,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x27892c11888de1280DfECE90b4E8B452416576DD"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -74,6 +118,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x9A99cEc3Ba8a45fd07185862fdd7D2e984497baE"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -81,6 +130,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x86bF6A161588bf308D600830a58EF69b57B65428"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -88,6 +142,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x88a1EE1F7D5906D0De3105bA33e2247fEa690c40"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -95,6 +154,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0xDe7470e5Bb15D61B19FCa43d19EA611C88c86124"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -102,6 +166,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x12d68CF22019dfDE54E2F00A80cefF7f180884df"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -109,6 +178,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x68331c7a103055fE3Dd5141F258cc7376B03cFA2"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -116,6 +190,11 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x52308d99234c9A413BbBB93C33cFf0E86852fA1a"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
         }
       }
     },
@@ -123,6 +202,63 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x685EF76DcC3ABcE929575399162EB47f2b1d83A2"
+        },
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0x2CD018Af7bA29bce4B707DE1e00e28d55b2B2936",
+          "decimals": 18
+        }
+      }
+    },
+    "solana": {
+      "contracts": {
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "name": "AXE",
+          "symbol": "AXE",
+          "originChain": "avalanche",
+          "salt": "0x0c198226f1a20dc54d3378c6483543377e23ec0a9e5ff35507f5dfe77f91dd39",
+          "saltKey": "axe_AXE_mainnet_v3",
+          "decimals": 6,
+          "address": "J2Ft2syQabJK4ngmemNr1FPbUpf61CWz3KMbM55pR649",
+          "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "mintAuthority": "FCFhkvCUtfUFNpVztnqNKpjCsoKmWWL5efoGEBcBTwM5",
+          "notes": "Canonical AXE v3 (home avalanche, deployer+minter 0x16A4E49030E2D07D1D58590533651b761841f316). One tokenId across the whole axe mainnet ITS route fleet; replaces v2 0xbe1d7843. Token-2022 mint; mintAuthority is the ITS TokenManager PDA."
+        }
+      }
+    },
+    "stellar": {
+      "contracts": {
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "name": "AXE",
+          "symbol": "AXE",
+          "originChain": "avalanche",
+          "salt": "0x0c198226f1a20dc54d3378c6483543377e23ec0a9e5ff35507f5dfe77f91dd39",
+          "saltKey": "axe_AXE_mainnet_v3",
+          "decimals": 18,
+          "address": "CCIPXIXFEUM6QKFOLO57JH4MOFMWRBI2FPTD3QFAVXJJ2DUPG2MZ5KAW",
+          "tokenManager": "CBWHE2IRB5KPOI23O443QMK3SVV2C46LR3UEAXIPGAKMZXHSZA3GIC36",
+          "notes": "Canonical AXE v3 (home avalanche, deployer+minter 0x16A4E49030E2D07D1D58590533651b761841f316). One tokenId across the whole axe mainnet ITS route fleet; replaces v2 0xbe1d7843."
+        }
+      }
+    },
+    "sui": {
+      "contracts": {
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "name": "AXE",
+          "symbol": "AXE",
+          "originChain": "avalanche",
+          "salt": "0x0c198226f1a20dc54d3378c6483543377e23ec0a9e5ff35507f5dfe77f91dd39",
+          "saltKey": "axe_AXE_mainnet_v3",
+          "decimals": 6,
+          "address": "0x65a4c9cb7aaa01b6909b21fc6570c384e5cc82a9b75e0ed0badab700d7f1ed6c",
+          "typeArgument": "0x65a4c9cb7aaa01b6909b21fc6570c384e5cc82a9b75e0ed0badab700d7f1ed6c::axe::AXE",
+          "objects": {
+            "TokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810"
+          },
+          "notes": "Canonical AXE v3 (home avalanche, deployer+minter 0x16A4E49030E2D07D1D58590533651b761841f316). One tokenId across the whole axe mainnet ITS route fleet; replaces v2 0xbe1d7843. Registered by manually executing receive_deploy_interchain_token<T>, which consumed the pre-published zero-supply unregistered (AXE,6) coin - the relayer PTB tried give_unregistered_coin first and hit EFieldAlreadyExists. axe reads objects.TokenId as the 32-byte Axelar tokenId."
         }
       }
     }

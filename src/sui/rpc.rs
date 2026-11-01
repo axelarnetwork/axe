@@ -464,7 +464,14 @@ impl SuiClient {
             async move {
                 let mut events = std::pin::pin!(client.list_events(request).take(MAX_EVENTS));
                 while let Some(response) = events.next().await {
-                    let response = response?;
+                    let response = match response {
+                        Ok(response) => response,
+                        // The walk reached the node's pruning horizon without a
+                        // match: everything still retained was scanned, so the
+                        // (recent) event has not been emitted yet.
+                        Err(status) if status.code() == Code::OutOfRange => return Ok(false),
+                        Err(status) => return Err(status),
+                    };
                     let Some(event) = response.event_opt() else {
                         continue;
                     };

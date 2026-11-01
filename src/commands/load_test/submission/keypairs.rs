@@ -308,6 +308,13 @@ pub async fn ensure_funded_evm_with_extra<P: Provider>(
     );
     for (i, signer) in derived.iter().enumerate() {
         let address = signer.address();
+        // A single-tx run signs with the main wallet itself (see
+        // `derive_evm_signers`): it pays its own gas, so there is nothing to
+        // fund and the per-key floor must not apply to it.
+        if address == main_signer.address() {
+            check_pb.inc(1);
+            continue;
+        }
         let balance = provider
             .get_balance(address)
             .await
@@ -547,4 +554,27 @@ pub async fn ensure_funded_xrpl(
         total_needed as f64 / 1_000_000.0,
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::slice;
+
+    use alloy::providers::ProviderBuilder;
+    use alloy::rpc::client::RpcClient;
+    use alloy::signers::local::PrivateKeySigner;
+    use alloy::transports::mock::Asserter;
+
+    use super::super::units::Wei;
+    use super::ensure_funded_evm_with_extra;
+
+    #[tokio::test]
+    async fn main_wallet_signer_is_never_funded_or_checked() {
+        // No mocked responses: any balance read or funding send would error.
+        let provider = ProviderBuilder::new().connect_client(RpcClient::mocked(Asserter::new()));
+        let main = PrivateKeySigner::random();
+        ensure_funded_evm_with_extra(&provider, &main, slice::from_ref(&main), Wei::default())
+            .await
+            .unwrap();
+    }
 }
