@@ -26,6 +26,12 @@ will not quote however well-funded the wallet is. `quote` asks for a price
 without depositing; `--json` prints it and stops. `status` reads one quote's
 state, and `--watch` polls it to a terminal state.
 
+The twice-daily testnet workflow runs only `catalog` and `inventory`. Low solver
+balances remain visible as warnings without failing the scheduled run. Quote
+benchmarks and transfer checks require solver liquidity and remain available
+through manual workflow runs (`smoke`, `canary`, `sweep`, or `full`). Catalog
+and inventory command errors still fail the scheduled run.
+
 ## Spending
 
 ```bash
