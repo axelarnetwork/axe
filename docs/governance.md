@@ -1,5 +1,8 @@
 # Governance proposals (`axe propose`)
 
+For ASG deployment and the separate gateway/ITS ownership transfer, see
+[Service governance deployment and ownership handoff](asg-handoff.md).
+
 ```bash
 # operator fast-path (default), submit + monitor only (no relay)
 axe propose testnet avalanche --op pause

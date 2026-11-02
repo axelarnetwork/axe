@@ -118,6 +118,9 @@ pub enum Commands {
         /// y/N review of the full calldata. Without it the command only reports.
         #[arg(long)]
         apply: bool,
+        /// Deploy service governance or hand gateway/ITS ownership to it
+        #[command(subcommand)]
+        action: Option<crate::commands::its_asg::types::AsgAction>,
     },
 
     /// Pre-flight check: verify each chain's wallet has the minimum native
