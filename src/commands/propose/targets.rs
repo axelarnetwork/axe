@@ -9,7 +9,6 @@
 use std::str::FromStr;
 
 use alloy::primitives::Address;
-use alloy::providers::ProviderBuilder;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::json;
@@ -208,8 +207,7 @@ async fn resolve_target(
 }
 
 async fn its_owner(rpc: &str, its: &str) -> Result<Address> {
-    let provider =
-        ProviderBuilder::new().connect_http(rpc.parse().wrap_err("invalid rpc url in config")?);
+    let provider = helpers::edge_provider(rpc)?;
     let its = Address::from_str(its).wrap_err("invalid ITS address in config")?;
     InterchainTokenService::new(its, &provider)
         .owner()

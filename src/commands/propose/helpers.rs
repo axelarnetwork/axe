@@ -23,14 +23,19 @@ sol! {
 
 pub use its_trust::TrustApi;
 
+/// A read-only provider for an edge RPC that retries rate limits and
+/// transient transport failures. Verification fires a burst of calls per
+/// chain at public endpoints, and one 429 must not void the whole plan.
+pub fn edge_provider(rpc: &str) -> Result<impl Provider> {
+    let client =
+        crate::evm::rpc_retry::client(rpc).wrap_err_with(|| format!("invalid rpc url '{rpc}'"))?;
+    Ok(ProviderBuilder::new().connect_client(client))
+}
+
 /// Which trusted-chain API the edge ITS has, probed on-chain.
 pub async fn probe_trust_api(cfg: &ResolvedConfig) -> Result<TrustApi> {
     let its = target_address(TargetContract::Its, cfg)?;
-    let provider = ProviderBuilder::new().connect_http(
-        cfg.edge_rpc
-            .parse()
-            .wrap_err_with(|| format!("invalid rpc url '{}'", cfg.edge_rpc))?,
-    );
+    let provider = edge_provider(&cfg.edge_rpc)?;
     its_trust::probe(&provider, its, &cfg.edge_axelar_id).await
 }
 
@@ -225,11 +230,7 @@ pub fn encode_governance_payload(command: u8, target: Address, calldata: Bytes, 
 /// we'll submit from (else its `onlyGovernance` guard would reject the message).
 pub async fn verify_asg(cfg: &ResolvedConfig) -> Result<AsgInfo> {
     let address = parse_address(&cfg.asg_address, "AxelarServiceGovernance")?;
-    let provider = ProviderBuilder::new().connect_http(
-        cfg.edge_rpc
-            .parse()
-            .wrap_err_with(|| format!("invalid rpc url '{}'", cfg.edge_rpc))?,
-    );
+    let provider = edge_provider(&cfg.edge_rpc)?;
 
     let code = provider
         .get_code_at(address)
@@ -289,11 +290,7 @@ pub async fn check_not_already_proposed(
     calldata: Bytes,
 ) -> Result<()> {
     let address = parse_address(&cfg.asg_address, "AxelarServiceGovernance")?;
-    let provider = ProviderBuilder::new().connect_http(
-        cfg.edge_rpc
-            .parse()
-            .wrap_err_with(|| format!("invalid rpc url '{}'", cfg.edge_rpc))?,
-    );
+    let provider = edge_provider(&cfg.edge_rpc)?;
     let asg = AxelarServiceGovernance::new(address, &provider);
 
     match ptype {
