@@ -1,12 +1,20 @@
 mod checks;
 mod config;
+mod confirmations;
 mod contracts;
 mod deploy;
+mod existing;
+mod factory;
 mod handoff;
+mod rpc;
 mod signing;
 mod transactions;
 pub mod types;
 
+#[cfg(test)]
+mod confirmation_tests;
+#[cfg(test)]
+mod rpc_tests;
 #[cfg(test)]
 mod tests;
 

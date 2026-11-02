@@ -8,9 +8,9 @@ use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use eyre::{Result, WrapErr, ensure};
 
 use super::types::{Context, SavedTransaction, TransactionAction};
-use super::{checks, config, signing};
+use super::{checks, config, confirmations, deploy, signing};
 use crate::commands::deploy::hardened::storage;
-use crate::evm::{EvmEndpoints, finality};
+use crate::evm::EvmEndpoints;
 use crate::ui;
 
 pub fn preview(request: &TransactionRequest) -> Result<()> {
@@ -20,8 +20,17 @@ pub fn preview(request: &TransactionRequest) -> Result<()> {
 
 fn review_action(ctx: &Context, action: TransactionAction) {
     ui::kv("transaction signing key", signing::key_variable(action));
-    if let TransactionAction::Deploy = action {
-        ui::address("predicted ASG address", &ctx.settings.asg.to_checksum(None));
+    if let TransactionAction::Deploy(asg) = action {
+        ui::address("predicted ASG address", &asg.to_checksum(None));
+        ui::address("ASG deployer", &ctx.settings.deployer.to_checksum(None));
+        ui::address("ASG operator", &ctx.settings.operator.to_checksum(None));
+        ui::kv("salt key", ctx.settings.salt);
+        ui::info(
+            "Wait for two confirmations, including the inclusion block, before recording ASG (not finality)",
+        );
+        if let Some(factory) = ctx.create3 {
+            ui::address("CREATE3 factory", &factory.to_checksum(None));
+        }
     }
 }
 
@@ -121,7 +130,7 @@ pub async fn send<P: Provider>(
     };
     validate(request, &saved)?;
     storage::atomic_write(&path, &serde_json::to_vec_pretty(&saved)?)?;
-    broadcast(provider, &saved.raw).await
+    broadcast(provider, &saved.raw, action).await
 }
 
 pub(super) fn validate(
@@ -176,7 +185,7 @@ pub(super) async fn resume<P: Provider>(
             receipt.transaction_hash == *tx.tx_hash(),
             "RPC returned a different receipt"
         );
-        finality::wait_for_finalized_receipt(provider, &receipt).await?;
+        confirmations::wait(provider, &receipt, action).await?;
         return Ok(receipt);
     }
     let from = request.from.ok_or_else(|| eyre::eyre!("missing sender"))?;
@@ -197,7 +206,7 @@ pub(super) async fn resume<P: Provider>(
         "EVM RPC chain ID changed"
     );
     recheck_governance(provider, ctx, from, action).await?;
-    broadcast(provider, &saved.raw).await
+    broadcast(provider, &saved.raw, action).await
 }
 
 async fn recheck_governance<P: Provider>(
@@ -206,6 +215,13 @@ async fn recheck_governance<P: Provider>(
     from: Address,
     action: TransactionAction,
 ) -> Result<()> {
+    if let TransactionAction::Deploy(asg) = action {
+        let refreshed = deploy::prepare(provider, ctx, from).await?;
+        ensure!(
+            refreshed.address == asg,
+            "ASG prediction changed during review"
+        );
+    }
     if let TransactionAction::Handoff(asg) = action {
         let artifact = checks::artifact(ctx)?;
         let runtime =
@@ -215,7 +231,11 @@ async fn recheck_governance<P: Provider>(
     Ok(())
 }
 
-async fn broadcast<P: Provider>(provider: &P, raw: &[u8]) -> Result<TransactionReceipt> {
+async fn broadcast<P: Provider>(
+    provider: &P,
+    raw: &[u8],
+    action: TransactionAction,
+) -> Result<TransactionReceipt> {
     let hash = keccak256(raw);
     ui::tx_hash("transaction", &hash.to_string());
     let pending = provider.send_raw_transaction(raw).await.wrap_err(
@@ -238,6 +258,6 @@ async fn broadcast<P: Provider>(provider: &P, raw: &[u8]) -> Result<TransactionR
         receipt.status(),
         "transaction reverted, inspect the recorded hash before retrying"
     );
-    finality::wait_for_finalized_receipt(provider, &receipt).await?;
+    confirmations::wait(provider, &receipt, action).await?;
     Ok(receipt)
 }

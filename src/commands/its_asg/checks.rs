@@ -9,6 +9,7 @@ use super::config::{GOVERNANCE_ADDRESS, GOVERNANCE_CHAIN};
 use super::contracts::{Governance, Managed};
 use super::signing::OPERATOR_KEY_ENV;
 use super::types::{Artifact, Context, Roles};
+use super::{confirmations, rpc};
 use crate::evm::AxelarServiceGovernance;
 use crate::ui;
 
@@ -86,17 +87,44 @@ pub async fn governance<P: Provider>(
     address: Address,
     runtime: &Bytes,
 ) -> Result<()> {
-    let code = provider
-        .get_code_at(address)
-        .block_id(BlockId::finalized())
-        .await?;
+    rpc::finalized_read("finalized ASG verification", || {
+        governance_at(provider, ctx, address, runtime, BlockId::finalized())
+    })
+    .await
+}
+
+pub(super) async fn deployed_governance<P: Provider>(
+    provider: &P,
+    ctx: &Context,
+    address: Address,
+    runtime: &Bytes,
+) -> Result<()> {
+    let block = confirmations::observation(provider).await?;
+    governance_at(
+        provider,
+        ctx,
+        address,
+        runtime,
+        confirmations::block_id(&block),
+    )
+    .await?;
+    confirmations::canonical(provider, &block).await
+}
+
+async fn governance_at<P: Provider>(
+    provider: &P,
+    ctx: &Context,
+    address: Address,
+    runtime: &Bytes,
+    block: BlockId,
+) -> Result<()> {
+    let code = provider.get_code_at(address).block_id(block).await?;
     ensure!(
         code == *runtime,
         "ASG runtime mismatch at {address}, use the matching deployment artifact"
     );
     let asg = AxelarServiceGovernance::new(address, provider);
     let wiring = Governance::new(address, provider);
-    let block = BlockId::finalized();
     ensure!(
         wiring.gateway().block(block).call().await? == ctx.gateway,
         "ASG gateway mismatch"
@@ -133,6 +161,18 @@ pub async fn governance<P: Provider>(
 }
 
 pub async fn roles<P: Provider>(
+    provider: &P,
+    ctx: &Context,
+    from: Address,
+    asg: Address,
+) -> Result<Roles> {
+    rpc::finalized_read("finalized gateway and ITS roles", || {
+        roles_once(provider, ctx, from, asg)
+    })
+    .await
+}
+
+async fn roles_once<P: Provider>(
     provider: &P,
     ctx: &Context,
     from: Address,

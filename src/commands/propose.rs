@@ -15,6 +15,7 @@ mod recovery_types;
 mod relay;
 mod relay_consensus;
 mod relay_message;
+mod signer;
 mod submission_guard;
 mod targets;
 pub mod types;
@@ -37,7 +38,7 @@ use serde_json::{Value, json};
 use crate::config::ChainsConfig;
 use crate::config_source;
 use crate::cosmos::{
-    build_execute_msg_any, build_submit_proposal_any, derive_axelar_wallet, extract_proposal_id,
+    build_execute_msg_any, build_submit_proposal_any, extract_proposal_id,
     sign_and_broadcast_cosmos_tx,
 };
 use crate::types::Network;
@@ -153,9 +154,11 @@ async fn build_plan(args: &ProposeArgs, config: &ChainsConfig) -> Result<Proposa
 async fn resolve_call(args: &ProposeArgs, target: &targets::Target) -> Result<(EdgeCall, String)> {
     let (target_addr, calldata, label) = resolve_action(args, &target.cfg).await?;
     let asg = verify(&target.cfg).await?;
+    let mut cfg = target.cfg.clone();
+    cfg.mnemonic_env.clone_from(&args.mnemonic_env);
     let call = EdgeCall {
         chain: target.chain.clone(),
-        cfg: target.cfg.clone(),
+        cfg,
         asg,
         target: target_addr,
         calldata,
@@ -242,9 +245,7 @@ async fn submit_new(
         .await?;
     }
     // Check both signers before confirmation or spending the deposit.
-    let mnemonic = std::env::var("MNEMONIC")
-        .map_err(|_| eyre::eyre!("MNEMONIC not set — needed to sign the gov proposal"))?;
-    let (signing_key, submitter) = derive_axelar_wallet(&mnemonic)?;
+    let (signing_key, submitter) = signer::load(&plan.hub().mnemonic_env)?;
     ui::address("submitter", &submitter);
     let funding = funding::resolve(
         args.network,
@@ -451,10 +452,12 @@ async fn confirm_submit(
     let expedited = !args.standard;
     let deposit = deposit_amount(plan, args);
     ui::section("review before submit");
-    ui::kv(
-        "proposal payload (protobuf hex)",
-        &hex::encode(&proposal.value),
-    );
+    ui::kv("title", &submitted.title);
+    ui::kv("description", &submitted.summary);
+    ui::info("Proposal payload (decoded JSON):");
+    ui::info(&serde_json::to_string_pretty(
+        &crate::cosmos::proposal_review::decoded(proposal)?,
+    )?);
     ui::kv("proposal type", plan.ptype.label());
     ui::kv("edge calls", &plan.calls.len().to_string());
     for (call, encoded) in plan.calls.iter().zip(encoded) {
@@ -469,8 +472,6 @@ async fn confirm_submit(
             if expedited { "expedited" } else { "standard" }
         ),
     );
-    ui::kv("title", &submitted.title);
-    ui::kv("description", &submitted.summary);
     if args.yes && args.network != Network::Mainnet {
         return Ok(true);
     }

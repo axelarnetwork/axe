@@ -9,7 +9,7 @@ use crate::types::{ChainKey, Network};
 
 #[derive(Debug, Subcommand)]
 pub enum AsgAction {
-    /// Preview/deploy ASG with this network's governance settings
+    /// Preview/deploy ASG through this chain's existing CREATE3 factory
     DeployAsg {
         #[command(flatten)]
         options: Options,
@@ -35,6 +35,9 @@ pub struct Options {
     /// Local chains-config JSON (otherwise CHAINS_CONFIG or sibling checkout)
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// RPC override for this run, never written to deployment config
+    #[arg(long, env = "ASG_RPC_URL", hide_env_values = true)]
+    pub rpc_url: Option<String>,
     /// ASG artifact (otherwise the deployments checkout's GMP SDK artifact)
     #[arg(long)]
     pub artifact: Option<PathBuf>,
@@ -56,6 +59,7 @@ pub struct Context {
     pub gateway: Address,
     pub its: Address,
     pub configured_asg: Option<Address>,
+    pub create3: Option<Address>,
     pub artifact_path: PathBuf,
     pub settings: Settings,
 }
@@ -64,7 +68,7 @@ pub struct Context {
 pub struct Settings {
     pub deployer: Address,
     pub salt: &'static str,
-    pub asg: Address,
+    pub legacy_asg: Address,
     pub operator: Address,
     pub delay: u64,
     pub hub_chain_id: &'static str,
@@ -72,7 +76,7 @@ pub struct Settings {
 
 #[derive(Clone, Copy)]
 pub enum TransactionAction {
-    Deploy,
+    Deploy(Address),
     Handoff(Address),
 }
 
@@ -104,4 +108,10 @@ pub struct Roles {
 pub struct SavedTransaction {
     pub request: TransactionRequest,
     pub raw: Bytes,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RecordedFactory {
+    pub create3_deployer: Option<Address>,
 }

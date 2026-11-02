@@ -30,7 +30,7 @@ pub(super) fn read_signer(
 
 pub fn key_variable(action: TransactionAction) -> &'static str {
     match action {
-        TransactionAction::Deploy => DEPLOYER_KEY_ENV,
+        TransactionAction::Deploy(_) => DEPLOYER_KEY_ENV,
         TransactionAction::Handoff(_) => SENDER_KEY_ENV,
     }
 }

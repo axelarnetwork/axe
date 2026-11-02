@@ -10,6 +10,7 @@
 //!   state.
 
 mod events;
+pub(crate) mod proposal_review;
 pub(crate) mod rpc;
 mod signers;
 pub(crate) mod tx;

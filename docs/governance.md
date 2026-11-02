@@ -81,6 +81,7 @@ with `--target` and `--calldata`. Omitting `--op` requires both `--target` and
 | ------------------- | -------------------- | ----------------------------------------------------------- |
 | `--type`            | `operator`           | `operator` fast-path or `timelock`                          |
 | `--relay`           | off                  | relay to the edge chain + execute after the vote passes     |
+| `--mnemonic-env <name>` | `MNEMONIC`       | select the mnemonic variable for Cosmos proposal and relay proof signing |
 | `--proposal-id <id>`| auto-discover        | resume a matching existing proposal; never submit           |
 | `--new-proposal`    | off                  | intentionally submit again instead of recovering history    |
 | `--standard`        | off (expedited)      | submit a standard (1h) gov proposal instead of expedited    |
@@ -95,6 +96,16 @@ edge-chain key for `--relay` (the operator fast-path's final execute requires
 the ASG `operator` key; if the key isn't the operator, the proposal is relayed +
 approved and a `cast` command is printed for the operator to finish).
 
+Network selection does not select a different mnemonic automatically. To use
+a separate testnet proposer without changing the mainnet `MNEMONIC`, set
+`TESTNET_PROPOSER_MNEMONIC` and pass `--mnemonic-env TESTNET_PROPOSER_MNEMONIC`.
+The argument is an environment variable name, never the mnemonic itself.
+The command prints the selected variable and derived public address. Missing,
+empty or invalid selected values stop execution without falling back to
+`MNEMONIC`. The same selection pays Cosmos proof-construction fees during
+`--relay`, including proposal recovery. Keep the flag when rerunning.
+The existing `.env` still overrides shell values for identical variable names.
+
 On mainnet, if the signing wallet cannot cover the deposit plus the 10 AXL
 fee buffer, `axe` automatically checks its existing CPI multisig authorization
 for `/cosmos.gov.v1.MsgSubmitProposal`. If the grant is active and CPI has the
@@ -105,7 +116,7 @@ own deposit.
 
 The fallback wraps the proposal in authz `MsgExec`, with CPI multisig
 (`axelar14vps3ev03zyp2wmj89etx8rrxdxyltfy4rzl5m`) as proposer and the wallet
-from `MNEMONIC` as grantee. That wallet still needs at least 10 AXL for fees;
+from the selected mnemonic variable as grantee. That wallet still needs at least 10 AXL for fees;
 any deposit refund returns to CPI. The grant authorizes proposal submission,
 not a bank transfer or fee sponsorship. Missing, expired or unreadable grants,
 insufficient CPI funds, and insufficient signer gas stop submission. This
@@ -113,8 +124,10 @@ fallback only applies to `axe propose` on `axelar-dojo-1`.
 
 Before submitting, `axe propose` verifies the target is a real, correctly-wired
 ASG (code present, `governanceAddress` == the gov module), runs an idempotency
-check, and shows the exact proposal title, description, and complete protobuf
-payload before asking for approval. The same prepared proposal is submitted
+check, and shows the exact proposal title, description, and complete payload
+as decoded JSON before asking for approval. The JSON is decoded from the
+prepared protobuf and includes metadata, proposer, deposits, execution authority,
+contract addresses, funds and nested contract messages. The same prepared proposal is submitted
 after confirmation. Proposal text contains no tool branding. In the review
 block, the target contract is labelled
 (e.g. `avalanche gateway`) — or flagged **`Unknown Destination`** in red — the

@@ -167,9 +167,8 @@ async fn deliver_amplifier<P: Provider, R: Provider>(
     if message_approved(&provider, gateway, asg_addr, msg, payload_hash).await? {
         ui::info("message already approved on edge gateway; skipping proof submission");
     } else {
-        let mnemonic = std::env::var("MNEMONIC")
-            .wrap_err("MNEMONIC not set — needed to construct the governance proof")?;
-        let (signing_key, submitter) = crate::cosmos::derive_axelar_wallet(&mnemonic)?;
+        let (signing_key, submitter) = super::signer::load(&cfg.mnemonic_env)?;
+        ui::address("Cosmos proof submitter", &submitter);
         let execute_data = build_proof(cfg, &signing_key, &submitter, msg, approval).await?;
         submit_proof(&provider, cfg, relayer, gateway, &execute_data, approval).await?;
     }

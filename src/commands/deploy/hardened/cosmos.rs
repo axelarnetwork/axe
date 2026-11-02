@@ -109,20 +109,10 @@ pub(super) fn preview(message: &cosmrs::Any) -> Result<()> {
             )?;
             ui::kv("title", &proposal.title);
             ui::kv("description", &proposal.summary);
-            ui::kv(
-                "proposal payload (protobuf hex)",
-                &hex::encode(&message.value),
-            );
-            ui::kv("expedited", &proposal.expedited.to_string());
-            for coin in proposal.initial_deposit {
-                ui::kv("deposit", &format!("{} {}", coin.amount, coin.denom));
-            }
-            for inner in proposal.messages {
-                preview(&cosmrs::Any {
-                    type_url: inner.type_url,
-                    value: inner.value,
-                })?;
-            }
+            ui::info("Proposal payload (decoded JSON):");
+            ui::info(&serde_json::to_string_pretty(
+                &crate::cosmos::proposal_review::decoded(message)?,
+            )?);
         }
         "/cosmwasm.wasm.v1.MsgExecuteContract" => {
             let execute = cosmos_sdk_proto::cosmwasm::wasm::v1::MsgExecuteContract::decode(

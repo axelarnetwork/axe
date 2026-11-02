@@ -123,6 +123,7 @@ pub fn resolve_with_asg(
         .unwrap_or_else(|| DEFAULT_EXPEDITED_DEPOSIT.to_string());
 
     Ok(ResolvedConfig {
+        mnemonic_env: "MNEMONIC".into(),
         edge_axelar_id,
         asg_address,
         gateway_address,

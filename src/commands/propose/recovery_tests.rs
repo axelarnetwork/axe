@@ -91,6 +91,7 @@ async fn repeated_completed_relay_is_read_only_and_needs_no_signer() {
 
 fn args() -> ProposeArgs {
     ProposeArgs {
+        mnemonic_env: "MNEMONIC".into(),
         network: Network::Testnet,
         chain: Some("flow".into()),
         chains: vec![],

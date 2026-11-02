@@ -84,6 +84,9 @@ pub enum ProposalOutcome {
 pub struct ProposeArgs {
     /// Network: testnet | stagenet | devnet-amplifier | mainnet.
     pub network: crate::types::Network,
+    /// Environment variable containing the Cosmos proposer mnemonic (also used for relay proof fees)
+    #[arg(long, default_value = "MNEMONIC")]
+    pub mnemonic_env: String,
     /// Edge chain key the ASG lives on (e.g. `hedera`). Omit with `--chains`.
     pub chain: Option<String>,
     /// Edge chains for one multi-call proposal, with `--op`: `all` (every live
@@ -202,6 +205,8 @@ impl Operation {
 /// the project's bundle-struct convention.
 #[derive(Clone, Debug)]
 pub struct ResolvedConfig {
+    /// Name of the mnemonic variable selected for Cosmos proposal and proof signing.
+    pub mnemonic_env: String,
     /// Edge chain's `axelarId` — the `destination_chain` for the GMP call.
     pub edge_axelar_id: String,
     pub asg_address: String,

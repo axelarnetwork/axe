@@ -40,7 +40,7 @@ Load keys from a secure location outside the repository or the existing ignored
 | --- | --- | --- |
 | ASG deployer | `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC` | `0xba76c6980428A0b10CFC5d8ccb61949677A61233` |
 | CREATE3 salt key | `v6.1.0` | `v6.0.4-axelar` |
-| Required ASG address | `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A` | `0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525` |
+| Existing shared ASG (discovery only) | `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A` | `0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525` |
 | ASG operator | `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e` | `0xc8a8399c3D1207f4e109673be7047604737c1D56` |
 | Minimum timelock | 300 seconds | 259200 seconds |
 | Governance chain | `axelar` | `axelar` |
@@ -72,21 +72,48 @@ reject them rather than applying amplifier ownership semantics.
 
 ## Deployment and verification
 
-ASG uses the checkout's GMP SDK `AxelarServiceGovernance` artifact and the
-canonical CREATE3 factory `0x6513Aedb4D1593BA12e50644401D976aebDc90d8`.
-The salt defaults to the network policy above. An explicit `--salt` must match
-that policy. Wrong senders, signing keys, salts, or predicted addresses stop
-deployment rather than producing a different ASG address.
+The deployment recipe is the same for every supported chain:
 
-The CREATE3 factory address, helper bytecode, sender and salt determine the
-ASG address. A chain-specific factory gives a different result even with the
-right signing key. The command verifies the canonical factory's runtime and
-queries its prediction, requires the established network ASG address, and
-prints that predicted address immediately before the transaction confirmation
-(including rebroadcast confirmation). If the canonical factory is absent,
-establish it first. This command does not bootstrap factories or silently use
-another factory. Existing chain deployment factory records are preserved, and
-the factory used for ASG is recorded in its `create3Deployer` field.
+1. Use the network's ASG deployer, salt, operator, governance source and
+   timelock in the table above. These settings are enforced by the command.
+2. Use the chain's existing `Create3Deployer.address`. If an ASG record already
+   specifies `create3Deployer`, that recorded factory takes precedence.
+3. Verify the factory's latest and finalized runtime against the checkout's
+   GMP SDK artifact. Ask that factory for the ASG address and show it alongside
+   the factory, signing account, ASG operator, gateway, ITS, governance source,
+   timelock, salt and full deployment payload before confirmation.
+4. Deploy with `ASG_DEPLOYER_PRIVATE_KEY`, wait for two confirmations (the
+   inclusion block plus one successor), verify ASG at a confirmed block and
+   record its actual address and factory in the chain's ASG config record.
+   Deployment does not wait for finality. Ownership handoff still does.
+
+**The policy is canonical per network, but the resulting address is per chain.**
+Different factories produce different ASG addresses even with the same sender
+and salt. The shared ASG addresses in the table are recognized for existing
+installations, not imposed on new deployments. No Interop factory keys are
+required. The command does not deploy factories: a chain missing its configured
+factory must first complete the normal chain deployment process using its
+available deployment accounts.
+
+ASG uses the checkout's GMP SDK `AxelarServiceGovernance` artifact. An explicit
+`--salt` must match the network policy. Missing or incorrect signing keys,
+wrong senders, unavailable factories, unexpected factory runtime, and a
+prediction conflicting with a configured ASG stop deployment.
+
+Existing configured ASGs are verified and reused, even if the chain's current
+factory would predict a different address. The established shared ASG is also
+checked when no configured deployment exists, so older chains with incomplete
+config do not silently receive a replacement. A conflict requires reconciling
+the config. Reuse updates only observed contract properties and preserves
+existing deployment provenance. It does not infer a factory or deployment
+transaction from the current chain config.
+
+Fresh deployments print the actual predicted ASG and factory again immediately
+before signing or rebroadcast confirmation. After approval, factory runtime and
+prediction are rechecked. Existing chain factory records remain unchanged, and
+the factory actually used is recorded in ASG's `create3Deployer` field.
+Governance proposals and ownership handoff must use that chain's recorded ASG
+address, never assume the old shared address.
 
 `--config` selects a local chains-config JSON. Otherwise `CHAINS_CONFIG` or the
 sibling checkout is used. `--artifact` selects the exact ASG artifact when an
@@ -115,15 +142,18 @@ After approval, signed transaction bytes are recorded under the local data
 directory's `asg-transactions/` before broadcast. Rerun the same command after
 an interruption. Recovery checks the original receipt or offers to rebroadcast
 the exact recorded bytes. It does not allocate another nonce automatically.
-A sender/chain lock spans nonce selection, signing, broadcast and finality,
+A sender/chain lock spans nonce selection, signing, broadcast and confirmation waiting,
 including recovery. This serializes ASG sends across targets and config files
 using the same local data directory. External wallets and other machines must
 still avoid concurrent use of that sender.
 A reverted transaction or consumed nonce without its receipt stops recovery
 for investigation. Do not delete a journal merely because a send timed out.
 
-Each successful transaction must finalize and satisfy its on-chain
-postconditions before its result is written to
+Deployment waits for two confirmations and rechecks the receipt and canonical
+inclusion block. Its postconditions are checked at a block with the same depth,
+pinned by canonical hash. Existing ASG reuse uses that same observation depth.
+Ownership transfers still require finality. Both operations must satisfy their
+on-chain postconditions before their results are written to
 `axelar-contract-deployments/axelar-chains-config/info/<network>.json`.
 Config writes are atomic, retain unrelated fields, and reject changes made
 during review. A partial handoff records the completed transfer, and reruns
@@ -135,18 +165,18 @@ the deployments repository.
 
 ## Robinhood testnet rehearsal
 
-Live checks on 2026-11-02 found no ASG configured for Robinhood testnet (EVM
-chain ID 46630). Its gateway and ITS are owned by
+The Robinhood testnet rehearsal (EVM chain ID 46630) deployed and verified ASG
+on 2026-11-02. Its gateway and ITS are still owned by
 `0x49845e5d9985d8dc941462293ed38EEfF18B0eAE`. The gateway operator is
 `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC`, which is also the deployer
 recorded for the existing Hedera and Arc testnet ASGs. Recheck the live roles
 in the previews before approving any changes.
 
-**Prerequisite:** the canonical CREATE3 factory has no code on Robinhood
-testnet as of that check. Establish it through the existing infrastructure
-deployment process before these deployment commands can succeed. The earlier
-prediction `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8` used Robinhood's
-chain-specific factory and does not meet the shared-address requirement.
+Robinhood's existing CREATE3 factory is
+`0x4A0fc57047cc99Cb28152730A42F5a432Aece667`. With the testnet deployer and
+salt above, it predicts ASG `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8`.
+This per-chain address is the intended deployment. The old shared factory
+`0x6513Aedb4D1593BA12e50644401D976aebDc90d8` is not needed.
 
 1. Set `EVM_GOVERNANCE_OPERATOR_KEY` to the testnet ASG operator key for
    `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e`. For deployment, set
@@ -162,21 +192,21 @@ chain-specific factory and does not meet the shared-address requirement.
      --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC --apply
    ```
 
-   With the canonical CREATE3 factory and testnet salt, the required ASG is
-   `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A`. Gateway and ITS ownership
+   With Robinhood's configured CREATE3 factory and testnet salt, ASG is
+   `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8`. Gateway and ITS ownership
    remain unchanged at this stage.
 3. Before handing over ownership, test governance delivery and operator
-   execution with the gateway's `owner()` getter (`0x8da5cb5b`). This creates
+   execution with ASG's own `operator()` getter (`0x570ca735`). This creates
    a real testnet governance proposal and ASG execution, but does not change
-   gateway state. It requires a funded Cosmos proposer (`MNEMONIC`), validator
-   votes, and native gas on the ASG operator account. That operator had zero
-   native balance on Robinhood when checked. Review and approve the exact
+   gateway or ITS state. It requires a funded Cosmos proposer, validator
+   votes, and native gas on the ASG operator account. Review and approve the exact
    title, description and payload displayed by the command:
 
    ```bash
    ./target/release/axe propose testnet robinhood --type operator \
-     --target 0x2a949565682ad89ca4Ad325499C36d3865a3ee02 \
-     --calldata 0x8da5cb5b --relay
+     --mnemonic-env TESTNET_PROPOSER_MNEMONIC \
+     --target 0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8 \
+     --calldata 0x570ca735 --relay
    ```
 
 4. After successful execution, set `ASG_PRIVATE_KEY` to the current owner
@@ -185,22 +215,54 @@ chain-specific factory and does not meet the shared-address requirement.
 
    ```bash
    ./target/release/axe its-trust testnet robinhood handoff-asg \
-     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE
+     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE \
+     --rpc-url https://robinhood-testnet.drpc.org
 
    ./target/release/axe its-trust testnet robinhood handoff-asg \
-     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE --apply
+     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE \
+     --rpc-url https://robinhood-testnet.drpc.org --apply
    ```
 
 5. Rerun the handoff preview to verify both owners are ASG and the operational
    roles are retained. Follow with the normal GMP/ITS smoke tests before
    treating the rehearsal as complete.
 
-The public Robinhood RPC intermittently returned `historical state ... is
-not available` for finalized-state queries during preparation. Use an RPC
-that can serve finalized state in the selected local chains config. The
-command stops on unavailable finalized state rather than weakening its checks.
+Verified rehearsal results on 2026-11-02:
+
+- ASG deployment: `0x673921a8620007066de1d6c6a0acc70e22c624844798bd2dfa45dea68c181045`.
+- Axelar testnet proposal `673` passed. Gateway proof submission:
+  `0xfbb91fc0092d33af482733845cd8374fe950b83f4f1177326c754c51ec64123d`.
+- ASG consumed the governance message and emitted `OperatorProposalApproved`:
+  `0x6e8d62a79324f4e3c76bede641d7afcb29639a657d18274b4faf82e29915a69f`.
+- Operator execution emitted `OperatorProposalExecuted` for ASG's own
+  `operator()` call, with zero native value:
+  `0x86078f8f7ce9b6513265606f7b488a50110486b4d7bed0c46e387b006b9c3fb9`.
+- Gateway reports the message executed and ASG reports no remaining approval.
+  Both ownership transfers simulate successfully from the current owner.
+  No gateway/ITS ownership transfer has been sent as part of these checks.
+
+The operator path is verified end to end. Timelock execution and post-handoff
+GMP/ITS tests remain separate checks before declaring the full rehearsal complete.
+
+The public Robinhood RPC intermittently returns `historical state ... is
+not available` for finalized-state queries. These reads are retried up to three
+times with visible backoff. Runtime mismatches and contract reverts are not
+retried. If the requested state remains unavailable, the command stops while
+retaining finalized verification.
+
+Set `ASG_RPC_URL` to a provider that serves Robinhood's finalized state, or pass
+`--rpc-url <url>` after `deploy-asg` / `handoff-asg`. An explicit flag takes
+precedence over the environment variable, which takes precedence over the
+config's `rpc`. The override is used for reads, simulation and sending, and
+still must match the configured chain ID. It is never written to the deployment
+config. Keep credential-bearing URLs in a secure environment file, not command
+arguments or shared config. Retry without `--apply` to check the provider first.
 The CLI loads the existing `.env` with precedence over shell exports, so
 update any conflicting signer entries there when switching roles.
+For `propose`, use `--mnemonic-env TESTNET_PROPOSER_MNEMONIC` to select a separate
+funded Cosmos testnet wallet while keeping the existing `MNEMONIC`. The selected
+variable is used for both proposal submission and relay proof fees. Keep the
+same flag when resuming the proposal.
 
 ## Separate deploy-flow slice
 

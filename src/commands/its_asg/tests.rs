@@ -14,7 +14,7 @@ use serde_json::json;
 
 use super::contracts::Managed;
 use super::types::{Artifact, Context, Options, Roles, SavedTransaction, TransactionAction};
-use super::{checks, config, deploy, handoff, signing, transactions};
+use super::{checks, config, deploy, existing, factory, handoff, signing, transactions};
 use crate::cli::{Cli, Commands};
 use crate::commands::deploy::hardened::storage;
 use crate::types::Network;
@@ -30,6 +30,7 @@ fn context() -> Context {
         gateway: Address::repeat_byte(1),
         its: Address::repeat_byte(2),
         configured_asg: None,
+        create3: Some(Address::repeat_byte(9)),
         artifact_path: PathBuf::new(),
         settings: config::settings(Network::Testnet).unwrap(),
     }
@@ -64,7 +65,7 @@ fn network_policies_never_reuse_the_testnet_operator_on_mainnet() {
 }
 
 #[test]
-fn deployment_requires_the_networks_established_sender_salt_and_address() {
+fn deployment_requires_the_networks_established_sender_and_salt() {
     let testnet = config::settings(Network::Testnet).unwrap();
     let mainnet = config::settings(Network::Mainnet).unwrap();
     assert_eq!(
@@ -78,11 +79,11 @@ fn deployment_requires_the_networks_established_sender_salt_and_address() {
     assert_eq!(testnet.salt, "v6.1.0");
     assert_eq!(mainnet.salt, "v6.0.4-axelar");
     assert_eq!(
-        testnet.asg.to_checksum(None),
+        testnet.legacy_asg.to_checksum(None),
         "0xb55A09E9fde39755c39EF9A7911431Ba0c96332A"
     );
     assert_eq!(
-        mainnet.asg.to_checksum(None),
+        mainnet.legacy_asg.to_checksum(None),
         "0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525"
     );
     for (selected, other) in [(&testnet, &mainnet), (&mainnet, &testnet)] {
@@ -90,35 +91,32 @@ fn deployment_requires_the_networks_established_sender_salt_and_address() {
         assert!(deploy::validate_inputs(selected, selected.deployer, Some(selected.salt)).is_ok());
         assert!(deploy::validate_inputs(selected, other.deployer, None).is_err());
         assert!(deploy::validate_inputs(selected, selected.deployer, Some(other.salt)).is_err());
-        assert!(deploy::validate_prediction(selected, selected.asg).is_ok());
-        assert!(deploy::validate_prediction(selected, other.asg).is_err());
     }
     assert_eq!(
-        signing::key_variable(TransactionAction::Deploy),
+        signing::key_variable(TransactionAction::Deploy(testnet.legacy_asg)),
         "ASG_DEPLOYER_PRIVATE_KEY"
     );
     assert_eq!(
-        signing::key_variable(TransactionAction::Handoff(testnet.asg)),
+        signing::key_variable(TransactionAction::Handoff(testnet.legacy_asg)),
         "ASG_PRIVATE_KEY"
     );
 }
 
 #[tokio::test]
-async fn missing_canonical_factory_stops_before_preparing_a_transaction() {
+async fn missing_configured_factory_stops_before_preparing_a_transaction() {
     let (url, server) = crate::evm::test_rpc::serve(vec![Some(json!({"result":"0x"}))]).await;
     let provider = crate::evm::connect_evm(&[url]).unwrap();
     let ctx = context();
     let Err(error) = deploy::prepare(&provider, &ctx, ctx.settings.deployer).await else {
         panic!("missing factory must prevent deployment");
     };
-    assert!(error.to_string().contains("canonical CREATE3 factory"));
-    assert!(error.to_string().contains(&ctx.settings.asg.to_string()));
+    assert!(error.to_string().contains("configured CREATE3 factory"));
     let calls = server.await.unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["method"], "eth_getCode");
     assert_eq!(
         serde_json::from_value::<Address>(calls[0]["params"][0].clone()).unwrap(),
-        config::CREATE3_FACTORY
+        ctx.create3.unwrap()
     );
 }
 
@@ -410,30 +408,40 @@ async fn mined_journal_recovers_without_signing_or_rebroadcasting() {
     .unwrap();
     let mut block = Block::<Transaction>::default();
     block.header.inner.number = 10;
-    let (url, server) = crate::evm::test_rpc::serve(vec![
-        Some(json!({"result":receipt})),
-        Some(json!({"result":block})),
-        Some(json!({"result":receipt})),
-    ])
-    .await;
-    let provider = crate::evm::connect_evm(&[url]).unwrap();
-    let recovered = transactions::resume(
-        &provider,
-        &context(),
-        &request,
-        &saved,
+    block.header.hash = receipt.block_hash.unwrap();
+    for action in [
+        TransactionAction::Deploy(Address::repeat_byte(6)),
         TransactionAction::Handoff(Address::repeat_byte(6)),
-    )
-    .await
-    .unwrap();
-    assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
-    let requests = server.await.unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(
-        requests
-            .iter()
-            .all(|r| r["method"] != "eth_sendRawTransaction")
-    );
+    ] {
+        let mut responses = vec![Some(json!({"result":receipt}))];
+        match action {
+            TransactionAction::Deploy(_) => responses.extend([
+                Some(json!({"result":"0xb"})),
+                Some(json!({"result":receipt})),
+                Some(json!({"result":block})),
+            ]),
+            TransactionAction::Handoff(_) => responses.extend([
+                Some(json!({"result":block})),
+                Some(json!({"result":receipt})),
+            ]),
+        }
+        let (url, server) = crate::evm::test_rpc::serve(responses).await;
+        let provider = crate::evm::connect_evm(&[url]).unwrap();
+        let recovered = transactions::resume(&provider, &context(), &request, &saved, action)
+            .await
+            .unwrap();
+        assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
+        let requests = server.await.unwrap();
+        match action {
+            TransactionAction::Deploy(_) => assert_eq!(requests[1]["method"], "eth_blockNumber"),
+            TransactionAction::Handoff(_) => assert_eq!(requests[1]["params"][0], "finalized"),
+        }
+        assert!(
+            requests
+                .iter()
+                .all(|r| r["method"] != "eth_sendRawTransaction")
+        );
+    }
 }
 
 #[tokio::test]
@@ -492,6 +500,51 @@ async fn different_asg_runtime_fails_before_reading_roles_or_sending() {
 }
 
 #[tokio::test]
+async fn deployment_verifies_all_asg_properties_at_confirmed_state_without_finality() {
+    let ctx = context();
+    let runtime = Bytes::from_static(&[0x60, 0x01]);
+    let mut block = Block::<Transaction>::default();
+    block.header.inner.number = 10;
+    block.header.hash = B256::repeat_byte(9);
+    let encoded = [
+        ctx.gateway.abi_encode(),
+        ctx.settings.operator.abi_encode(),
+        ctx.settings.operator.abi_encode(),
+        U256::from(ctx.settings.delay).abi_encode(),
+        config::GOVERNANCE_CHAIN.to_owned().abi_encode(),
+        config::GOVERNANCE_ADDRESS.to_owned().abi_encode(),
+        alloy::primitives::keccak256(config::GOVERNANCE_CHAIN).abi_encode(),
+        alloy::primitives::keccak256(config::GOVERNANCE_ADDRESS).abi_encode(),
+    ];
+    let mut responses = vec![
+        Some(json!({"result":"0xb"})),
+        Some(json!({"result":block})),
+        Some(json!({"result":runtime})),
+    ];
+    responses.extend(
+        encoded
+            .into_iter()
+            .map(|value| Some(json!({"result":Bytes::from(value)}))),
+    );
+    responses.push(Some(json!({"result":block})));
+    let (url, server) = crate::evm::test_rpc::serve(responses).await;
+    let provider = crate::evm::connect_evm(&[url]).unwrap();
+    checks::deployed_governance(&provider, &ctx, Address::repeat_byte(6), &runtime)
+        .await
+        .unwrap();
+    let calls = server.await.unwrap();
+    let pinned = json!({"blockHash":block.header.hash,"requireCanonical":true});
+    for (index, call) in calls.iter().enumerate().take(11).skip(2) {
+        if index == 5 {
+            assert_eq!(call["params"][1], "latest");
+        } else {
+            assert_eq!(call["params"][1], pinned);
+        }
+    }
+    assert_eq!(calls[11]["params"], json!(["0xa", false]));
+}
+
+#[tokio::test]
 async fn config_rejects_wrong_network_and_legacy_gateways_before_rpc() {
     let path = std::env::temp_dir().join(format!("asg-input-test-{}.json", std::process::id()));
     let mut input = json!({"axelar":{"chainId":"axelar-testnet-lisbon-3"},"chains":{"robinhood":{
@@ -504,17 +557,32 @@ async fn config_rejects_wrong_network_and_legacy_gateways_before_rpc() {
     let options = Options {
         from: Address::repeat_byte(5),
         config: Some(path.clone()),
+        rpc_url: Some("https://rpc.example/fake-token".into()),
         artifact: Some(PathBuf::from("explicit-artifact.json")),
         apply: false,
         confirm_mainnet: false,
     };
     std::fs::write(&path, input.to_string()).unwrap();
-    let loaded = config::load(Network::Testnet, "robinhood", &options)
+    let mut loaded = config::load(Network::Testnet, "robinhood", &options)
         .await
         .unwrap();
     assert_eq!(
         loaded.artifact_path,
         PathBuf::from("explicit-artifact.json")
+    );
+    assert_eq!(loaded.rpc, "https://rpc.example/fake-token");
+    config::save(
+        &mut loaded,
+        &[(
+            "AxelarServiceGovernance",
+            json!({"address": Address::repeat_byte(7)}),
+        )],
+    )
+    .unwrap();
+    assert!(
+        !std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("fake-token")
     );
     assert!(
         config::load(Network::Mainnet, "robinhood", &options)
@@ -530,4 +598,168 @@ async fn config_rejects_wrong_network_and_legacy_gateways_before_rpc() {
             .is_err()
     );
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn per_chain_prediction_is_allowed_but_never_replaces_configured_asg() {
+    let mut ctx = context();
+    let predicted = Address::repeat_byte(7);
+    assert!(deploy::validate_prediction(&ctx, predicted).is_ok());
+    assert!(deploy::validate_prediction(&ctx, Address::ZERO).is_err());
+    ctx.configured_asg = Some(predicted);
+    assert!(deploy::validate_prediction(&ctx, predicted).is_ok());
+    assert!(deploy::validate_prediction(&ctx, ctx.settings.legacy_asg).is_err());
+}
+
+#[test]
+fn factory_selection_uses_recorded_provenance_then_chain_config() {
+    let chain_factory = Address::repeat_byte(9);
+    let recorded_factory = Address::repeat_byte(8);
+    let mut input = json!({"contracts":{"Create3Deployer":{"address":chain_factory}}});
+    let cfg = serde_json::from_value::<crate::config::ChainConfig>(input.clone()).unwrap();
+    assert_eq!(factory::configured(&cfg).unwrap(), Some(chain_factory));
+    input["contracts"]["AxelarServiceGovernance"] = json!({"create3Deployer":recorded_factory});
+    let cfg = serde_json::from_value::<crate::config::ChainConfig>(input.clone()).unwrap();
+    assert_eq!(factory::configured(&cfg).unwrap(), Some(recorded_factory));
+    for invalid in [json!("bad-address"), json!(Address::ZERO), json!(17)] {
+        input["contracts"]["AxelarServiceGovernance"]["create3Deployer"] = invalid;
+        let cfg = serde_json::from_value::<crate::config::ChainConfig>(input.clone()).unwrap();
+        assert!(factory::configured(&cfg).is_err());
+    }
+    let cfg = serde_json::from_value::<crate::config::ChainConfig>(json!({})).unwrap();
+    assert_eq!(factory::configured(&cfg).unwrap(), None);
+    let mut ctx = context();
+    ctx.create3 = None;
+    assert!(factory::selected(&ctx).is_err());
+}
+
+#[tokio::test]
+async fn configured_existing_asg_is_reused_without_querying_a_new_factory() {
+    let mut ctx = context();
+    ctx.configured_asg = Some(Address::repeat_byte(7));
+    ctx.create3 = None;
+    let (url, server) = crate::evm::test_rpc::serve(vec![Some(json!({"result":"0x6001"}))]).await;
+    let provider = crate::evm::connect_evm(&[url]).unwrap();
+    assert_eq!(
+        existing::address(&provider, &ctx).await.unwrap(),
+        ctx.configured_asg
+    );
+    let calls = server.await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        serde_json::from_value::<Address>(calls[0]["params"][0].clone()).unwrap(),
+        ctx.configured_asg.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn legacy_shared_asg_is_discovered_even_when_chain_factory_differs() {
+    let ctx = context();
+    let (url, server) = crate::evm::test_rpc::serve(vec![Some(json!({"result":"0x6001"}))]).await;
+    let provider = crate::evm::connect_evm(&[url]).unwrap();
+    assert_eq!(
+        existing::address(&provider, &ctx).await.unwrap(),
+        Some(ctx.settings.legacy_asg)
+    );
+    let calls = server.await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        serde_json::from_value::<Address>(calls[0]["params"][0].clone()).unwrap(),
+        ctx.settings.legacy_asg
+    );
+}
+
+#[tokio::test]
+async fn configured_future_address_cannot_replace_existing_shared_asg() {
+    let mut ctx = context();
+    ctx.configured_asg = Some(Address::repeat_byte(7));
+    let (url, server) = crate::evm::test_rpc::serve(vec![
+        Some(json!({"result":"0x"})),
+        Some(json!({"result":"0x6001"})),
+    ])
+    .await;
+    let provider = crate::evm::connect_evm(&[url]).unwrap();
+    assert!(existing::address(&provider, &ctx).await.is_err());
+    server.await.unwrap();
+}
+
+fn deployment_artifacts() -> (PathBuf, Context) {
+    let root = std::env::temp_dir().join(format!(
+        "asg-factory-test-{}-{}",
+        std::process::id(),
+        PrivateKeySigner::random().address()
+    ));
+    let mut ctx = context();
+    ctx.path = root.join("axelar-chains-config/info/testnet.json");
+    let (factory_path, _) =
+        crate::utils::artifact_paths_for_step("Create3Deployer", &root).unwrap();
+    std::fs::create_dir_all(PathBuf::from(&factory_path).parent().unwrap()).unwrap();
+    std::fs::write(factory_path, br#"{"bytecode":"0x6000"}"#).unwrap();
+    ctx.artifact_path = root.join("asg.json");
+    std::fs::write(&ctx.artifact_path, br#"{"contractName":"AxelarServiceGovernance","bytecode":"0x6000","deployedBytecode":"0x6002"}"#).unwrap();
+    (root, ctx)
+}
+
+#[tokio::test]
+async fn deployment_targets_selected_factory_and_accepts_its_prediction_on_both_networks() {
+    let (root, mut ctx) = deployment_artifacts();
+    for network in [Network::Testnet, Network::Mainnet] {
+        ctx.settings = config::settings(network).unwrap();
+        let predicted = Address::repeat_byte(7);
+        let (url, server) = crate::evm::test_rpc::serve(vec![
+            Some(json!({"result":"0x6001"})),
+            Some(json!({"result":"0x6001"})),
+            Some(json!({"result":"0x6001"})),
+            Some(json!({"result":"0x6002"})),
+            Some(json!({"result":Bytes::from(predicted.abi_encode())})),
+        ])
+        .await;
+        let provider = crate::evm::connect_evm(&[url]).unwrap();
+        let deployment = deploy::prepare(&provider, &ctx, ctx.settings.deployer)
+            .await
+            .unwrap();
+        assert_eq!(deployment.address, predicted);
+        assert_eq!(deployment.request.to, ctx.create3.map(Into::into));
+        assert_eq!(deployment.request.from, Some(ctx.settings.deployer));
+        let call = crate::evm::Create3Deployer::deployCall::abi_decode(
+            deployment.request.input.input().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(call.salt, crate::evm::get_salt_from_key(ctx.settings.salt));
+        let calls = server.await.unwrap();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[2]["params"][1], "finalized");
+        assert_eq!(
+            serde_json::from_value::<Address>(calls[4]["params"][0]["to"].clone()).unwrap(),
+            ctx.create3.unwrap()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn factory_runtime_mismatch_blocks_prediction_before_any_deployment() {
+    let (root, ctx) = deployment_artifacts();
+    for results in [vec!["0x6003", "0x6001"], vec!["0x6001", "0x6001", "0x6003"]] {
+        let (url, server) = crate::evm::test_rpc::serve(
+            results
+                .into_iter()
+                .map(|result| Some(json!({"result":result})))
+                .collect(),
+        )
+        .await;
+        let provider = crate::evm::connect_evm(&[url]).unwrap();
+        assert!(
+            deploy::prepare(&provider, &ctx, ctx.settings.deployer)
+                .await
+                .is_err()
+        );
+        let calls = server.await.unwrap();
+        assert!(
+            calls
+                .iter()
+                .all(|call| call["method"] != "eth_sendRawTransaction")
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
