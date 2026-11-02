@@ -74,3 +74,4 @@ mod input_tests;
 mod retry_tests;
 
 mod handoff;
+pub(crate) use handoff::proposal_actions;

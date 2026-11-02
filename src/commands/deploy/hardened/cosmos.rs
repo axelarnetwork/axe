@@ -107,7 +107,12 @@ pub(super) fn preview(message: &cosmrs::Any) -> Result<()> {
             let proposal = cosmos_sdk_proto::cosmos::gov::v1::MsgSubmitProposal::decode(
                 message.value.as_slice(),
             )?;
-            ui::kv("proposal", &proposal.title);
+            ui::kv("title", &proposal.title);
+            ui::kv("description", &proposal.summary);
+            ui::kv(
+                "proposal payload (protobuf hex)",
+                &hex::encode(&message.value),
+            );
             ui::kv("expedited", &proposal.expedited.to_string());
             for coin in proposal.initial_deposit {
                 ui::kv("deposit", &format!("{} {}", coin.amount, coin.denom));

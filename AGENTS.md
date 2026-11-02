@@ -1,5 +1,21 @@
 # CLAUDE.md
 
+## Governance proposal approval
+
+- Before an agent signs, submits, or broadcasts any governance proposal on any
+  network, show the user the exact final title, description/summary, metadata,
+  and complete payload, and obtain explicit approval of that content.
+- Permission to implement a feature, prepare a proposal, fund it, or use a
+  wallet is not approval of proposal text. Any change to the approved title,
+  description, metadata, or payload requires renewed approval. Agents must not
+  use `--yes`, `--y`, or a scripted confirmation to bypass this approval.
+- Never put `axe`/`AXE`, tool branding, or agent attribution in proposal titles,
+  descriptions, summaries, or metadata. Proposal text describes the governance
+  action only.
+- Proposal confirmation screens must show the exact title, description, and
+  complete payload that will be submitted. Build that content before approval
+  and submit the same content without regenerating or changing it afterward.
+
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.

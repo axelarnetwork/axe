@@ -52,7 +52,7 @@ pub async fn approve(
         );
         ui::info("The proposed actions execute only if governance passes the proposal.");
         ui::info("Axe will show the proposal ID and voting instructions after submission.");
-        "Submit this governance proposal?"
+        "Approve this title, description, and payload and submit the governance proposal?"
     } else {
         "Submit this transaction?"
     };

@@ -27,9 +27,11 @@ use std::str::FromStr;
 
 use alloy::primitives::{Address, Bytes};
 use chrono::TimeZone;
+use cosmos_sdk_proto::cosmos::gov::v1::MsgSubmitProposal;
 use cosmrs::crypto::secp256k1::SigningKey;
 use eyre::{Result, WrapErr};
 use owo_colors::OwoColorize;
+use prost::Message;
 use serde_json::{Value, json};
 
 use crate::config::ChainsConfig;
@@ -261,20 +263,16 @@ async fn submit_new(
         .iter()
         .map(|call| encode_call(args, plan.ptype, call))
         .collect();
-    if !confirm_submit(args, plan, config, &encoded, &funding).await {
+    let payloads: Vec<Bytes> = encoded.iter().map(|call| call.payload.clone()).collect();
+    let proposal = build_proposal(plan, args, &payloads, &funding)?;
+    if !confirm_submit(args, plan, config, &encoded, &funding, &proposal).await? {
         ui::info("aborted — no proposal submitted");
         return Ok(None);
     }
-    let payloads: Vec<Bytes> = encoded.into_iter().map(|call| call.payload).collect();
-    let id = submit(plan, args, &payloads, &signing_key, &funding, &marker).await?;
+    let id = submit(plan, args, proposal, &signing_key, &funding, &marker).await?;
     ui::kv("proposal submitted", &id.to_string());
-    ui::action_required(&[
-        "Vote on the proposal:",
-        &format!(
-            "./scripts/vote_{env}_proposal.sh {env}-nodes {id}",
-            env = vote_env(args.network)
-        ),
-    ]);
+    let actions = super::deploy::hardened::proposal_actions(args.network, id);
+    ui::action_required(&actions.iter().map(String::as_str).collect::<Vec<_>>());
     Ok(Some((id, payloads)))
 }
 
@@ -328,14 +326,12 @@ fn deposit_amount<'a>(plan: &'a ProposalPlan, args: &ProposeArgs) -> &'a str {
     }
 }
 
-async fn submit(
+fn build_proposal(
     plan: &ProposalPlan,
     args: &ProposeArgs,
     payloads: &[Bytes],
-    signing_key: &SigningKey,
     funding: &ProposalFunding,
-    marker: &Path,
-) -> Result<u64> {
+) -> Result<cosmrs::Any> {
     let hub = plan.hub();
     let expedited = !args.standard;
     let deposit = deposit_amount(plan, args);
@@ -352,13 +348,8 @@ async fn submit(
         })
         .collect::<Result<Vec<_>>>()?;
     let title = proposal_title(plan);
-    let summary = format!(
-        "Service-Governance {} proposal: {} on {}. Submitted via axe propose.",
-        plan.ptype.label(),
-        plan.action_label,
-        plan.edge_ids().join(", ")
-    );
-    let proposal = build_submit_proposal_any(
+    let summary = proposal_description(plan);
+    build_submit_proposal_any(
         funding.proposer().as_ref(),
         inner,
         &title,
@@ -366,7 +357,18 @@ async fn submit(
         deposit,
         &hub.fee_denom,
         expedited,
-    )?;
+    )
+}
+
+async fn submit(
+    plan: &ProposalPlan,
+    args: &ProposeArgs,
+    proposal: cosmrs::Any,
+    signing_key: &SigningKey,
+    funding: &ProposalFunding,
+    marker: &Path,
+) -> Result<u64> {
+    let hub = plan.hub();
     let submission = funding::submission(funding, proposal)?;
 
     submission_guard::claim(marker, args.new_proposal).await?;
@@ -385,12 +387,18 @@ async fn submit(
 
 fn proposal_title(plan: &ProposalPlan) -> String {
     match plan.calls.as_slice() {
-        [single] => format!(
-            "axe: {} on {}",
-            plan.action_label, single.cfg.edge_axelar_id
-        ),
-        calls => format!("axe: {} on {} chains", plan.action_label, calls.len()),
+        [single] => format!("{} on {}", plan.action_label, single.cfg.edge_axelar_id),
+        calls => format!("{} on {} chains", plan.action_label, calls.len()),
     }
+}
+
+fn proposal_description(plan: &ProposalPlan) -> String {
+    format!(
+        "Service-Governance {} proposal: {} on {}.",
+        plan.ptype.label(),
+        plan.action_label,
+        plan.edge_ids().join(", ")
+    )
 }
 
 async fn resolve_action(
@@ -436,14 +444,17 @@ async fn confirm_submit(
     config: &ChainsConfig,
     encoded: &[EncodedCall],
     funding: &ProposalFunding,
-) -> bool {
-    if args.yes && args.network != Network::Mainnet {
-        return true;
-    }
+    proposal: &cosmrs::Any,
+) -> Result<bool> {
+    let submitted = MsgSubmitProposal::decode(proposal.value.as_slice())?;
     let hub = plan.hub();
     let expedited = !args.standard;
     let deposit = deposit_amount(plan, args);
     ui::section("review before submit");
+    ui::kv(
+        "proposal payload (protobuf hex)",
+        &hex::encode(&proposal.value),
+    );
     ui::kv("proposal type", plan.ptype.label());
     ui::kv("edge calls", &plan.calls.len().to_string());
     for (call, encoded) in plan.calls.iter().zip(encoded) {
@@ -458,7 +469,12 @@ async fn confirm_submit(
             if expedited { "expedited" } else { "standard" }
         ),
     );
-    ui::confirm("Submit this proposal?").await
+    ui::kv("title", &submitted.title);
+    ui::kv("description", &submitted.summary);
+    if args.yes && args.network != Network::Mainnet {
+        return Ok(true);
+    }
+    Ok(ui::confirm("Approve this title, description, and payload and submit the proposal?").await)
 }
 
 /// Everything about one edge call a reviewer needs: where it goes, what the
@@ -571,20 +587,9 @@ fn gate_mainnet(network: Network, confirmed: bool) -> Result<()> {
     Ok(())
 }
 
-/// Map a network to the short env name used by the `vote_<env>_proposal.sh`
-/// scripts and the `<env>-nodes` kube context (devnet-amplifier → `devnet`).
-fn vote_env(network: Network) -> &'static str {
-    match network {
-        Network::Mainnet => "mainnet",
-        Network::Testnet => "testnet",
-        Network::Stagenet => "stagenet",
-        Network::DevnetAmplifier => "devnet",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{format_deposit, proposal_title};
+    use super::{format_deposit, proposal_description, proposal_title};
     use crate::commands::propose::test_support::{config, plan};
     use crate::commands::propose::types::ProposalType;
     use alloy::primitives::Address;
@@ -641,8 +646,12 @@ mod tests {
             vec![].into(),
         );
         one.action_label = "ITS set-trusted-chain".into();
-        assert_eq!(proposal_title(&one), "axe: ITS set-trusted-chain on flow");
-        let second = plan(
+        assert_eq!(proposal_title(&one), "ITS set-trusted-chain on flow");
+        assert_eq!(
+            proposal_description(&one),
+            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on flow."
+        );
+        let mut second = plan(
             config(String::new()),
             ProposalType::Operator,
             Address::ZERO,
@@ -650,10 +659,12 @@ mod tests {
         )
         .calls
         .remove(0);
+        second.cfg.edge_axelar_id = "hedera".into();
         one.calls.push(second);
+        assert_eq!(proposal_title(&one), "ITS set-trusted-chain on 2 chains");
         assert_eq!(
-            proposal_title(&one),
-            "axe: ITS set-trusted-chain on 2 chains"
+            proposal_description(&one),
+            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on flow, hedera."
         );
     }
 }

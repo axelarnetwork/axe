@@ -110,7 +110,10 @@ fallback only applies to `axe propose` on `axelar-dojo-1`.
 
 Before submitting, `axe propose` verifies the target is a real, correctly-wired
 ASG (code present, `governanceAddress` == the gov module), runs an idempotency
-check, and shows a review block: the target contract is labelled
+check, and shows the exact proposal title, description, and complete protobuf
+payload before asking for approval. The same prepared proposal is submitted
+after confirmation. Proposal text contains no tool branding. In the review
+block, the target contract is labelled
 (e.g. `avalanche gateway`) — or flagged **`Unknown Destination`** in red — the
 raw calldata is decoded with the same engine as `axe decode` (or flagged
 **`Unknown Calldata`** in red), and the deposit is shown in AXL.
