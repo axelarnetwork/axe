@@ -119,6 +119,69 @@ recorded without a new deployment transaction.
 The commands modify the local configuration only. They do not commit or push
 the deployments repository.
 
+## Robinhood testnet rehearsal
+
+Live checks on 2026-11-02 found no ASG configured for Robinhood testnet (EVM
+chain ID 46630). Its gateway and ITS are owned by
+`0x49845e5d9985d8dc941462293ed38EEfF18B0eAE`. The gateway operator is
+`0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC`, which is also the deployer
+recorded for the existing Hedera and Arc testnet ASGs. Recheck the live roles
+in the previews before approving any changes.
+
+1. Set `EVM_GOVERNANCE_OPERATOR_KEY` to the testnet ASG operator key for
+   `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e`. For deployment, set
+   `ASG_PRIVATE_KEY` to the deployer key for
+   `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC`.
+2. Preview, then deploy after reviewing the exact transaction:
+
+   ```bash
+   ./target/release/axe its-trust testnet robinhood deploy-asg \
+     --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC
+
+   ./target/release/axe its-trust testnet robinhood deploy-asg \
+     --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC --apply
+   ```
+
+   With the current CREATE3 deployer and default salt, the predicted ASG is
+   `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8`. Gateway and ITS ownership
+   remain unchanged at this stage.
+3. Before handing over ownership, test governance delivery and operator
+   execution with the gateway's `owner()` getter (`0x8da5cb5b`). This creates
+   a real testnet governance proposal and ASG execution, but does not change
+   gateway state. It requires a funded Cosmos proposer (`MNEMONIC`), validator
+   votes, and native gas on the ASG operator account. That operator had zero
+   native balance on Robinhood when checked. Review and approve the exact
+   title, description and payload displayed by the command:
+
+   ```bash
+   ./target/release/axe propose testnet robinhood --type operator \
+     --target 0x2a949565682ad89ca4Ad325499C36d3865a3ee02 \
+     --calldata 0x8da5cb5b --relay
+   ```
+
+4. After successful execution, change `ASG_PRIVATE_KEY` to the current owner
+   key for `0x49845e5d9985d8dc941462293ed38EEfF18B0eAE`. Keep the ASG
+   operator key set. Preview and then approve each ownership transfer:
+
+   ```bash
+   ./target/release/axe its-trust testnet robinhood handoff-asg \
+     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE
+
+   ./target/release/axe its-trust testnet robinhood handoff-asg \
+     --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE --apply
+   ```
+
+5. Rerun the handoff preview to verify both owners are ASG and the operational
+   roles are retained. Follow with the normal GMP/ITS smoke tests before
+   treating the rehearsal as complete.
+
+The public Robinhood RPC intermittently returned `historical state ... is
+not available` for finalized-state queries during preparation. Use an RPC
+that can serve finalized state in the selected local chains config. The
+command stops on unavailable finalized state rather than weakening its checks.
+The CLI loads the existing `.env` with precedence over shell exports, so
+update any conflicting signer entries there when switching roles.
+
 ## Separate deploy-flow slice
 
 The existing deploy steps stay unchanged. A subsequent slice, tested on
