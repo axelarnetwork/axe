@@ -9,16 +9,23 @@ use crate::{config_source, types::Network, ui, utils};
 
 pub const GOVERNANCE_ADDRESS: &str = "axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj";
 pub const GOVERNANCE_CHAIN: &str = "axelar";
+pub const CREATE3_FACTORY: Address = address!("6513Aedb4D1593BA12e50644401D976aebDc90d8");
 const SDK: &str = "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifacts/contracts";
 
 pub fn settings(network: Network) -> Result<Settings> {
     match network {
         Network::Mainnet => Ok(Settings {
+            deployer: address!("ba76c6980428A0b10CFC5d8ccb61949677A61233"),
+            salt: "v6.0.4-axelar",
+            asg: address!("7Acbae6CBa67d78AAf69e47000884aE00F9B2525"),
             operator: address!("c8a8399c3D1207f4e109673be7047604737c1D56"),
             delay: 259_200,
             hub_chain_id: "axelar-dojo-1",
         }),
         Network::Testnet => Ok(Settings {
+            deployer: address!("81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC"),
+            salt: "v6.1.0",
+            asg: address!("b55A09E9fde39755c39EF9A7911431Ba0c96332A"),
             operator: address!("6e079CD1c6bBb72680DeDF2687d711AE9427eE8e"),
             delay: 300,
             hub_chain_id: "axelar-testnet-lisbon-3",
@@ -66,7 +73,6 @@ pub async fn load(network: Network, chain: &str, options: &Options) -> Result<Co
         network,
         gateway: required_address(cfg, key, "AxelarGateway")?,
         its: required_address(cfg, key, "InterchainTokenService")?,
-        create3: optional_address(cfg, "Create3Deployer")?,
         configured_asg: optional_address(cfg, "AxelarServiceGovernance")?,
         chain_id: cfg
             .evm_chain_id

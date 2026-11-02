@@ -2,7 +2,10 @@ use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, ensure};
 
+use super::types::TransactionAction;
+
 pub const SENDER_KEY_ENV: &str = "ASG_PRIVATE_KEY";
+pub const DEPLOYER_KEY_ENV: &str = "ASG_DEPLOYER_PRIVATE_KEY";
 pub const OPERATOR_KEY_ENV: &str = "EVM_GOVERNANCE_OPERATOR_KEY";
 
 pub(super) fn read_signer(
@@ -25,8 +28,15 @@ pub(super) fn read_signer(
     Ok(signer)
 }
 
-pub fn sender(from: Address) -> Result<PrivateKeySigner> {
-    read_signer(SENDER_KEY_ENV, from, |name| std::env::var(name).ok())
+pub fn key_variable(action: TransactionAction) -> &'static str {
+    match action {
+        TransactionAction::Deploy => DEPLOYER_KEY_ENV,
+        TransactionAction::Handoff(_) => SENDER_KEY_ENV,
+    }
+}
+
+pub fn sender(from: Address, action: TransactionAction) -> Result<PrivateKeySigner> {
+    read_signer(key_variable(action), from, |name| std::env::var(name).ok())
 }
 
 pub fn require_operator(expected: Address) -> Result<()> {

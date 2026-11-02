@@ -7,7 +7,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use eyre::{Result, WrapErr, ensure};
 
-use super::types::{Context, SavedTransaction};
+use super::types::{Context, SavedTransaction, TransactionAction};
 use super::{checks, config, signing};
 use crate::commands::deploy::hardened::storage;
 use crate::evm::{EvmEndpoints, finality};
@@ -16,6 +16,13 @@ use crate::ui;
 pub fn preview(request: &TransactionRequest) -> Result<()> {
     ui::info(&serde_json::to_string_pretty(request)?);
     Ok(())
+}
+
+fn review_action(ctx: &Context, action: TransactionAction) {
+    ui::kv("transaction signing key", signing::key_variable(action));
+    if let TransactionAction::Deploy = action {
+        ui::address("predicted ASG address", &ctx.settings.asg.to_checksum(None));
+    }
 }
 
 pub(super) fn journal_path(request: &TransactionRequest) -> Result<PathBuf> {
@@ -41,7 +48,7 @@ pub async fn send<P: Provider>(
     provider: &P,
     ctx: &Context,
     request: &TransactionRequest,
-    asg: Option<Address>,
+    action: TransactionAction,
 ) -> Result<TransactionReceipt> {
     config::unchanged(ctx)?;
     ensure!(
@@ -56,9 +63,9 @@ pub async fn send<P: Provider>(
     let _lock = storage::lock(&path.with_extension("lock"))?;
     if path.exists() {
         let saved: SavedTransaction = serde_json::from_slice(&std::fs::read(&path)?)?;
-        return resume(provider, ctx, request, &saved, asg).await;
+        return resume(provider, ctx, request, &saved, action).await;
     }
-    let signer = signing::sender(from)?;
+    let signer = signing::sender(from, action)?;
     provider
         .call(request.clone())
         .await
@@ -85,6 +92,7 @@ pub async fn send<P: Provider>(
         &max_cost.to_string(),
     );
     preview(&prepared)?;
+    review_action(ctx, action);
     ensure!(
         ui::confirm("Send this exact transaction?").await,
         "declined, nothing sent"
@@ -94,7 +102,7 @@ pub async fn send<P: Provider>(
         provider.get_chain_id().await? == ctx.chain_id,
         "EVM RPC chain ID changed"
     );
-    recheck_governance(provider, ctx, from, asg).await?;
+    recheck_governance(provider, ctx, from, action).await?;
     ensure!(
         Some(provider.get_transaction_count(from).pending().await?) == prepared.nonce,
         "sender nonce changed during review, rerun to prepare a new transaction"
@@ -160,7 +168,7 @@ pub(super) async fn resume<P: Provider>(
     ctx: &Context,
     request: &TransactionRequest,
     saved: &SavedTransaction,
-    asg: Option<Address>,
+    action: TransactionAction,
 ) -> Result<TransactionReceipt> {
     let tx = validate(request, saved)?;
     if let Some(receipt) = provider.get_transaction_receipt(*tx.tx_hash()).await? {
@@ -178,6 +186,7 @@ pub(super) async fn resume<P: Provider>(
     );
     ui::warn("Resuming the recorded transaction with identical signed bytes");
     preview(&saved.request)?;
+    review_action(ctx, action);
     ensure!(
         ui::confirm("Rebroadcast this recorded transaction?").await,
         "declined, nothing sent"
@@ -187,7 +196,7 @@ pub(super) async fn resume<P: Provider>(
         provider.get_chain_id().await? == ctx.chain_id,
         "EVM RPC chain ID changed"
     );
-    recheck_governance(provider, ctx, from, asg).await?;
+    recheck_governance(provider, ctx, from, action).await?;
     broadcast(provider, &saved.raw).await
 }
 
@@ -195,9 +204,9 @@ async fn recheck_governance<P: Provider>(
     provider: &P,
     ctx: &Context,
     from: Address,
-    asg: Option<Address>,
+    action: TransactionAction,
 ) -> Result<()> {
-    if let Some(asg) = asg {
+    if let TransactionAction::Handoff(asg) = action {
         let artifact = checks::artifact(ctx)?;
         let runtime =
             checks::expected_runtime(provider, checks::creation(ctx, &artifact), from).await?;

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::config::{self, GOVERNANCE_ADDRESS, GOVERNANCE_CHAIN};
 use super::contracts::Managed;
-use super::types::{Context, Options, Roles};
+use super::types::{Context, Options, Roles, TransactionAction};
 use super::{checks, transactions};
 use crate::ui;
 
@@ -57,6 +57,10 @@ pub fn operators_unchanged(before: &Roles, after: &Roles) -> Result<()> {
 
 fn report(ctx: &Context, from: Address, asg: Address, roles: &Roles) -> Result<()> {
     checks::report(ctx, asg);
+    ui::kv(
+        "ownership signing key (--from)",
+        super::signing::SENDER_KEY_ENV,
+    );
     ui::address(
         "current gateway owner",
         &roles.gateway_owner.to_checksum(None),
@@ -140,7 +144,7 @@ pub async fn run<P: Provider>(
             provider,
             ctx,
             &ownership_request(ctx, options.from, target, asg),
-            Some(asg),
+            TransactionAction::Handoff(asg),
         )
         .await?;
         let after = checks::roles(provider, ctx, options.from, asg).await?;

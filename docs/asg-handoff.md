@@ -10,7 +10,7 @@ configuration. They require a local `axelar-contract-deployments` checkout.
 axe its-trust testnet robinhood deploy-asg --from <deployer-address>
 
 # Apply after reviewing the full transaction and explicitly answering y.
-# Load ASG_PRIVATE_KEY from a secure location outside the repository.
+# Load ASG_DEPLOYER_PRIVATE_KEY from a secure location outside the repository.
 axe its-trust testnet robinhood deploy-asg --from <deployer-address> --apply
 
 # Preview both ownership transfers and the operational roles being retained.
@@ -21,9 +21,10 @@ axe its-trust testnet robinhood handoff-asg --from <current-owner-address> --app
 ```
 
 Mainnet writes additionally require `--confirm-mainnet`. There is no `--yes`
-option, and redirected stdin cannot approve writes. `ASG_PRIVATE_KEY` must
-derive the explicit `--from` address: the deployer for `deploy-asg`, or the
-current gateway/ITS owner for `handoff-asg`. It is only needed when signing a
+option, and redirected stdin cannot approve writes. `deploy-asg` requires
+`ASG_DEPLOYER_PRIVATE_KEY` deriving the network's established deployer, and
+`--from` must be that address. `handoff-asg` uses `ASG_PRIVATE_KEY` matching
+`--from`, the current gateway/ITS owner. The signing key is only needed for a
 new transaction, not for previews or recovery of a recorded transaction.
 
 Every `--apply` also requires `EVM_GOVERNANCE_OPERATOR_KEY`, matching the
@@ -37,6 +38,9 @@ Load keys from a secure location outside the repository or the existing ignored
 
 | Setting | Testnet | Mainnet |
 | --- | --- | --- |
+| ASG deployer | `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC` | `0xba76c6980428A0b10CFC5d8ccb61949677A61233` |
+| CREATE3 salt key | `v6.1.0` | `v6.0.4-axelar` |
+| Required ASG address | `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A` | `0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525` |
 | ASG operator | `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e` | `0xc8a8399c3D1207f4e109673be7047604737c1D56` |
 | Minimum timelock | 300 seconds | 259200 seconds |
 | Governance chain | `axelar` | `axelar` |
@@ -69,10 +73,20 @@ reject them rather than applying amplifier ownership semantics.
 ## Deployment and verification
 
 ASG uses the checkout's GMP SDK `AxelarServiceGovernance` artifact and the
-chain's existing `Create3Deployer`. The default salt key is `v6.1.0`, with the
-same encoding as `axelar-contract-deployments`; `--salt` selects another key.
-The deployer account, CREATE3 contract and salt determine the address, so
-review the predicted address even when another chain uses the same salt.
+canonical CREATE3 factory `0x6513Aedb4D1593BA12e50644401D976aebDc90d8`.
+The salt defaults to the network policy above. An explicit `--salt` must match
+that policy. Wrong senders, signing keys, salts, or predicted addresses stop
+deployment rather than producing a different ASG address.
+
+The CREATE3 factory address, helper bytecode, sender and salt determine the
+ASG address. A chain-specific factory gives a different result even with the
+right signing key. The command verifies the canonical factory's runtime and
+queries its prediction, requires the established network ASG address, and
+prints that predicted address immediately before the transaction confirmation
+(including rebroadcast confirmation). If the canonical factory is absent,
+establish it first. This command does not bootstrap factories or silently use
+another factory. Existing chain deployment factory records are preserved, and
+the factory used for ASG is recorded in its `create3Deployer` field.
 
 `--config` selects a local chains-config JSON. Otherwise `CHAINS_CONFIG` or the
 sibling checkout is used. `--artifact` selects the exact ASG artifact when an
@@ -128,9 +142,15 @@ chain ID 46630). Its gateway and ITS are owned by
 recorded for the existing Hedera and Arc testnet ASGs. Recheck the live roles
 in the previews before approving any changes.
 
+**Prerequisite:** the canonical CREATE3 factory has no code on Robinhood
+testnet as of that check. Establish it through the existing infrastructure
+deployment process before these deployment commands can succeed. The earlier
+prediction `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8` used Robinhood's
+chain-specific factory and does not meet the shared-address requirement.
+
 1. Set `EVM_GOVERNANCE_OPERATOR_KEY` to the testnet ASG operator key for
    `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e`. For deployment, set
-   `ASG_PRIVATE_KEY` to the deployer key for
+   `ASG_DEPLOYER_PRIVATE_KEY` to the deployer key for
    `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC`.
 2. Preview, then deploy after reviewing the exact transaction:
 
@@ -142,8 +162,8 @@ in the previews before approving any changes.
      --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC --apply
    ```
 
-   With the current CREATE3 deployer and default salt, the predicted ASG is
-   `0x87b9A22fC2d6b6dEaB3FfacCe3b5c6D252CEF9B8`. Gateway and ITS ownership
+   With the canonical CREATE3 factory and testnet salt, the required ASG is
+   `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A`. Gateway and ITS ownership
    remain unchanged at this stage.
 3. Before handing over ownership, test governance delivery and operator
    execution with the gateway's `owner()` getter (`0x8da5cb5b`). This creates
@@ -159,7 +179,7 @@ in the previews before approving any changes.
      --calldata 0x8da5cb5b --relay
    ```
 
-4. After successful execution, change `ASG_PRIVATE_KEY` to the current owner
+4. After successful execution, set `ASG_PRIVATE_KEY` to the current owner
    key for `0x49845e5d9985d8dc941462293ed38EEfF18B0eAE`. Keep the ASG
    operator key set. Preview and then approve each ownership transfer:
 

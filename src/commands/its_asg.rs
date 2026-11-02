@@ -29,6 +29,9 @@ pub async fn run(network: Network, chain: &str, action: &AsgAction) -> Result<()
     }
     ensure!(!options.from.is_zero(), "--from cannot be zero");
     let mut ctx = config::load(network, chain, options).await?;
+    if let AsgAction::DeployAsg { salt, .. } = action {
+        deploy::validate_inputs(&ctx.settings, options.from, salt.as_deref())?;
+    }
     if options.apply {
         signing::require_operator(ctx.settings.operator)?;
     }
@@ -41,7 +44,7 @@ pub async fn run(network: Network, chain: &str, action: &AsgAction) -> Result<()
     let provider = connect_evm(std::slice::from_ref(&ctx.rpc))?;
     checks::network(&provider, &ctx).await?;
     match action {
-        AsgAction::DeployAsg { salt, .. } => deploy::run(&provider, &mut ctx, options, salt).await,
+        AsgAction::DeployAsg { .. } => deploy::run(&provider, &mut ctx, options).await,
         AsgAction::HandoffAsg { asg, .. } => handoff::run(&provider, &mut ctx, options, *asg).await,
     }
 }

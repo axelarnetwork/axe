@@ -13,8 +13,8 @@ use clap::Parser;
 use serde_json::json;
 
 use super::contracts::Managed;
-use super::types::{Artifact, Context, Options, Roles, SavedTransaction};
-use super::{checks, config, handoff, signing, transactions};
+use super::types::{Artifact, Context, Options, Roles, SavedTransaction, TransactionAction};
+use super::{checks, config, deploy, handoff, signing, transactions};
 use crate::cli::{Cli, Commands};
 use crate::commands::deploy::hardened::storage;
 use crate::types::Network;
@@ -29,7 +29,6 @@ fn context() -> Context {
         rpc: String::new(),
         gateway: Address::repeat_byte(1),
         its: Address::repeat_byte(2),
-        create3: Some(Address::repeat_byte(3)),
         configured_asg: None,
         artifact_path: PathBuf::new(),
         settings: config::settings(Network::Testnet).unwrap(),
@@ -62,6 +61,65 @@ fn network_policies_never_reuse_the_testnet_operator_on_mainnet() {
     assert_eq!((mainnet.delay, testnet.delay), (259_200, 300));
     assert!(config::settings(Network::Stagenet).is_err());
     assert!(config::settings(Network::DevnetAmplifier).is_err());
+}
+
+#[test]
+fn deployment_requires_the_networks_established_sender_salt_and_address() {
+    let testnet = config::settings(Network::Testnet).unwrap();
+    let mainnet = config::settings(Network::Mainnet).unwrap();
+    assert_eq!(
+        testnet.deployer.to_checksum(None),
+        "0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC"
+    );
+    assert_eq!(
+        mainnet.deployer.to_checksum(None),
+        "0xba76c6980428A0b10CFC5d8ccb61949677A61233"
+    );
+    assert_eq!(testnet.salt, "v6.1.0");
+    assert_eq!(mainnet.salt, "v6.0.4-axelar");
+    assert_eq!(
+        testnet.asg.to_checksum(None),
+        "0xb55A09E9fde39755c39EF9A7911431Ba0c96332A"
+    );
+    assert_eq!(
+        mainnet.asg.to_checksum(None),
+        "0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525"
+    );
+    for (selected, other) in [(&testnet, &mainnet), (&mainnet, &testnet)] {
+        assert!(deploy::validate_inputs(selected, selected.deployer, None).is_ok());
+        assert!(deploy::validate_inputs(selected, selected.deployer, Some(selected.salt)).is_ok());
+        assert!(deploy::validate_inputs(selected, other.deployer, None).is_err());
+        assert!(deploy::validate_inputs(selected, selected.deployer, Some(other.salt)).is_err());
+        assert!(deploy::validate_prediction(selected, selected.asg).is_ok());
+        assert!(deploy::validate_prediction(selected, other.asg).is_err());
+    }
+    assert_eq!(
+        signing::key_variable(TransactionAction::Deploy),
+        "ASG_DEPLOYER_PRIVATE_KEY"
+    );
+    assert_eq!(
+        signing::key_variable(TransactionAction::Handoff(testnet.asg)),
+        "ASG_PRIVATE_KEY"
+    );
+}
+
+#[tokio::test]
+async fn missing_canonical_factory_stops_before_preparing_a_transaction() {
+    let (url, server) = crate::evm::test_rpc::serve(vec![Some(json!({"result":"0x"}))]).await;
+    let provider = crate::evm::connect_evm(&[url]).unwrap();
+    let ctx = context();
+    let Err(error) = deploy::prepare(&provider, &ctx, ctx.settings.deployer).await else {
+        panic!("missing factory must prevent deployment");
+    };
+    assert!(error.to_string().contains("canonical CREATE3 factory"));
+    assert!(error.to_string().contains(&ctx.settings.asg.to_string()));
+    let calls = server.await.unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["method"], "eth_getCode");
+    assert_eq!(
+        serde_json::from_value::<Address>(calls[0]["params"][0].clone()).unwrap(),
+        config::CREATE3_FACTORY
+    );
 }
 
 #[test]
@@ -310,7 +368,11 @@ fn sender_lock_excludes_other_targets_but_not_other_accounts_or_chains() {
 fn signing_keys_are_explicit_and_bound_to_each_role_without_secret_errors() {
     let signer = PrivateKeySigner::random();
     let secret = signer.to_bytes().to_string();
-    for variable in [signing::SENDER_KEY_ENV, signing::OPERATOR_KEY_ENV] {
+    for variable in [
+        signing::SENDER_KEY_ENV,
+        signing::DEPLOYER_KEY_ENV,
+        signing::OPERATOR_KEY_ENV,
+    ] {
         assert!(signing::read_signer(variable, signer.address(), |_| None).is_err());
         assert!(signing::read_signer(variable, signer.address(), |_| Some(" ".into())).is_err());
         let error = signing::read_signer(variable, signer.address(), |_| Some("bad-key".into()))
@@ -355,9 +417,15 @@ async fn mined_journal_recovers_without_signing_or_rebroadcasting() {
     ])
     .await;
     let provider = crate::evm::connect_evm(&[url]).unwrap();
-    let recovered = transactions::resume(&provider, &context(), &request, &saved, None)
-        .await
-        .unwrap();
+    let recovered = transactions::resume(
+        &provider,
+        &context(),
+        &request,
+        &saved,
+        TransactionAction::Handoff(Address::repeat_byte(6)),
+    )
+    .await
+    .unwrap();
     assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
     let requests = server.await.unwrap();
     assert_eq!(requests.len(), 3);
@@ -375,9 +443,15 @@ async fn consumed_nonce_blocks_recovery_before_any_broadcast() {
     mock.push_success(&serde_json::Value::Null);
     mock.push_success(&"0x8");
     let provider = ProviderBuilder::new().connect_client(RpcClient::mocked(mock));
-    let error = transactions::resume(&provider, &context(), &request, &saved, None)
-        .await
-        .unwrap_err();
+    let error = transactions::resume(
+        &provider,
+        &context(),
+        &request,
+        &saved,
+        TransactionAction::Handoff(Address::repeat_byte(6)),
+    )
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("nonce consumed"));
 }
 

@@ -7,7 +7,7 @@ use eyre::{Result, WrapErr, ensure};
 
 use super::config::{GOVERNANCE_ADDRESS, GOVERNANCE_CHAIN};
 use super::contracts::{Governance, Managed};
-use super::signing::{OPERATOR_KEY_ENV, SENDER_KEY_ENV};
+use super::signing::OPERATOR_KEY_ENV;
 use super::types::{Artifact, Context, Roles};
 use crate::evm::AxelarServiceGovernance;
 use crate::ui;
@@ -160,7 +160,6 @@ pub fn report(ctx: &Context, asg: Address) {
     ui::address("gateway", &ctx.gateway.to_checksum(None));
     ui::address("ITS", &ctx.its.to_checksum(None));
     ui::address("ASG operator", &ctx.settings.operator.to_checksum(None));
-    ui::kv("transaction signing key (--from)", SENDER_KEY_ENV);
     ui::kv("required ASG operator key (--apply)", OPERATOR_KEY_ENV);
     ui::info(
         "ASG is controlled by Axelar governance. Its operator executes governance-approved calls",

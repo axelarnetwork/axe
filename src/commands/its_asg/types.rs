@@ -13,9 +13,9 @@ pub enum AsgAction {
     DeployAsg {
         #[command(flatten)]
         options: Options,
-        /// CREATE3 salt key, encoded like axelar-contract-deployments
-        #[arg(long, default_value = "v6.1.0")]
-        salt: String,
+        /// CREATE3 salt key. Must match the selected network's deployment policy
+        #[arg(long)]
+        salt: Option<String>,
     },
     /// Transfer gateway and ITS ownership to verified ASG, retaining operators
     HandoffAsg {
@@ -38,7 +38,7 @@ pub struct Options {
     /// ASG artifact (otherwise the deployments checkout's GMP SDK artifact)
     #[arg(long)]
     pub artifact: Option<PathBuf>,
-    /// Apply with ASG_PRIVATE_KEY and verified EVM_GOVERNANCE_OPERATOR_KEY
+    /// Apply with the action's signing key and verified EVM_GOVERNANCE_OPERATOR_KEY
     #[arg(long)]
     pub apply: bool,
     /// Required together with --apply on mainnet
@@ -55,7 +55,6 @@ pub struct Context {
     pub rpc: String,
     pub gateway: Address,
     pub its: Address,
-    pub create3: Option<Address>,
     pub configured_asg: Option<Address>,
     pub artifact_path: PathBuf,
     pub settings: Settings,
@@ -63,9 +62,18 @@ pub struct Context {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Settings {
+    pub deployer: Address,
+    pub salt: &'static str,
+    pub asg: Address,
     pub operator: Address,
     pub delay: u64,
     pub hub_chain_id: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub enum TransactionAction {
+    Deploy,
+    Handoff(Address),
 }
 
 #[derive(Deserialize)]
