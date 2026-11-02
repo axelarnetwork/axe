@@ -84,7 +84,7 @@ enum Asset {
 /// `TxBadSeq` sequence race. Whole AXE tokens.
 const AXE_MIN_WHOLE_TOKENS: f64 = 100.0;
 
-/// Native-gas floors for the testnet Arc <-> Robinhood route. Estimated
+/// Native-gas floors for Arc sources and testnet Robinhood. Estimated
 /// 2026-09-30 per run: Arc pays ~0.03 USDC (Axelarscan ITS fee x1.5 plus
 /// source gas), Robinhood ~0.00005 ETH. Arc's floor is about three months of
 /// runs. Robinhood's also covers the 0.04 ETH a derived key is topped up to.
@@ -272,6 +272,12 @@ fn production_chain_targets(network: Network) -> Vec<ChainTarget> {
     ];
     if network == Network::Testnet {
         targets.extend(testnet_only_chain_targets());
+    } else {
+        targets.push(ChainTarget {
+            chain_key: "arc".to_string(),
+            kind: ChainKind::Evm,
+            threshold_units: ARC_MIN_USDC,
+        });
     }
     targets
 }
@@ -345,6 +351,7 @@ fn axe_targets(network: Network) -> Vec<ChainTarget> {
             // Stellar is a mainnet ITS AXE source (Stellar ↔ Hyperliquid); it
             // was removed from the testnet ITS cron, so only check on mainnet.
             if network == Network::Mainnet {
+                targets.push(axe("arc", ChainKind::Evm));
                 targets.push(axe(stellar_chain_key(network), ChainKind::Stellar));
             }
             targets
@@ -956,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn arc_and_robinhood_are_testnet_only() {
+    fn arc_and_robinhood_use_network_specific_targets() {
         let keys = |network| -> Vec<String> {
             chain_targets(network)
                 .into_iter()
@@ -965,10 +972,18 @@ mod tests {
                 .collect()
         };
         let testnet = keys(Network::Testnet);
+        assert!(!testnet.iter().any(|k| k == "arc"));
         assert_eq!(testnet.iter().filter(|k| *k == "arc-8").count(), 2);
         assert_eq!(testnet.iter().filter(|k| *k == "robinhood").count(), 2);
         let mainnet = keys(Network::Mainnet);
+        assert_eq!(mainnet.iter().filter(|k| *k == "arc").count(), 2);
         assert!(!mainnet.iter().any(|k| k == "arc-8" || k == "robinhood"));
+        let arc = chain_targets(Network::Mainnet)
+            .into_iter()
+            .find(|t| t.chain_key == "arc")
+            .unwrap();
+        assert_eq!(arc.kind, ChainKind::Evm);
+        assert_eq!(arc.threshold_units, ARC_MIN_USDC);
     }
 
     #[test]
