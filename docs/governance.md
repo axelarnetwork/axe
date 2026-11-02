@@ -92,6 +92,22 @@ edge-chain key for `--relay` (the operator fast-path's final execute requires
 the ASG `operator` key; if the key isn't the operator, the proposal is relayed +
 approved and a `cast` command is printed for the operator to finish).
 
+On mainnet, if the signing wallet cannot cover the deposit plus the 10 AXL
+fee buffer, `axe` automatically checks its existing CPI multisig authorization
+for `/cosmos.gov.v1.MsgSubmitProposal`. If the grant is active and CPI has the
+full deposit available, `axe` warns before confirmation that CPI will pay the
+deposit. The review names both the proposer/deposit payer and signer/fee payer.
+No flag is needed. A sufficiently funded signing wallet continues to pay its
+own deposit.
+
+The fallback wraps the proposal in authz `MsgExec`, with CPI multisig
+(`axelar14vps3ev03zyp2wmj89etx8rrxdxyltfy4rzl5m`) as proposer and the wallet
+from `MNEMONIC` as grantee. That wallet still needs at least 10 AXL for fees;
+any deposit refund returns to CPI. The grant authorizes proposal submission,
+not a bank transfer or fee sponsorship. Missing, expired or unreadable grants,
+insufficient CPI funds, and insufficient signer gas stop submission. This
+fallback only applies to `axe propose` on `axelar-dojo-1`.
+
 Before submitting, `axe propose` verifies the target is a real, correctly-wired
 ASG (code present, `governanceAddress` == the gov module), runs an idempotency
 check, and shows a review block: the target contract is labelled

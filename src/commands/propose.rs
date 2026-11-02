@@ -6,6 +6,8 @@
 //! each GMP to its edge chain and executes it (operator fast-path or
 //! time-lock), see `relay.rs`.
 
+mod funding;
+mod funding_types;
 mod helpers;
 mod monitor;
 mod recovery;
@@ -33,12 +35,13 @@ use serde_json::{Value, json};
 use crate::config::ChainsConfig;
 use crate::config_source;
 use crate::cosmos::{
-    build_execute_msg_any, build_submit_proposal_any, check_axelar_balance, derive_axelar_wallet,
-    extract_proposal_id, sign_and_broadcast_cosmos_tx,
+    build_execute_msg_any, build_submit_proposal_any, derive_axelar_wallet, extract_proposal_id,
+    sign_and_broadcast_cosmos_tx,
 };
 use crate::types::Network;
 use crate::ui;
 
+use funding_types::ProposalFunding;
 use helpers::AsgInfo;
 use types::{EdgeCall, ProposalPlan, ProposalType, ResolvedConfig};
 
@@ -240,6 +243,14 @@ async fn submit_new(
     let mnemonic = std::env::var("MNEMONIC")
         .map_err(|_| eyre::eyre!("MNEMONIC not set — needed to sign the gov proposal"))?;
     let (signing_key, submitter) = derive_axelar_wallet(&mnemonic)?;
+    ui::address("submitter", &submitter);
+    let funding = funding::resolve(
+        args.network,
+        plan.hub(),
+        &submitter,
+        deposit_amount(plan, args).parse()?,
+    )
+    .await?;
     if args.relay {
         for call in &plan.calls {
             relay::preflight_relayer(&call.cfg).await?;
@@ -250,13 +261,12 @@ async fn submit_new(
         .iter()
         .map(|call| encode_call(args, plan.ptype, call))
         .collect();
-    if !confirm_submit(args, plan, config, &encoded).await {
+    if !confirm_submit(args, plan, config, &encoded, &funding).await {
         ui::info("aborted — no proposal submitted");
         return Ok(None);
     }
-    ui::address("submitter", &submitter);
     let payloads: Vec<Bytes> = encoded.into_iter().map(|call| call.payload).collect();
-    let id = submit(plan, args, &payloads, &signing_key, &submitter, &marker).await?;
+    let id = submit(plan, args, &payloads, &signing_key, &funding, &marker).await?;
     ui::kv("proposal submitted", &id.to_string());
     ui::action_required(&[
         "Vote on the proposal:",
@@ -308,31 +318,27 @@ fn call_contract_msg(call: &EdgeCall, payload: &[u8]) -> Value {
     })
 }
 
+/// The gov deposit this run posts, in micro-units: expedited unless `--standard`.
+fn deposit_amount<'a>(plan: &'a ProposalPlan, args: &ProposeArgs) -> &'a str {
+    let hub = plan.hub();
+    if args.standard {
+        &hub.deposit_amount
+    } else {
+        &hub.expedited_deposit_amount
+    }
+}
+
 async fn submit(
     plan: &ProposalPlan,
     args: &ProposeArgs,
     payloads: &[Bytes],
     signing_key: &SigningKey,
-    submitter: &str,
+    funding: &ProposalFunding,
     marker: &Path,
 ) -> Result<u64> {
     let hub = plan.hub();
     let expedited = !args.standard;
-    let deposit = if expedited {
-        &hub.expedited_deposit_amount
-    } else {
-        &hub.deposit_amount
-    };
-    let min_balance = deposit.parse::<u128>()? + GAS_BUFFER_UAXL;
-    check_axelar_balance(
-        &hub.lcd,
-        &hub.chain_id,
-        &submitter.parse::<cosmrs::AccountId>()?,
-        &hub.fee_denom.parse::<cosmrs::Denom>()?,
-        min_balance,
-    )
-    .await?;
-
+    let deposit = deposit_amount(plan, args);
     let inner = plan
         .calls
         .iter()
@@ -353,7 +359,7 @@ async fn submit(
         plan.edge_ids().join(", ")
     );
     let proposal = build_submit_proposal_any(
-        submitter,
+        funding.proposer().as_ref(),
         inner,
         &title,
         &summary,
@@ -361,16 +367,17 @@ async fn submit(
         &hub.fee_denom,
         expedited,
     )?;
+    let submission = funding::submission(funding, proposal)?;
 
     submission_guard::claim(marker, args.new_proposal).await?;
     let tx_resp = sign_and_broadcast_cosmos_tx(
         signing_key,
-        submitter,
+        funding.signer().as_ref(),
         &hub.lcd,
         &hub.chain_id,
         &hub.fee_denom,
         hub.gas_price,
-        vec![proposal],
+        vec![submission],
     )
     .await?;
     extract_proposal_id(&tx_resp)
@@ -428,23 +435,21 @@ async fn confirm_submit(
     plan: &ProposalPlan,
     config: &ChainsConfig,
     encoded: &[EncodedCall],
+    funding: &ProposalFunding,
 ) -> bool {
     if args.yes && args.network != Network::Mainnet {
         return true;
     }
     let hub = plan.hub();
     let expedited = !args.standard;
-    let deposit = if expedited {
-        &hub.expedited_deposit_amount
-    } else {
-        &hub.deposit_amount
-    };
+    let deposit = deposit_amount(plan, args);
     ui::section("review before submit");
     ui::kv("proposal type", plan.ptype.label());
     ui::kv("edge calls", &plan.calls.len().to_string());
     for (call, encoded) in plan.calls.iter().zip(encoded) {
         review_call(args, config, call, encoded);
     }
+    funding::review(funding);
     ui::kv(
         "deposit",
         &format!(

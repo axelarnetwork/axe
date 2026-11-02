@@ -160,7 +160,7 @@ pub(crate) async fn lcd_query_account(lcd: &str, address: &str) -> Result<(u64, 
 }
 
 /// Query the bank balance of `address` for a single denom. Returns the amount in base units (e.g. uaxl).
-pub(super) async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
+pub(crate) async fn lcd_query_balance(lcd: &str, address: &str, denom: &str) -> Result<u128> {
     let url = format!("{lcd}/cosmos/bank/v1beta1/balances/{address}/by_denom?denom={denom}");
     let raw: Value = crate::http::client().get(&url).send().await?.json().await?;
     let resp: BalanceResponse = serde_json::from_value(raw).wrap_err("invalid balance response")?;
