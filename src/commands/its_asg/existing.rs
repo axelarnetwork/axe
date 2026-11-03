@@ -35,7 +35,7 @@ pub(super) async fn reuse<P: Provider>(
     let artifact = checks::artifact(ctx)?;
     let runtime =
         checks::expected_runtime(provider, checks::creation(ctx, &artifact), options.from).await?;
-    checks::deployed_governance(provider, ctx, asg, &runtime).await?;
+    checks::governance(provider, ctx, asg, &runtime).await?;
     checks::report(ctx, asg);
     ui::success("Existing ASG verified, no deployment transaction needed");
     // Only observed contract properties are updated, never inferred deployment provenance.
@@ -56,6 +56,6 @@ pub(super) async fn reuse<P: Provider>(
         "declined"
     );
     checks::network(provider, ctx).await?;
-    checks::deployed_governance(provider, ctx, asg, &runtime).await?;
+    checks::governance(provider, ctx, asg, &runtime).await?;
     config::save(ctx, &[("AxelarServiceGovernance", record)])
 }

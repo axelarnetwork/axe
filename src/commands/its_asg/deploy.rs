@@ -108,7 +108,7 @@ pub async fn run<P: Provider>(provider: &P, ctx: &mut Context, options: &Options
     let exists = !provider.get_code_at(deployment.address).await?.is_empty();
     let recover = transactions::journal_path(&deployment.request)?.exists();
     if exists && (!options.apply || !recover) {
-        checks::deployed_governance(provider, ctx, deployment.address, &deployment.runtime).await?;
+        checks::governance(provider, ctx, deployment.address, &deployment.runtime).await?;
         ui::success("ASG already deployed and verified, no deployment transaction needed");
     }
     if !options.apply {
@@ -132,7 +132,7 @@ pub async fn run<P: Provider>(provider: &P, ctx: &mut Context, options: &Options
             .await?,
         )
     };
-    checks::deployed_governance(provider, ctx, deployment.address, &deployment.runtime).await?;
+    checks::governance(provider, ctx, deployment.address, &deployment.runtime).await?;
     let mut record = json!({
         "address": deployment.address.to_checksum(None),
         "gateway": ctx.gateway.to_checksum(None),

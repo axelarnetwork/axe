@@ -6,10 +6,10 @@ use alloy::sol_types::SolValue;
 use eyre::{Result, WrapErr, ensure};
 
 use super::config::{GOVERNANCE_ADDRESS, GOVERNANCE_CHAIN};
+use super::confirmations;
 use super::contracts::{Governance, Managed};
 use super::signing::OPERATOR_KEY_ENV;
 use super::types::{Artifact, Context, Roles};
-use super::{confirmations, rpc};
 use crate::evm::AxelarServiceGovernance;
 use crate::ui;
 
@@ -87,18 +87,6 @@ pub async fn governance<P: Provider>(
     address: Address,
     runtime: &Bytes,
 ) -> Result<()> {
-    rpc::finalized_read("finalized ASG verification", || {
-        governance_at(provider, ctx, address, runtime, BlockId::finalized())
-    })
-    .await
-}
-
-pub(super) async fn deployed_governance<P: Provider>(
-    provider: &P,
-    ctx: &Context,
-    address: Address,
-    runtime: &Bytes,
-) -> Result<()> {
     let block = confirmations::observation(provider).await?;
     governance_at(
         provider,
@@ -166,28 +154,19 @@ pub async fn roles<P: Provider>(
     from: Address,
     asg: Address,
 ) -> Result<Roles> {
-    rpc::finalized_read("finalized gateway and ITS roles", || {
-        roles_once(provider, ctx, from, asg)
-    })
-    .await
-}
-
-async fn roles_once<P: Provider>(
-    provider: &P,
-    ctx: &Context,
-    from: Address,
-    asg: Address,
-) -> Result<Roles> {
+    let observed = confirmations::observation(provider).await?;
     let gw = Managed::new(ctx.gateway, provider);
     let its = Managed::new(ctx.its, provider);
-    let block = BlockId::finalized();
-    Ok(Roles {
+    let block = confirmations::block_id(&observed);
+    let roles = Roles {
         gateway_owner: gw.owner().block(block).call().await?,
         gateway_operator: gw.operator().block(block).call().await?,
         its_owner: its.owner().block(block).call().await?,
         sender_is_its_operator: its.isOperator(from).block(block).call().await?,
         asg_is_its_operator: its.isOperator(asg).block(block).call().await?,
-    })
+    };
+    confirmations::canonical(provider, &observed).await?;
+    Ok(roles)
 }
 
 pub fn report(ctx: &Context, asg: Address) {

@@ -85,7 +85,7 @@ The deployment recipe is the same for every supported chain:
 4. Deploy with `ASG_DEPLOYER_PRIVATE_KEY`, wait for two confirmations (the
    inclusion block plus one successor), verify ASG at a confirmed block and
    record its actual address and factory in the chain's ASG config record.
-   Deployment does not wait for finality. Ownership handoff still does.
+   Deployment and ownership handoff both use two confirmations, not finality.
 
 **The policy is canonical per network, but the resulting address is per chain.**
 Different factories produce different ASG addresses even with the same sender
@@ -125,8 +125,10 @@ Before deployment, the command verifies the RPC chain ID, gateway/ITS wiring,
 and CREATE3 runtime against the checkout artifact. Before handoff, it checks
 ASG's complete runtime, gateway, governance strings and hashes, operator, and
 timelock. Constructor simulation supplies runtime with its immutable values
-filled in. An RPC that cannot provide finalized state or simulate creation
-causes the command to stop.
+filled in. Handoff verifies ASG and ownership at a block with two confirmations,
+pinned by canonical hash and rechecked for reorgs. Deployment factory checks still
+require finalized state. An RPC that cannot serve the required state or simulate
+creation causes the command to stop.
 
 The handoff checks both current owners before sending either transaction.
 The sender must own each contract that still needs a transfer. If the owner
@@ -149,10 +151,11 @@ still avoid concurrent use of that sender.
 A reverted transaction or consumed nonce without its receipt stops recovery
 for investigation. Do not delete a journal merely because a send timed out.
 
-Deployment waits for two confirmations and rechecks the receipt and canonical
-inclusion block. Its postconditions are checked at a block with the same depth,
-pinned by canonical hash. Existing ASG reuse uses that same observation depth.
-Ownership transfers still require finality. Both operations must satisfy their
+Deployment and ownership transfers wait for two confirmations (the inclusion
+block plus one successor) and recheck the receipt and canonical inclusion block.
+Their postconditions are checked at a block with the same depth, pinned by
+canonical hash. Existing ASG reuse and handoff recovery use that same depth.
+This is not finality; later reorgs remain possible. Both operations must satisfy their
 on-chain postconditions before their results are written to
 `axelar-contract-deployments/axelar-chains-config/info/<network>.json`.
 Config writes are atomic, retain unrelated fields, and reject changes made
@@ -248,7 +251,7 @@ The public Robinhood RPC intermittently returns `historical state ... is
 not available` for finalized-state queries. These reads are retried up to three
 times with visible backoff. Runtime mismatches and contract reverts are not
 retried. If the requested state remains unavailable, the command stops while
-retaining finalized verification.
+retaining the required verification depth.
 
 Set `ASG_RPC_URL` to a provider that serves Robinhood's finalized state, or pass
 `--rpc-url <url>` after `deploy-asg` / `handoff-asg`. An explicit flag takes

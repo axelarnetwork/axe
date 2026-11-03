@@ -26,7 +26,7 @@ fn block(number: u64, hash: B256) -> Block<Transaction> {
 }
 
 #[tokio::test]
-async fn deployment_waits_for_one_successor_and_rechecks_canonical_receipt() {
+async fn handoff_waits_for_one_successor_and_rechecks_canonical_receipt() {
     let receipt = receipt();
     let (url, server) = serve(vec![
         Some(json!({"result":"0xa"})),
@@ -39,7 +39,7 @@ async fn deployment_waits_for_one_successor_and_rechecks_canonical_receipt() {
     confirmations::wait(
         &provider,
         &receipt,
-        TransactionAction::Deploy(Address::repeat_byte(3)),
+        TransactionAction::Handoff(Address::repeat_byte(3)),
     )
     .await
     .unwrap();
@@ -105,9 +105,10 @@ async fn stale_receipt_on_noncanonical_block_is_rejected() {
 async fn stalled_deployment_has_a_bounded_wait() {
     let (url, server) = serve(vec![Some(json!({"result":"0xa"}))]).await;
     let provider = connect_evm(&[url]).unwrap();
-    let error = confirmations::wait_for_deployment(
+    let error = confirmations::wait_for_confirmations(
         &provider,
         &receipt(),
+        "ownership transfer",
         Duration::from_millis(100),
         Duration::from_secs(10),
     )

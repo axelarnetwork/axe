@@ -20,14 +20,14 @@ pub fn preview(request: &TransactionRequest) -> Result<()> {
 
 fn review_action(ctx: &Context, action: TransactionAction) {
     ui::kv("transaction signing key", signing::key_variable(action));
+    ui::info(
+        "Wait for two confirmations, including the inclusion block, before recording state (not finality)",
+    );
     if let TransactionAction::Deploy(asg) = action {
         ui::address("predicted ASG address", &asg.to_checksum(None));
         ui::address("ASG deployer", &ctx.settings.deployer.to_checksum(None));
         ui::address("ASG operator", &ctx.settings.operator.to_checksum(None));
         ui::kv("salt key", ctx.settings.salt);
-        ui::info(
-            "Wait for two confirmations, including the inclusion block, before recording ASG (not finality)",
-        );
         if let Some(factory) = ctx.create3 {
             ui::address("CREATE3 factory", &factory.to_checksum(None));
         }
@@ -66,7 +66,7 @@ pub async fn send<P: Provider>(
     );
     let from = request.from.ok_or_else(|| eyre::eyre!("missing sender"))?;
     // Nonces belong to an account, regardless of target or config checkout.
-    // Hold this through recovery/finality so another ASG send cannot reuse one.
+    // Hold this through recovery/confirmations so another ASG send cannot reuse one.
     let _sender_lock = storage::lock(&sender_lock_path(ctx.chain_id, from)?)?;
     let path = journal_path(request)?;
     let _lock = storage::lock(&path.with_extension("lock"))?;

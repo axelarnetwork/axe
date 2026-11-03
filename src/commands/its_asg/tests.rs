@@ -413,18 +413,12 @@ async fn mined_journal_recovers_without_signing_or_rebroadcasting() {
         TransactionAction::Deploy(Address::repeat_byte(6)),
         TransactionAction::Handoff(Address::repeat_byte(6)),
     ] {
-        let mut responses = vec![Some(json!({"result":receipt}))];
-        match action {
-            TransactionAction::Deploy(_) => responses.extend([
-                Some(json!({"result":"0xb"})),
-                Some(json!({"result":receipt})),
-                Some(json!({"result":block})),
-            ]),
-            TransactionAction::Handoff(_) => responses.extend([
-                Some(json!({"result":block})),
-                Some(json!({"result":receipt})),
-            ]),
-        }
+        let responses = vec![
+            Some(json!({"result":receipt})),
+            Some(json!({"result":"0xb"})),
+            Some(json!({"result":receipt})),
+            Some(json!({"result":block})),
+        ];
         let (url, server) = crate::evm::test_rpc::serve(responses).await;
         let provider = crate::evm::connect_evm(&[url]).unwrap();
         let recovered = transactions::resume(&provider, &context(), &request, &saved, action)
@@ -432,10 +426,8 @@ async fn mined_journal_recovers_without_signing_or_rebroadcasting() {
             .unwrap();
         assert_eq!(recovered.transaction_hash, receipt.transaction_hash);
         let requests = server.await.unwrap();
-        match action {
-            TransactionAction::Deploy(_) => assert_eq!(requests[1]["method"], "eth_blockNumber"),
-            TransactionAction::Handoff(_) => assert_eq!(requests[1]["params"][0], "finalized"),
-        }
+        assert_eq!(requests[1]["method"], "eth_blockNumber");
+        assert_eq!(requests[3]["params"], json!(["0xa", false]));
         assert!(
             requests
                 .iter()
@@ -486,6 +478,11 @@ async fn constructor_simulation_uses_creation_call_and_returns_immutable_runtime
 #[tokio::test]
 async fn different_asg_runtime_fails_before_reading_roles_or_sending() {
     let mock = Asserter::new();
+    let mut block = Block::<Transaction>::default();
+    block.header.inner.number = 10;
+    block.header.hash = B256::repeat_byte(9);
+    mock.push_success(&"0xb");
+    mock.push_success(&block);
     mock.push_success(&"0x6000");
     let provider = ProviderBuilder::new().connect_client(RpcClient::mocked(mock));
     let error = checks::governance(
@@ -529,7 +526,7 @@ async fn deployment_verifies_all_asg_properties_at_confirmed_state_without_final
     responses.push(Some(json!({"result":block})));
     let (url, server) = crate::evm::test_rpc::serve(responses).await;
     let provider = crate::evm::connect_evm(&[url]).unwrap();
-    checks::deployed_governance(&provider, &ctx, Address::repeat_byte(6), &runtime)
+    checks::governance(&provider, &ctx, Address::repeat_byte(6), &runtime)
         .await
         .unwrap();
     let calls = server.await.unwrap();
@@ -762,4 +759,51 @@ async fn factory_runtime_mismatch_blocks_prediction_before_any_deployment() {
         );
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn handoff_reads_confirmed_ownership_and_rejects_reorgs() {
+    let ctx = context();
+    let asg = Address::repeat_byte(6);
+    let from = Address::repeat_byte(5);
+    let mut block = Block::<Transaction>::default();
+    block.header.inner.number = 10;
+    block.header.hash = B256::repeat_byte(9);
+    for reorg in [false, true] {
+        let mut rechecked = block.clone();
+        if reorg {
+            rechecked.header.hash = B256::repeat_byte(8);
+        }
+        let mut responses = vec![Some(json!({"result":"0xb"})), Some(json!({"result":block}))];
+        // ITS has moved. Gateway still belongs to the sender.
+        responses.extend(
+            [
+                from.abi_encode(),
+                from.abi_encode(),
+                asg.abi_encode(),
+                true.abi_encode(),
+                false.abi_encode(),
+            ]
+            .into_iter()
+            .map(|value| Some(json!({"result":Bytes::from(value)}))),
+        );
+        responses.push(Some(json!({"result":rechecked})));
+        let (url, server) = crate::evm::test_rpc::serve(responses).await;
+        let provider = crate::evm::connect_evm(&[url]).unwrap();
+        let result = checks::roles(&provider, &ctx, from, asg).await;
+        if reorg {
+            assert!(result.unwrap_err().to_string().contains("block changed"));
+        } else {
+            let roles = result.unwrap();
+            assert_eq!(roles.its_owner, asg);
+            assert_eq!(roles.gateway_owner, from);
+            handoff::validate_roles(&roles, asg, from).unwrap();
+        }
+        let calls = server.await.unwrap();
+        let pinned = json!({"blockHash":block.header.hash,"requireCanonical":true});
+        for call in &calls[2..7] {
+            assert_eq!(call["params"][1], pinned);
+        }
+        assert_eq!(calls[7]["params"], json!(["0xa", false]));
+    }
 }
