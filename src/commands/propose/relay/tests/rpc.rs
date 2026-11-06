@@ -1,4 +1,7 @@
-use alloy::{primitives::B256, sol_types::SolCall};
+use alloy::{
+    primitives::{Address, B256},
+    sol_types::{SolEvent, SolValue},
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -7,9 +10,20 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::evm::{AxelarAmplifierGateway, AxelarServiceGovernance};
+use crate::evm::{AxelarAmplifierGateway, AxelarServiceGovernance, ContractCallApproved};
+use alloy::sol_types::SolCall;
 
-pub(super) struct Fixture {
+/// Which gateway the fixture imitates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    Amplifier,
+    Consensus,
+}
+
+/// The `commandId` the consensus fixture's approval log carries.
+pub(crate) const CONSENSUS_COMMAND_ID: B256 = B256::repeat_byte(0xc0);
+
+pub(crate) struct Fixture {
     pub url: String,
     stop: oneshot::Sender<()>,
     task: JoinHandle<Vec<Value>>,
@@ -22,13 +36,14 @@ impl Fixture {
     }
 }
 
-pub(super) async fn serve(consumed: bool, pending: bool) -> Fixture {
+pub(crate) async fn serve(route: Route, consumed: bool, pending: bool) -> Fixture {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, mut stopped) = oneshot::channel();
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
         let mut state = ChainState {
+            route,
             consumed,
             pending,
             next_hash: 1,
@@ -68,6 +83,7 @@ pub(super) async fn serve(consumed: bool, pending: bool) -> Fixture {
 }
 
 struct ChainState {
+    route: Route,
     consumed: bool,
     pending: bool,
     next_hash: u8,
@@ -80,10 +96,13 @@ impl ChainState {
                 let input = input(&request["params"][0]);
                 let value = if input
                     .starts_with(&AxelarAmplifierGateway::isMessageExecutedCall::SELECTOR)
+                    || input.starts_with(&AxelarAmplifierGateway::isCommandExecutedCall::SELECTOR)
                 {
                     self.consumed
                 } else if input
                     .starts_with(&AxelarAmplifierGateway::isMessageApprovedCall::SELECTOR)
+                    || input
+                        .starts_with(&AxelarAmplifierGateway::isContractCallApprovedCall::SELECTOR)
                 {
                     !self.consumed
                 } else if input
@@ -98,6 +117,40 @@ impl ChainState {
             }
             "eth_getBalance" => json!("0x1000000000000000"),
             "eth_blockNumber" => json!("0x1"),
+            "eth_getBlockByNumber" => json!({
+                "number":"0x1", "hash":B256::repeat_byte(9), "parentHash":B256::ZERO,
+                "sha3Uncles":B256::ZERO, "logsBloom":format!("0x{}", "00".repeat(256)),
+                "transactionsRoot":B256::ZERO, "stateRoot":B256::ZERO, "receiptsRoot":B256::ZERO,
+                "miner":Address::ZERO, "difficulty":"0x0", "extraData":"0x", "size":"0x0",
+                "gasLimit":"0x0", "gasUsed":"0x0", "timestamp":"0x0", "mixHash":B256::ZERO,
+                "nonce":"0x0000000000000000", "transactions":[], "uncles":[]
+            }),
+            "eth_getLogs" => {
+                assert_eq!(
+                    self.route,
+                    Route::Consensus,
+                    "only consensus relays scan logs"
+                );
+                let filter = &request["params"][0];
+                let payload_hash: B256 =
+                    serde_json::from_value(filter["topics"][3].clone()).unwrap();
+                let gateway = filter["address"].clone();
+                let asg = Address::from([2; 20]);
+                let data = (
+                    "axelar".to_string(),
+                    "axelar1gov".to_string(),
+                    B256::repeat_byte(5),
+                    alloy::primitives::U256::ZERO,
+                )
+                    .abi_encode_params();
+                json!([{
+                    "address":gateway,
+                    "topics":[ContractCallApproved::SIGNATURE_HASH, CONSENSUS_COMMAND_ID, B256::left_padding_from(asg.as_slice()), payload_hash],
+                    "data":format!("0x{}", alloy::hex::encode(data)),
+                    "blockNumber":"0x1", "transactionHash":B256::repeat_byte(7), "transactionIndex":"0x0",
+                    "blockHash":B256::repeat_byte(9), "logIndex":"0x0", "removed":false
+                }])
+            }
             "eth_sendTransaction" => {
                 let input = input(&request["params"][0]);
                 if input.starts_with(&AxelarServiceGovernance::executeCall::SELECTOR) {
@@ -130,7 +183,7 @@ impl ChainState {
     }
 }
 
-pub(super) fn input(transaction: &Value) -> Vec<u8> {
+pub(crate) fn input(transaction: &Value) -> Vec<u8> {
     alloy::hex::decode(
         transaction
             .get("input")

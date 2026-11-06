@@ -16,18 +16,9 @@
 
 use alloy::primitives::{Address, FixedBytes};
 use alloy::providers::Provider;
-use alloy::rpc::types::Filter;
-use alloy::sol_types::SolEvent;
 use eyre::{Result, eyre};
 
-use crate::evm::ContractCallApproved;
-use crate::retry::retry_all;
-
-/// Max blocks per `eth_getLogs` window. Public RPCs cap the range (polygon Amoy
-/// rejects > ~128 blocks); we scan newest→oldest in windows of this size so a
-/// fresh approval is found in the first request and we never submit a range an
-/// RPC will reject. Kept well under common caps.
-const LOG_WINDOW_BLOCKS: u64 = 100;
+use crate::evm::legacy_gateway;
 
 /// Extract the source transaction hash from an EVM source message id
 /// (`{0x-tx-hash}-{event_index}`). This is the `message_id` stored on a
@@ -97,8 +88,7 @@ pub(super) async fn find_contract_call_approved_by_payload<P: Provider>(
     .await
 }
 
-/// Shared `ContractCallApproved` scan: filter by indexed `payloadHash`, match
-/// `contractAddress`, and (when given) the exact `sourceTxHash`. Returns the
+/// Shared `ContractCallApproved` scan (see `evm::legacy_gateway`): returns the
 /// emitted `commandId` of the first match.
 async fn find_approval<P: Provider>(
     provider: &P,
@@ -108,37 +98,16 @@ async fn find_approval<P: Provider>(
     source_tx_hash: Option<FixedBytes<32>>,
     from_block: u64,
 ) -> Result<Option<[u8; 32]>> {
-    // Retried: these run against the destination RPC every poll cycle, and a
-    // transient blip must not surface as a scan failure (the callers treat a
-    // failed scan as "still pending" — see the tolerant poll loops — so an
-    // unretried error would silently delay detection by a full cycle).
-    let latest = retry_all("legacy get_block_number", || provider.get_block_number()).await?;
-    let mut to = latest;
-    while to >= from_block {
-        let from = to.saturating_sub(LOG_WINDOW_BLOCKS - 1).max(from_block);
-        let filter = Filter::new()
-            .address(gateway)
-            .event_signature(ContractCallApproved::SIGNATURE_HASH)
-            .topic3(payload_hash)
-            .from_block(from)
-            .to_block(to);
-        let logs = retry_all("legacy get_logs", || provider.get_logs(&filter)).await?;
-        for log in logs {
-            let Ok(decoded) = ContractCallApproved::decode_log(&log.inner) else {
-                continue;
-            };
-            if decoded.data.contractAddress == contract_addr
-                && source_tx_hash.is_none_or(|h| decoded.data.sourceTxHash == h)
-            {
-                return Ok(Some(decoded.data.commandId.into()));
-            }
-        }
-        if from == from_block {
-            break;
-        }
-        to = from - 1;
-    }
-    Ok(None)
+    let approved = legacy_gateway::find_contract_call_approved(
+        provider,
+        gateway,
+        contract_addr,
+        payload_hash,
+        source_tx_hash,
+        from_block,
+    )
+    .await?;
+    Ok(approved.map(|call| call.command_id.into()))
 }
 
 #[cfg(test)]

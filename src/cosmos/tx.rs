@@ -103,6 +103,14 @@ pub fn build_submit_proposal_any(
     deposit_denom: &str,
     expedited: bool,
 ) -> Result<cosmrs::Any> {
+    for (field, text) in [("title", title), ("description", summary)] {
+        eyre::ensure!(
+            !text
+                .split(|character: char| !character.is_alphanumeric())
+                .any(|word| word.eq_ignore_ascii_case("axe")),
+            "proposal {field} must not contain tool branding"
+        );
+    }
     let prost_messages: Vec<tendermint_proto::google::protobuf::Any> = inner_messages
         .into_iter()
         .map(|a| tendermint_proto::google::protobuf::Any {
@@ -205,4 +213,41 @@ pub async fn sign_and_broadcast_cosmos_tx(
     ui::info("waiting for tx confirmation...");
     let tx_resp = lcd_wait_for_tx(lcd, &tx_hash).await?;
     Ok(tx_resp)
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::build_submit_proposal_any;
+
+    #[test]
+    fn rejects_branding_in_titles_and_descriptions() {
+        for branding in ["axe: action", "AXE action", "Submitted via axe propose."] {
+            for (title, description) in [(branding, "Action"), ("Action", branding)] {
+                assert!(
+                    build_submit_proposal_any(
+                        "proposer",
+                        vec![],
+                        title,
+                        description,
+                        "1",
+                        "uaxl",
+                        false
+                    )
+                    .is_err()
+                );
+            }
+        }
+        assert!(
+            build_submit_proposal_any(
+                "proposer",
+                vec![],
+                "ITS set-trusted-chain on 19 chains",
+                "Approve the Axelar governance action.",
+                "1",
+                "uaxl",
+                false
+            )
+            .is_ok()
+        );
+    }
 }

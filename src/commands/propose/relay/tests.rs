@@ -1,4 +1,4 @@
-mod rpc;
+pub(crate) mod rpc;
 
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use alloy::{
 };
 use serde_json::{Value, json};
 
-use super::relay_with_provider;
+use super::{Approval, relay_with_provider};
 use crate::commands::propose::{
     helpers,
     test_support::config,
@@ -19,8 +19,20 @@ use crate::evm::AxelarServiceGovernance;
 use crate::http::tests::{response, serve};
 
 async fn resume(ptype: ProposalType, consumed: bool, pending: bool) -> Vec<Value> {
-    let edge = rpc::serve(consumed, pending).await;
+    resume_on(rpc::Route::Amplifier, ptype, consumed, pending).await
+}
+
+async fn resume_on(
+    route: rpc::Route,
+    ptype: ProposalType,
+    consumed: bool,
+    pending: bool,
+) -> Vec<Value> {
+    let edge = rpc::serve(route, consumed, pending).await;
     let mut cfg = config(String::new());
+    if route == rpc::Route::Consensus {
+        cfg.multisig_prover = None;
+    }
     cfg.edge_rpc = edge.url.clone();
     let target = Address::from([4; 20]);
     let calldata: Bytes = vec![1, 2, 3].into();
@@ -61,13 +73,20 @@ async fn resume(ptype: ProposalType, consumed: bool, pending: bool) -> Vec<Value
     let time = chrono::DateTime::parse_from_rfc3339("2026-09-29T16:03:24Z").unwrap();
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        relay_with_provider(&cfg, &asg, &plan, time, || {
-            // No signer or environment keys. Record real RPC requests against the local fixture.
-            let provider = ProviderBuilder::new()
-                .disable_recommended_fillers()
-                .connect_http(edge.url.parse().unwrap());
-            Ok((provider, operator))
-        }),
+        relay_with_provider(
+            &cfg,
+            &asg,
+            &plan,
+            time,
+            || {
+                // No signer or environment keys. Record real RPC requests against the local fixture.
+                let provider = ProviderBuilder::new()
+                    .disable_recommended_fillers()
+                    .connect_http(edge.url.parse().unwrap());
+                Ok((provider, operator))
+            },
+            Approval::Automatic,
+        ),
     )
     .await;
     let requests = tokio::time::timeout(Duration::from_secs(2), edge.finish())
@@ -161,4 +180,33 @@ async fn completed_timelock_sends_no_transactions() {
             .iter()
             .all(|request| request["method"] == "eth_call")
     );
+}
+
+#[tokio::test]
+async fn consensus_relay_consumes_the_validators_approval_then_executes() {
+    let requests = resume_on(rpc::Route::Consensus, ProposalType::Operator, false, false).await;
+    assert!(
+        requests
+            .iter()
+            .any(|request| request["method"] == "eth_getLogs")
+    );
+    let calls = sent_calls(&requests);
+    assert_eq!(calls.len(), 2);
+    let consume = AxelarServiceGovernance::executeCall::abi_decode(&calls[0]).unwrap();
+    assert_eq!(consume.commandId, rpc::CONSENSUS_COMMAND_ID);
+    assert_eq!(consume.sourceChain, "axelar");
+    assert_eq!(consume.sourceAddress, "axelar1gov");
+    assert_eq!(
+        consume.payload,
+        helpers::encode_governance_payload(2, Address::from([4; 20]), vec![1, 2, 3].into(), 0)
+    );
+    let execution =
+        AxelarServiceGovernance::executeOperatorProposalCall::abi_decode(&calls[1]).unwrap();
+    assert_eq!(execution.target, Address::from([4; 20]));
+}
+
+#[tokio::test]
+async fn consensus_relay_with_nothing_pending_is_read_only() {
+    let requests = resume_on(rpc::Route::Consensus, ProposalType::Operator, true, false).await;
+    assert!(sent_calls(&requests).is_empty());
 }

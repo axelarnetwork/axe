@@ -107,7 +107,7 @@ runs:
         CHAIN_MAP=$(cat <<'EOF'
         {
           "Arbitrum":    {"mainnet": "arbitrum",   "testnet": "arbitrum-sepolia", "stagenet": "arbitrum-sepolia"},
-          "Arc":         {"testnet": "arc-8", "devnet-amplifier": "arc-2"},
+          "Arc":         {"mainnet": "arc", "testnet": "arc-8", "devnet-amplifier": "arc-2"},
           "Core Avalanche": {"devnet-amplifier": "core-avalanche"},
           "Core Ethereum":  {"devnet-amplifier": "core-ethereum"},
           "Core Optimism":  {"devnet-amplifier": "core-optimism"},

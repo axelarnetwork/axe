@@ -103,6 +103,34 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Make a chain's ITS trust every live chain on the ITS Hub, signed by
+    /// the ITS owner. The reverse direction (other chains trusting it) is
+    /// `axe propose --op set-trusted --its-chain <chain> --chains all`.
+    ItsTrust {
+        /// Axelar network (testnet, mainnet)
+        network: Network,
+        /// Chain whose ITS to manage: config key or axelar ID (e.g. arc)
+        chain: String,
+        /// Hub chains to leave untrusted, comma-separated, in the hub's spelling
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
+        /// Send the owner's multicall for the chains not trusted yet, after a
+        /// y/N review of the full calldata. Without it the command only reports.
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Deploy service governance or hand gateway/ITS ownership to it
+    Asg {
+        /// Axelar network (testnet, mainnet)
+        network: Network,
+        /// Chain whose service governance to manage (e.g. arc)
+        chain: String,
+        /// Deploy service governance or hand gateway/ITS ownership to it
+        #[command(subcommand)]
+        action: crate::commands::its_asg::types::AsgAction,
+    },
+
     /// Pre-flight check: verify each chain's wallet has the minimum native
     /// balance needed by the cron amplifier-routes load tests. Fails the
     /// process if any wallet is underfunded.

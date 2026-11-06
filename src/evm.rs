@@ -1,5 +1,7 @@
 pub mod artifact;
 pub mod finality;
+pub mod its_trust;
+pub mod legacy_gateway;
 pub mod pipeline;
 pub mod rpc_retry;
 
@@ -917,6 +919,8 @@ sol! {
         function tokenManagerType(bytes32 tokenId) external view returns (uint8);
         function isTrustedChain(string calldata chainName) external view returns (bool);
         function itsHubAddress() external view returns (string memory);
+        /// `Multicall`: several calls from the owner in one transaction.
+        function multicall(bytes[] calldata data) external payable returns (bytes[] memory results);
         /// Legacy ITS trust API. Returns the trusted address for a chain — for
         /// hub-routed chains this is the literal string "hub". For "axelar"
         /// this returns the actual hub's bech32 address. Reverts if not set.

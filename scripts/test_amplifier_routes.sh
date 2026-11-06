@@ -73,7 +73,7 @@ mkdir -p "$RESULTS_DIR"
 CHAIN_MAP=$(cat <<'EOF'
 {
   "Arbitrum":    {"mainnet": "arbitrum",   "testnet": "arbitrum-sepolia", "stagenet": "arbitrum-sepolia"},
-  "Arc":         {"testnet": "arc-8", "devnet-amplifier": "arc-2"},
+  "Arc":         {"mainnet": "arc", "testnet": "arc-8", "devnet-amplifier": "arc-2"},
   "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche",  "devnet-amplifier": "avalanche-fuji"},
   "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
   "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia"},
@@ -193,6 +193,7 @@ EOF
 )
         ;;
     mainnet/its)
+        # Arc sends to Solana, where it is already trusted.
         # Mainnet ITS fleet — mirrors MATRIX_MAINNET_ITS in
         # .github/workflows/test-amplifier-routes.yml. Four pairs picked so
         # each of the 8 chains is exercised as both source and destination
@@ -203,6 +204,7 @@ EOF
         # interchainTransfers.
         FLEET=$(cat <<'EOF'
 [
+  {"name":"Arc -> Solana","src":"Arc","dst":"Solana"},
   {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM"},
   {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL"},
   {"name":"Hyperliquid -> Stellar","src":"Hyperliquid","dst":"Stellar"},

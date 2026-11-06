@@ -85,7 +85,7 @@ pub(super) fn proposal(state: &State, id: u64, voting_end: Option<&str>) {
     show(&lines);
 }
 
-pub(super) fn proposal_actions(network: Network, id: u64) -> Vec<String> {
+pub(crate) fn proposal_actions(network: Network, id: u64) -> Vec<String> {
     let mut lines = vec![format!(
         "Vote on proposal {id} on {network} if you have not already voted."
     )];
