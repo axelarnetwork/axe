@@ -114,6 +114,7 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
 /// one ASG call per chain, every ASG checked on-chain, one operator across
 /// all of them, and every destination name known to the hub's routers.
 async fn build_plan(args: &ProposeArgs, config: &ChainsConfig) -> Result<ProposalPlan> {
+    let trusted_chain = targets::trusted_chain(args, config).await?;
     let targets = targets::select(args, config).await?;
     if targets.len() > 1 {
         eyre::ensure!(
@@ -131,7 +132,7 @@ async fn build_plan(args: &ProposeArgs, config: &ChainsConfig) -> Result<Proposa
             target.chain,
             args.proposal_type.label()
         ));
-        match resolve_call(args, target).await {
+        match resolve_call(args, target, trusted_chain.as_deref()).await {
             Ok((call, label)) => {
                 action_label = label;
                 calls.push(call);
@@ -154,8 +155,12 @@ async fn build_plan(args: &ProposeArgs, config: &ChainsConfig) -> Result<Proposa
 }
 
 /// One chain's call: the inner `(target, calldata)` and its verified ASG.
-async fn resolve_call(args: &ProposeArgs, target: &targets::Target) -> Result<(EdgeCall, String)> {
-    let (target_addr, calldata, label) = resolve_action(args, &target.cfg).await?;
+async fn resolve_call(
+    args: &ProposeArgs,
+    target: &targets::Target,
+    trusted_chain: Option<&str>,
+) -> Result<(EdgeCall, String)> {
+    let (target_addr, calldata, label) = resolve_action(args, &target.cfg, trusted_chain).await?;
     let asg = verify(&target.cfg).await?;
     let mut cfg = target.cfg.clone();
     cfg.mnemonic_env.clone_from(&args.mnemonic_env);
@@ -410,6 +415,7 @@ fn proposal_description(plan: &ProposalPlan) -> String {
 async fn resolve_action(
     args: &ProposeArgs,
     cfg: &ResolvedConfig,
+    trusted_chain: Option<&str>,
 ) -> Result<(Address, Bytes, String)> {
     if let Some(op) = args.op {
         let trust_api = if helpers::needs_trust_api(op) {
@@ -422,9 +428,8 @@ async fn resolve_action(
         } else {
             helpers::TrustApi::TrustedChain
         };
-        let (target, calldata) =
-            helpers::build_call(op, cfg, args.its_chain.as_deref(), trust_api)?;
-        let label = match (op, args.its_chain.as_deref()) {
+        let (target, calldata) = helpers::build_call(op, cfg, trusted_chain, trust_api)?;
+        let label = match (op, trusted_chain) {
             (Operation::SetTrusted | Operation::RemoveTrusted, Some(chain)) => {
                 format!("{} for {chain}", op.label())
             }

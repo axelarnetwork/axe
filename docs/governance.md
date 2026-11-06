@@ -13,6 +13,12 @@ axe propose testnet avalanche --op unpause --relay
 # time-lock instead of the operator fast-path
 axe propose testnet avalanche --op pause --type timelock --relay
 
+# one proposal to make every eligible edge chain trust the hub's Ethereum entry
+axe propose mainnet --op set-trusted --its-chain ethereum --chains all --confirm-mainnet
+
+# explicit destinations, or use --skip <a,b> to exclude keys from --chains all
+axe propose testnet --op set-trusted --its-chain solana --chains avalanche,flow --relay
+
 # any other call — pass the target and abi-encoded calldata directly
 axe propose testnet avalanche \
   --target 0xB5FB4BE02232B1bBA4dC8f81dc24C26980dE9e3C \
@@ -70,10 +76,29 @@ directory. It cannot coordinate different machines or data directories.
 | `remove-trusted` | ITS     | `removeTrustedChain(--its-chain)` |
 | `its-pause`      | ITS     | `setPauseStatus(true)`            |
 
-The ITS ops assume the **hub-model** ITS (`setTrustedChain`/`setPauseStatus`);
-for a legacy ITS (e.g. v2.1.1's `setTrustedAddress`), pass the call directly
-with `--target` and `--calldata`. Omitting `--op` requires both `--target` and
-`--calldata`.
+Trust operations resolve `--its-chain` against the live ITS Hub registry,
+case-insensitively, and encode the registry's exact spelling (for example,
+`ethereum` becomes `Ethereum` on mainnet). Unknown or ambiguous names stop
+proposal preparation. Each edge ITS is probed for its trust API: ITS 2.2 uses
+`setTrustedChain`/`removeTrustedChain`; ITS 2.1 uses
+`setTrustedAddress(chain, "hub")`/`removeTrustedAddress`. Only an explicit
+contract revert permits the legacy probe; transport, RPC and decoding failures
+stop preparation. Omitting `--op` requires both `--target` and `--calldata`.
+
+### Multi-chain proposals
+
+`--chains all` starts from the live ITS Hub registry and excludes frozen,
+deprecated, non-EVM and unconfigured chains, the chain being trusted, and any
+config keys named by `--skip`. `--chains a,b` selects explicit config keys.
+Each selected edge is verified before submitting one Cosmos proposal containing
+one governance call per edge. Raw calldata is single-chain only.
+
+When the plan has more than one edge, all ASGs must share one operator and
+`EVM_GOVERNANCE_OPERATOR_KEY` must derive that operator's address, even without
+`--relay` or with `--type timelock`. A missing or mismatched key stops preparation.
+Each destination's exact routing name is checked against the amplifier Router
+or consensus nexus registry. With `--relay`, amplifier chains use proof
+construction and consensus chains wait for validator approval before execution.
 
 ### Flags & defaults
 
@@ -81,14 +106,21 @@ with `--target` and `--calldata`. Omitting `--op` requires both `--target` and
 | ------------------- | -------------------- | ----------------------------------------------------------- |
 | `--type`            | `operator`           | `operator` fast-path or `timelock`                          |
 | `--relay`           | off                  | relay to the edge chain + execute after the vote passes     |
+| `--chains <all\|a,b>` | -                  | select destinations instead of the positional chain; multiple edges require `--op` |
+| `--skip <a,b>`      | -                    | config keys to exclude from `--chains all`                  |
 | `--mnemonic-env <name>` | `MNEMONIC`       | select the mnemonic variable for Cosmos proposal and relay proof signing |
 | `--proposal-id <id>`| auto-discover        | resume a matching existing proposal; never submit           |
 | `--new-proposal`    | off                  | intentionally submit again instead of recovering history    |
 | `--standard`        | off (expedited)      | submit a standard (1h) gov proposal instead of expedited    |
 | `--eta <unix>`      | now + ASG delay + 5m | time-lock activation time                                   |
-| `--its-chain <x>`   | -                    | required for `set-trusted`/`remove-trusted`                 |
-| `--y` / `--yes`     | off                  | skip the confirmation prompt                                |
+| `--its-chain <x>`   | -                    | required for trust operations; resolved to the hub registry's exact spelling |
+| `--y` / `--yes`     | off                  | skip submission confirmation off mainnet; ignored on mainnet |
 | `--confirm-mainnet` | off                  | required to run against mainnet (otherwise refused)         |
+
+Mainnet always requires interactive review and approval; redirected stdin and
+`--y` cannot bypass it. Agents must also obtain explicit user approval of the
+exact final title, description, metadata and complete payload before signing
+or submitting a proposal on any network, as required by `AGENTS.md`.
 
 Env: `MNEMONIC` — any funded Axelar account (pays the deposit, refunded on
 pass); `EVM_GOVERNANCE_OPERATOR_KEY` (preferred) or `EVM_PRIVATE_KEY` — the

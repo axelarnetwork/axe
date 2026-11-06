@@ -105,7 +105,7 @@ pub struct ProposeArgs {
     /// Raw target address for `--calldata`.
     #[arg(long)]
     pub target: Option<String>,
-    /// ITS chain name, for `set-trusted`/`remove-trusted`.
+    /// ITS Hub chain name, resolved to exact registry spelling for trust operations.
     #[arg(long)]
     pub its_chain: Option<String>,
     /// Proposal type: `operator` (fast-path, default) or `timelock`.
@@ -129,7 +129,7 @@ pub struct ProposeArgs {
     /// Required to run against mainnet (giga-gated).
     #[arg(long)]
     pub confirm_mainnet: bool,
-    /// Skip the confirmation prompt before submitting.
+    /// Skip submission confirmation off mainnet. Ignored on mainnet.
     #[arg(long = "y", alias = "yes")]
     pub yes: bool,
 }

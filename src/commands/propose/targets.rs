@@ -44,6 +44,33 @@ pub struct Target {
     pub cfg: ResolvedConfig,
 }
 
+/// Resolve trust names before any calldata or proposal labels are built.
+pub async fn trusted_chain(args: &ProposeArgs, config: &ChainsConfig) -> Result<Option<String>> {
+    if !args.op.is_some_and(helpers::needs_trust_api) {
+        return Ok(None);
+    }
+    let name = args
+        .its_chain
+        .as_deref()
+        .ok_or_else(|| eyre::eyre!("trust operations require --its-chain"))?;
+    let registry = its_hub::registered_chains(config).await?;
+    Ok(Some(canonical_trust_name(&registry, name)?.to_string()))
+}
+
+fn canonical_trust_name<'a>(registry: &'a [RegisteredChain], name: &str) -> Result<&'a str> {
+    let mut matches = registry
+        .iter()
+        .filter(|entry| entry.chain.eq_ignore_ascii_case(name));
+    let entry = matches
+        .next()
+        .ok_or_else(|| eyre::eyre!("--its-chain '{name}' is not registered on the ITS Hub"))?;
+    eyre::ensure!(
+        matches.next().is_none(),
+        "--its-chain '{name}' is ambiguous in the ITS Hub registry"
+    );
+    Ok(&entry.chain)
+}
+
 /// Resolve the chain(s) named on the command line into verified targets.
 pub async fn select(args: &ProposeArgs, config: &ChainsConfig) -> Result<Vec<Target>> {
     match (&args.chain, args.chains.as_slice()) {
@@ -328,5 +355,22 @@ mod tests {
         let registry = vec![hub("Moonbeam", false)];
         let (candidates, _) = classify(&registry, &config(), Network::Testnet, &[], "arc");
         assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn trust_names_use_exact_hub_spelling_and_reject_unknown_or_ambiguous_names() {
+        let registry = vec![hub("Ethereum", false), hub("arc", false)];
+        for name in ["ethereum", "ETHEREUM", "Ethereum"] {
+            assert_eq!(canonical_trust_name(&registry, name).unwrap(), "Ethereum");
+        }
+        assert!(canonical_trust_name(&registry, "etherum").is_err());
+        assert!(canonical_trust_name(&registry, "").is_err());
+        assert!(
+            canonical_trust_name(
+                &[hub("Ethereum", false), hub("ethereum", false)],
+                "ethereum"
+            )
+            .is_err()
+        );
     }
 }
