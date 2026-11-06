@@ -47,7 +47,7 @@ use crate::ui;
 
 use funding_types::ProposalFunding;
 use helpers::AsgInfo;
-use types::{EdgeCall, ProposalPlan, ProposalType, ResolvedConfig};
+use types::{EdgeCall, Operation, ProposalPlan, ProposalType, ResolvedConfig};
 
 pub use types::ProposeArgs;
 
@@ -424,7 +424,13 @@ async fn resolve_action(
         };
         let (target, calldata) =
             helpers::build_call(op, cfg, args.its_chain.as_deref(), trust_api)?;
-        return Ok((target, calldata, op.label().to_string()));
+        let label = match (op, args.its_chain.as_deref()) {
+            (Operation::SetTrusted | Operation::RemoveTrusted, Some(chain)) => {
+                format!("{} for {chain}", op.label())
+            }
+            _ => op.label().to_string(),
+        };
+        return Ok((target, calldata, label));
     }
 
     let calldata_hex = args
