@@ -14,7 +14,7 @@ const SDK: &str = "node_modules/@axelar-network/axelar-gmp-sdk-solidity/artifact
 pub fn settings(network: Network) -> Result<Settings> {
     match network {
         Network::Mainnet => Ok(Settings {
-            deployer: address!("ba76c6980428A0b10CFC5d8ccb61949677A61233"),
+            deployer: address!("B1209B087e544785138784A50933d163A9087a7D"),
             salt: "v6.0.4-axelar",
             legacy_asg: address!("7Acbae6CBa67d78AAf69e47000884aE00F9B2525"),
             operator: address!("c8a8399c3D1207f4e109673be7047604737c1D56"),

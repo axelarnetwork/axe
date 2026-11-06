@@ -6,6 +6,7 @@ mod deploy;
 mod existing;
 mod factory;
 mod handoff;
+mod retirement;
 mod rpc;
 mod signing;
 mod transactions;

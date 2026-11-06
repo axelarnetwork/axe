@@ -28,8 +28,29 @@ fn retryable(error: &TransportError) -> bool {
 /// Retry the same serialized RPC request, including identical signed tx bytes.
 /// Never retry a contract call builder that could select a fresh nonce.
 pub fn client(url: &str) -> Result<RpcClient> {
-    let policy = RateLimitRetryPolicy::default().or(|error| {
-        let retry = retryable(error);
+    build_client(url, false)
+}
+
+/// Also retry an unavailable RPC block, without changing the requested block.
+/// Opt-in for governance. Existing deployment clients are unchanged.
+pub fn client_with_block_retries(url: &str) -> Result<RpcClient> {
+    build_client(url, true)
+}
+
+fn unavailable_block(error: &TransportError) -> bool {
+    error.as_error_resp().is_some_and(|error| {
+        error.code == -32000
+            && error.data.is_none()
+            && (error.message.eq_ignore_ascii_case("unknown block number")
+                || error.message.ends_with(
+                    "Error occurred during transaction simulation: Unknown block number",
+                ))
+    })
+}
+
+fn build_client(url: &str, retry_blocks: bool) -> Result<RpcClient> {
+    let policy = RateLimitRetryPolicy::default().or(move |error| {
+        let retry = retryable(error) || (retry_blocks && unavailable_block(error));
         if retry {
             ui::warn(&format!(
                 "temporary EVM RPC failure, retrying the same request: {}",

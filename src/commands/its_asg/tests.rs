@@ -74,7 +74,7 @@ fn deployment_requires_the_networks_established_sender_and_salt() {
     );
     assert_eq!(
         mainnet.deployer.to_checksum(None),
-        "0xba76c6980428A0b10CFC5d8ccb61949677A61233"
+        "0xB1209B087e544785138784A50933d163A9087a7D"
     );
     assert_eq!(testnet.salt, "v6.1.0");
     assert_eq!(mainnet.salt, "v6.0.4-axelar");
@@ -100,6 +100,18 @@ fn deployment_requires_the_networks_established_sender_and_salt() {
         signing::key_variable(TransactionAction::Handoff(testnet.legacy_asg)),
         "ASG_PRIVATE_KEY"
     );
+}
+
+#[test]
+fn compromised_former_mainnet_deployer_is_rejected() {
+    let compromised: Address = "0xba76c6980428A0b10CFC5d8ccb61949677A61233"
+        .parse()
+        .unwrap();
+    for network in [Network::Mainnet, Network::Testnet] {
+        let policy = config::settings(network).unwrap();
+        let error = deploy::validate_inputs(&policy, compromised, Some(policy.salt)).unwrap_err();
+        assert!(error.to_string().contains(&policy.deployer.to_string()));
+    }
 }
 
 #[tokio::test]

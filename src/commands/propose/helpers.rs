@@ -27,8 +27,8 @@ pub use its_trust::TrustApi;
 /// transient transport failures. Verification fires a burst of calls per
 /// chain at public endpoints, and one 429 must not void the whole plan.
 pub fn edge_provider(rpc: &str) -> Result<impl Provider> {
-    let client =
-        crate::evm::rpc_retry::client(rpc).wrap_err_with(|| format!("invalid rpc url '{rpc}'"))?;
+    let client = crate::evm::rpc_retry::client_with_block_retries(rpc)
+        .wrap_err_with(|| format!("invalid rpc url '{rpc}'"))?;
     Ok(ProviderBuilder::new().connect_client(client))
 }
 

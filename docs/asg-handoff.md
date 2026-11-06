@@ -38,13 +38,19 @@ Load keys from a secure location outside the repository or the existing ignored
 
 | Setting | Testnet | Mainnet |
 | --- | --- | --- |
-| ASG deployer | `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC` | `0xba76c6980428A0b10CFC5d8ccb61949677A61233` |
+| ASG deployer | `0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC` | `0xB1209B087e544785138784A50933d163A9087a7D` |
 | CREATE3 salt key | `v6.1.0` | `v6.0.4-axelar` |
 | Existing shared ASG (discovery only) | `0xb55A09E9fde39755c39EF9A7911431Ba0c96332A` | `0x7Acbae6CBa67d78AAf69e47000884aE00F9B2525` |
 | ASG operator | `0x6e079CD1c6bBb72680DeDF2687d711AE9427eE8e` | `0xc8a8399c3D1207f4e109673be7047604737c1D56` |
 | Minimum timelock | 300 seconds | 259200 seconds |
 | Governance chain | `axelar` | `axelar` |
 | Governance address | `axelar10d07y265gmmuvt4z0w9aw880jnsr700j7v9daj` | Same |
+
+The former mainnet deployer `0xba76c6980428A0b10CFC5d8ccb61949677A61233`
+was reported compromised and must not be used. New mainnet ASG deployments use
+the deployer recorded for Arc and Robinhood above. This changes predicted CREATE3
+addresses; regenerate previews before approving any deployment. Existing contract
+addresses and historical deployment provenance are not rewritten.
 
 The handoff transfers **gateway ownership and ITS ownership only**. The gateway
 operator and ITS operator roles remain unchanged. ASG's own operator is a

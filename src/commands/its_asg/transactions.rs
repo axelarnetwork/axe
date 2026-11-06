@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy::consensus::{Transaction, TxEnvelope};
 use alloy::eips::{Decodable2718, Encodable2718};
@@ -71,8 +71,7 @@ pub async fn send<P: Provider>(
     let path = journal_path(request)?;
     let _lock = storage::lock(&path.with_extension("lock"))?;
     if path.exists() {
-        let saved: SavedTransaction = serde_json::from_slice(&std::fs::read(&path)?)?;
-        return resume(provider, ctx, request, &saved, action).await;
+        return recover_existing(provider, ctx, request, action, &path).await;
     }
     let signer = signing::sender(from, action)?;
     provider
@@ -81,6 +80,10 @@ pub async fn send<P: Provider>(
         .wrap_err("transaction simulation failed")?;
     let mut prepared = request.clone();
     prepared.nonce = Some(provider.get_transaction_count(from).pending().await?);
+    ensure!(
+        Some(provider.get_transaction_count(from).await?) == prepared.nonce,
+        "sender has pending transactions; reconcile them before ASG deployment or handoff"
+    );
     prepared.gas = Some(
         provider
             .estimate_gas(prepared.clone())
@@ -131,6 +134,32 @@ pub async fn send<P: Provider>(
     validate(request, &saved)?;
     storage::atomic_write(&path, &serde_json::to_vec_pretty(&saved)?)?;
     broadcast(provider, &saved.raw, action).await
+}
+
+async fn recover_existing<P: Provider>(
+    provider: &P,
+    ctx: &Context,
+    request: &TransactionRequest,
+    action: TransactionAction,
+    path: &Path,
+) -> Result<TransactionReceipt> {
+    let saved: SavedTransaction = serde_json::from_slice(&std::fs::read(path)?)?;
+    ensure!(
+        saved.request.chain_id == request.chain_id
+            && saved.request.from == request.from
+            && saved.request.to == request.to,
+        "ASG journal network/sender/target mismatch"
+    );
+    validate(&saved.request, &saved)?;
+    if let Some(evidence) =
+        super::retirement::evm_terminal(provider, &saved.request, &saved.raw).await?
+    {
+        super::retirement::archive(path, &evidence).await?;
+        eyre::bail!(
+            "recorded ASG action retired; rerun to re-read deployment/ownership before any replacement"
+        );
+    }
+    resume(provider, ctx, request, &saved, action).await
 }
 
 pub(super) fn validate(

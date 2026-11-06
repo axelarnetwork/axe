@@ -6,6 +6,7 @@
 //! each GMP to its edge chain and executes it (operator fast-path or
 //! time-lock), see `relay.rs`.
 
+mod coverage;
 mod funding;
 mod funding_types;
 mod helpers;
@@ -75,6 +76,7 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
     let config_source = config_source::resolve(network, None).await?;
     let config = ChainsConfig::load(config_source.path()).await?;
     let plan = build_plan(&args, &config).await?;
+    let coverage_lock = coverage::lock(&plan)?;
 
     let existing = recovery::find(&plan, &args).await?;
     let (proposal_id, payloads) = if let Some((proposal, payloads)) = existing {
@@ -90,6 +92,7 @@ pub async fn run(args: ProposeArgs) -> Result<()> {
         };
         submitted
     };
+    drop(coverage_lock);
     ui::info("Rerun this command to resume; it will reuse the existing proposal.");
     let lcd = &plan.hub().lcd;
     monitor::wait_for_passed(lcd, proposal_id).await?;
@@ -235,6 +238,7 @@ async fn submit_new(
 ) -> Result<Option<(u64, Vec<Bytes>)>> {
     let marker = submission_guard::path(plan)?;
     submission_guard::check(&marker, args.new_proposal).await?;
+    coverage::check(plan, args.new_proposal).await?;
     for call in &plan.calls {
         helpers::check_not_already_proposed(
             &call.cfg,
@@ -373,6 +377,7 @@ async fn submit(
     let submission = funding::submission(funding, proposal)?;
 
     submission_guard::claim(marker, args.new_proposal).await?;
+    coverage::claim(plan, args.new_proposal).await?;
     let tx_resp = sign_and_broadcast_cosmos_tx(
         signing_key,
         funding.signer().as_ref(),
