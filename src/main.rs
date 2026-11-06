@@ -378,18 +378,12 @@ async fn run_cli() -> Result<()> {
             chain,
             skip,
             apply,
+        } => commands::its_trust::run(network, &chain, &skip, apply).await,
+        cli::Commands::Asg {
+            network,
+            chain,
             action,
-        } => {
-            if let Some(action) = action {
-                eyre::ensure!(
-                    skip.is_empty() && !apply,
-                    "put --apply after the ASG subcommand, and omit --skip"
-                );
-                commands::its_asg::run(network, &chain, &action).await
-            } else {
-                commands::its_trust::run(network, &chain, &skip, apply).await
-            }
-        }
+        } => commands::its_asg::run(network, &chain, &action).await,
         cli::Commands::CheckBalances { network } => {
             let network = cli::network_or_default(network, cli.network)?;
             commands::check_balances::run(network).await

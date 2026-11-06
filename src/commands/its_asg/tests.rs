@@ -239,18 +239,14 @@ fn original_its_trust_cli_is_preserved_and_asg_requires_an_explicit_sender() {
     .unwrap();
     assert!(matches!(
         cli.command,
-        Commands::ItsTrust {
-            action: None,
-            apply: true,
-            ..
-        }
+        Commands::ItsTrust { apply: true, .. }
     ));
     for command in ["deploy-asg", "handoff-asg"] {
-        assert!(Cli::try_parse_from(["axe", "its-trust", "mainnet", "arc", command]).is_err());
+        assert!(Cli::try_parse_from(["axe", "asg", "mainnet", "arc", command]).is_err());
         let from = Address::repeat_byte(5).to_string();
         let cli = Cli::try_parse_from([
             "axe",
-            "its-trust",
+            "asg",
             "mainnet",
             "arc",
             command,
@@ -260,16 +256,15 @@ fn original_its_trust_cli_is_preserved_and_asg_requires_an_explicit_sender() {
             "--confirm-mainnet",
         ])
         .unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::ItsTrust {
-                action: Some(_),
-                apply: false,
-                ..
-            }
-        ));
+        assert!(matches!(cli.command, Commands::Asg { .. }));
         assert!(
             Cli::try_parse_from([
+                "axe", "asg", "mainnet", "arc", command, "--from", &from, "--yes"
+            ])
+            .is_err()
+        );
+        for arguments in [
+            vec![
                 "axe",
                 "its-trust",
                 "mainnet",
@@ -277,11 +272,18 @@ fn original_its_trust_cli_is_preserved_and_asg_requires_an_explicit_sender() {
                 command,
                 "--from",
                 &from,
-                "--yes"
-            ])
-            .is_err()
-        );
+            ],
+            vec![
+                "axe", "asg", "mainnet", "arc", "--apply", command, "--from", &from,
+            ],
+            vec![
+                "axe", "asg", "mainnet", "arc", command, "--from", &from, "--skip", "solana",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
     }
+    assert!(Cli::try_parse_from(["axe", "asg", "testnet", "arc"]).is_err());
 }
 
 fn signed_handoff() -> (TransactionRequest, SavedTransaction) {

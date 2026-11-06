@@ -1,23 +1,23 @@
 # Service governance deployment and ownership handoff
 
-`its-trust` has two additional subcommands for amplifier EVM chains. They are
+`axe asg` has two subcommands for amplifier EVM chains. They are
 separate from the existing `deploy` stages and do not change their behavior.
 Both commands preview by default, without loading a signing key or writing
 configuration. They require a local `axelar-contract-deployments` checkout.
 
 ```bash
 # Preview the CREATE3 deployment, including complete constructor calldata.
-axe its-trust testnet robinhood deploy-asg --from <deployer-address>
+axe asg testnet robinhood deploy-asg --from <deployer-address>
 
 # Apply after reviewing the full transaction and explicitly answering y.
 # Load ASG_DEPLOYER_PRIVATE_KEY from a secure location outside the repository.
-axe its-trust testnet robinhood deploy-asg --from <deployer-address> --apply
+axe asg testnet robinhood deploy-asg --from <deployer-address> --apply
 
 # Preview both ownership transfers and the operational roles being retained.
-axe its-trust testnet robinhood handoff-asg --from <current-owner-address>
+axe asg testnet robinhood handoff-asg --from <current-owner-address>
 
 # Approve each ownership transaction separately.
-axe its-trust testnet robinhood handoff-asg --from <current-owner-address> --apply
+axe asg testnet robinhood handoff-asg --from <current-owner-address> --apply
 ```
 
 Mainnet writes additionally require `--confirm-mainnet`. There is no `--yes`
@@ -154,8 +154,18 @@ A sender/chain lock spans nonce selection, signing, broadcast and confirmation w
 including recovery. This serializes ASG sends across targets and config files
 using the same local data directory. External wallets and other machines must
 still avoid concurrent use of that sender.
-A reverted transaction or consumed nonce without its receipt stops recovery
-for investigation. Do not delete a journal merely because a send timed out.
+If a different call reaches the same sender/target journal, recovery first
+checks the saved transaction. A successful transaction can be retired only
+after its receipt has two confirmations and matches the canonical block.
+The command shows that evidence and asks to archive the record, then stops;
+rerun to re-read deployment/ownership and prepare the remaining work. The
+archive preserves the signed bytes and terminal evidence. Recovery of the
+original successful call still reuses its receipt.
+
+Confirmed reverts and nonces consumed at a confirmed block without an available
+receipt also offer evidence-based archival before a rerun. Pending transactions,
+RPC failures and unconfirmed or noncanonical receipts remain blocked. Do not
+delete a journal merely because a send timed out.
 
 Deployment and ownership transfers wait for two confirmations (the inclusion
 block plus one successor) and recheck the receipt and canonical inclusion block.
@@ -194,10 +204,10 @@ This per-chain address is the intended deployment. The old shared factory
 2. Preview, then deploy after reviewing the exact transaction:
 
    ```bash
-   ./target/release/axe its-trust testnet robinhood deploy-asg \
+   ./target/release/axe asg testnet robinhood deploy-asg \
      --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC
 
-   ./target/release/axe its-trust testnet robinhood deploy-asg \
+   ./target/release/axe asg testnet robinhood deploy-asg \
      --from 0x81e63eA8F64FEdB9858EB6E2176B431FBd10d1eC --apply
    ```
 
@@ -223,11 +233,11 @@ This per-chain address is the intended deployment. The old shared factory
    operator key set. Preview and then approve each ownership transfer:
 
    ```bash
-   ./target/release/axe its-trust testnet robinhood handoff-asg \
+   ./target/release/axe asg testnet robinhood handoff-asg \
      --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE \
      --rpc-url https://robinhood-testnet.drpc.org
 
-   ./target/release/axe its-trust testnet robinhood handoff-asg \
+   ./target/release/axe asg testnet robinhood handoff-asg \
      --from 0x49845e5d9985d8dc941462293ed38EEfF18B0eAE \
      --rpc-url https://robinhood-testnet.drpc.org --apply
    ```
