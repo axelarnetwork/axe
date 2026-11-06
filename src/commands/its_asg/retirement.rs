@@ -46,6 +46,7 @@ pub(super) async fn evm_terminal<P: Provider>(
     provider: &P,
     request: &TransactionRequest,
     raw: &[u8],
+    retire_success: bool,
 ) -> Result<Option<String>> {
     let hash = keccak256(raw);
     let mut receipt = provider.get_transaction_receipt(hash).await?;
@@ -74,12 +75,12 @@ pub(super) async fn evm_terminal<P: Provider>(
         }
     }
     let terminal = if let Some(receipt) = receipt {
-        if receipt.status() {
+        if receipt.status() && !retire_success {
             return Ok(None);
         }
         let block = receipt
             .block_number
-            .ok_or_else(|| eyre::eyre!("failed receipt has no block"))?;
+            .ok_or_else(|| eyre::eyre!("terminal receipt has no block"))?;
         let header = provider
             .get_block_by_number(alloy::eips::BlockNumberOrTag::Number(block))
             .await?
@@ -88,9 +89,14 @@ pub(super) async fn evm_terminal<P: Provider>(
             receipt.transaction_hash == hash
                 && Some(header.header.hash) == receipt.block_hash
                 && provider.get_block_number().await? >= block.saturating_add(1),
-            "failed receipt is not canonically confirmed"
+            "terminal receipt is not canonically confirmed"
         );
-        format!("{hash} reverted in canonical block {block}")
+        let outcome = if receipt.status() {
+            "succeeded"
+        } else {
+            "reverted"
+        };
+        format!("{hash} {outcome} in canonical block {block}")
     } else {
         let from = request
             .from

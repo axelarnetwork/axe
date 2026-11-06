@@ -151,8 +151,12 @@ async fn recover_existing<P: Provider>(
         "ASG journal network/sender/target mismatch"
     );
     validate(&saved.request, &saved)?;
+    // A confirmed successful send is reusable for its original intent, but must
+    // be archived before a different call can use this sender/target journal.
+    let changed_intent = validate(request, &saved).is_err();
     if let Some(evidence) =
-        super::retirement::evm_terminal(provider, &saved.request, &saved.raw).await?
+        super::retirement::evm_terminal(provider, &saved.request, &saved.raw, changed_intent)
+            .await?
     {
         super::retirement::archive(path, &evidence).await?;
         eyre::bail!(

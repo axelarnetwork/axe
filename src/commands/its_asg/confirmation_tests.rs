@@ -1,10 +1,10 @@
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256};
-use alloy::rpc::types::{Block, Transaction, TransactionReceipt};
+use alloy::primitives::{Address, B256, keccak256};
+use alloy::rpc::types::{Block, Transaction, TransactionReceipt, TransactionRequest};
 use serde_json::{Value, json};
 
-use super::{confirmations, types::TransactionAction};
+use super::{confirmations, retirement, types::TransactionAction};
 use crate::evm::{connect_evm, test_rpc::serve};
 
 fn receipt() -> TransactionReceipt {
@@ -141,4 +141,74 @@ async fn observation_uses_confirmed_hash_and_detects_reorg_during_verification()
     let calls = server.await.unwrap();
     assert_eq!(calls[1]["params"], json!(["0xa", false]));
     assert_eq!(calls[2]["params"], json!(["0xa", false]));
+}
+
+#[tokio::test]
+async fn successful_journal_can_retire_for_new_intent_only_after_canonical_confirmation() {
+    let raw = b"previous signed transaction";
+    let mut receipt = receipt();
+    receipt.transaction_hash = keccak256(raw);
+    for (head, hash, confirmed) in [
+        (11, receipt.block_hash.unwrap(), true),
+        (10, receipt.block_hash.unwrap(), false),
+        (11, B256::repeat_byte(9), false),
+    ] {
+        let mut responses = vec![
+            Some(json!({"result":receipt})),
+            Some(json!({"result":block(10, hash)})),
+        ];
+        // A wrong block hash short-circuits before reading the head.
+        if hash == receipt.block_hash.unwrap() {
+            responses.push(Some(json!({"result":format!("0x{head:x}")})));
+        }
+        let (url, server) = serve(responses).await;
+        let provider = connect_evm(&[url]).unwrap();
+        let result =
+            retirement::evm_terminal(&provider, &TransactionRequest::default(), raw, true).await;
+        if confirmed {
+            assert!(
+                result
+                    .unwrap()
+                    .unwrap()
+                    .contains("succeeded in canonical block 10")
+            );
+        } else {
+            assert!(result.is_err());
+        }
+        assert!(
+            server
+                .await
+                .unwrap()
+                .iter()
+                .all(|call| call["method"] != "eth_sendRawTransaction")
+        );
+    }
+    let (url, server) = serve(vec![Some(json!({"result":receipt}))]).await;
+    let provider = connect_evm(&[url]).unwrap();
+    assert!(
+        retirement::evm_terminal(&provider, &TransactionRequest::default(), raw, false)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(server.await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unresolved_journal_is_not_retired_for_a_new_intent() {
+    let (url, server) = serve(vec![
+        Some(json!({"result":null})),
+        Some(json!({"result":"0xb"})),
+        Some(json!({"result":"0x7"})),
+    ])
+    .await;
+    let provider = connect_evm(&[url]).unwrap();
+    let request = TransactionRequest::default().from(Address::ZERO).nonce(7);
+    assert!(
+        retirement::evm_terminal(&provider, &request, b"pending signed bytes", true)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(server.await.unwrap().len(), 3);
 }
