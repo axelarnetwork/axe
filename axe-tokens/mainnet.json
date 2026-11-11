@@ -261,6 +261,15 @@
           "notes": "Canonical AXE v3 (home avalanche, deployer+minter 0x16A4E49030E2D07D1D58590533651b761841f316). One tokenId across the whole axe mainnet ITS route fleet; replaces v2 0xbe1d7843. Registered by manually executing receive_deploy_interchain_token<T>, which consumed the pre-published zero-supply unregistered (AXE,6) coin - the relayer PTB tried give_unregistered_coin first and hit EFieldAlreadyExists. axe reads objects.TokenId as the 32-byte Axelar tokenId."
         }
       }
+    },
+    "arc": {
+      "contracts": {
+        "AXE": {
+          "tokenId": "0xb2d19ee93c217a03305d7286ca896a7132c2e23a36cae0b63539e308b7987810",
+          "address": "0xF96F8A003e40D4537c25dC7f668E35aC24bF07f8",
+          "decimals": 18
+        }
+      }
     }
   }
 }
