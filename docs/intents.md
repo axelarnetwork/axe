@@ -52,6 +52,56 @@ testnet-only.
 Every spending command takes a per-wallet lock, so two of them cannot use the
 same wallet at once, whatever started them.
 
+## Route checks (`axe test rfq`)
+
+The RFQ API also quotes ITS and gateway transfers. `axe test rfq` checks one
+of those routes end to end: it requests an `EXACT_INPUT` quote, picks the
+first quote from the route's backend, sends every quoted action on the source
+chain in order, then polls `/rfq/v1/status` every 15 seconds until the
+transfer is `DONE`. `FAILED`, `NOT_FOUND`, `REFUNDED`, a reverted action, or
+the timeout (45 minutes by default) fail the command. A failed status poll is
+retried.
+
+```bash
+axe --network testnet test rfq --route its
+axe --network testnet test rfq --route gateway --source sepolia
+axe --network testnet test rfq --route solana --recipient <solana address>
+axe --network testnet test rfq --route native-wrap --dry-run --sender <address>
+```
+
+| Route | Source token | Destination | Accepted backends |
+|---|---|---|---|
+| `its` | wrapped native (WAVAX, or WETH from Ethereum) | the same token on the other EVM chain | `its` |
+| `native-wrap` | native AVAX or ETH, wrapped on the source | the wrapped token on the other EVM chain | `its` |
+| `gateway` | gateway USDC (aUSDC on testnet) | the same token on the other EVM chain | `gateway`, `gateway-express` |
+| `solana` | wrapped native | its Solana mint | `its` |
+
+`--source` is `avalanche` (Fuji on testnet, the default) or `ethereum`
+(Sepolia on testnet); `fuji` and `sepolia` are accepted too. The token
+addresses come from the network configs rfq-api resolves quotes against, for
+testnet and mainnet. Amounts are base units: 10^14 of the wrapped native token,
+or 1 USDC on the gateway route, unless `--amount` says otherwise.
+
+The key comes from `EVM_PRIVATE_KEY`, then `PRIVATE_KEY`, or `--private-key`.
+The recipient defaults to the sender, and on the `solana` route to the address
+of the `SOLANA_PRIVATE_KEY` keypair file (else `~/.config/solana/id.json`);
+without one, pass `--recipient`. When the wallet holds less of the wrapped
+native token than the amount, the `its` and `solana` routes wrap the
+difference first with the token's `deposit()`. The source RPC comes from the
+chains config, with the intent RPC overrides applied.
+
+`--dry-run` quotes, checks that every action is a transaction on the source
+chain from the sender, and prints the actions without sending anything. It
+needs only `--sender` or a key. `--json` prints a summary object on stdout
+(quote, backend, action transactions, last status, error) and moves progress
+to stderr.
+
+The `Test RFQ routes` workflow runs all four routes serially on testnet every
+6 hours, in the `intents-testnet` concurrency group because it shares the
+intents wallet. Mainnet runs only through a manual dispatch, which also picks
+the routes and the source chain. The step summary lists each route with ✓ or
+✗, and any failed route fails the run.
+
 ## Through MCP
 
 The same flows are tools on the MCP server, with three differences that follow

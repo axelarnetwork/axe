@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use alloy::hex;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
@@ -513,30 +513,51 @@ async fn execute_actions(
     let endpoints = EvmEndpoints::connect(std::slice::from_ref(&chain.rpc_url))?;
     let mut last_hash = None;
     for action in actions {
-        let request = action_request(action, signer.address(), &source.id.chain_id)?;
-        let receipt = send_tx_robust_with_warning(
+        let hash = submit_action(
             &endpoints,
             signer,
-            request,
+            &source.id.chain_id,
+            action,
             label,
-            RECEIPT_TIMEOUT,
             |message| feedback.warn(message),
         )
         .await?;
-        if !receipt.status() {
-            return Err(eyre!(
-                "{} action '{}' reverted in transaction {}",
-                label,
-                action.id,
-                receipt.transaction_hash
-            ));
-        }
-        last_hash = Some(receipt.transaction_hash.to_string());
+        last_hash = Some(hash.to_string());
     }
     Ok(last_hash)
 }
 
-fn action_request(
+/// Send one quoted action and wait for its receipt. A revert is an error.
+pub(super) async fn submit_action(
+    endpoints: &EvmEndpoints,
+    signer: &PrivateKeySigner,
+    chain_id: &str,
+    action: &Action,
+    label: &str,
+    on_warning: impl Fn(&str),
+) -> Result<TxHash> {
+    let request = action_request(action, signer.address(), chain_id)?;
+    let receipt = send_tx_robust_with_warning(
+        endpoints,
+        signer,
+        request,
+        label,
+        RECEIPT_TIMEOUT,
+        on_warning,
+    )
+    .await?;
+    if !receipt.status() {
+        return Err(eyre!(
+            "{} action '{}' reverted in transaction {}",
+            label,
+            action.id,
+            receipt.transaction_hash
+        ));
+    }
+    Ok(receipt.transaction_hash)
+}
+
+pub(super) fn action_request(
     action: &Action,
     signer: Address,
     expected_chain: &str,

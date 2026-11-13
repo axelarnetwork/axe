@@ -4,7 +4,7 @@ use eyre::{Result, WrapErr, bail, eyre};
 use reqwest::StatusCode;
 
 use super::types::{
-    BackendType, ChainsResponse, QuoteOutcome, QuoteRequest, QuoteResponse, StatusResponse,
+    BackendType, ChainsResponse, Quote, QuoteOutcome, QuoteRequest, QuoteResponse, StatusResponse,
     TimedQuote, TokensResponse,
 };
 use crate::types::Network;
@@ -68,6 +68,15 @@ impl RfqClient {
     }
 
     pub async fn quote(&self, request: &QuoteRequest) -> Result<QuoteOutcome> {
+        self.quote_from(request, &[BackendType::Intent]).await
+    }
+
+    /// The first quote, in the API's order, served by one of `backends`.
+    pub async fn quote_from(
+        &self,
+        request: &QuoteRequest,
+        backends: &[BackendType],
+    ) -> Result<QuoteOutcome> {
         let started = Instant::now();
         let url = format!("{}/quote", self.base_url);
         let response = self
@@ -94,14 +103,11 @@ impl RfqClient {
             .json::<QuoteResponse>()
             .await
             .wrap_err("RFQ quote response did not match the expected schema")?;
-        let Some(quote) = body
-            .quotes
-            .into_iter()
-            .find(|quote| quote.backend.kind == BackendType::Intent)
-        else {
-            return Ok(QuoteOutcome::Unavailable(
-                "no intent quote returned".to_owned(),
-            ));
+        let Some(quote) = first_quote_from(body.quotes, backends) else {
+            return Ok(QuoteOutcome::Unavailable(format!(
+                "no {} quote returned",
+                backend_names(backends)
+            )));
         };
         Ok(QuoteOutcome::Available(Box::new(TimedQuote {
             quote,
@@ -157,6 +163,20 @@ impl RfqClient {
             .await
             .wrap_err_with(|| format!("RFQ {path} response did not match the expected schema"))
     }
+}
+
+fn first_quote_from(quotes: Vec<Quote>, backends: &[BackendType]) -> Option<Quote> {
+    quotes
+        .into_iter()
+        .find(|quote| backends.contains(&quote.backend.kind))
+}
+
+fn backend_names(backends: &[BackendType]) -> String {
+    backends
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 async fn response_message(response: reqwest::Response) -> String {
@@ -234,6 +254,47 @@ mod tests {
         assert_eq!(client.base_url, "http://127.0.0.1:8080/solver/v1");
         assert!(RfqClient::new(Network::Testnet, Some("ftp://example.com")).is_err());
         assert!(RfqClient::new(Network::Testnet, Some("example.com/rfq/v1")).is_err());
+    }
+
+    fn quote_from(id: &str, backend: &str) -> Quote {
+        serde_json::from_value(serde_json::json!({
+            "quoteId": id,
+            "selectionReason": "alternative",
+            "backend": { "type": backend, "name": "test", "tracking": {}, "metadata": {} },
+            "estimatedTimeSeconds": 60,
+            "validity": { "type": "expires_at", "quoteExpiresAt": "2026-11-13T23:02:45Z" },
+            "input": { "chain": "eip155:43113", "token": "0xfrom", "amount": "1" },
+            "output": { "chain": "eip155:11155111", "token": "0xto", "amount": "1" },
+            "fees": { "integrator": null },
+            "actions": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn selects_the_first_quote_from_an_accepted_backend() {
+        let quotes = || {
+            vec![
+                quote_from("intent-1", "intent"),
+                quote_from("express-1", "gateway-express"),
+                quote_from("gateway-1", "gateway"),
+            ]
+        };
+        let gateway = [BackendType::Gateway, BackendType::GatewayExpress];
+
+        assert_eq!(
+            first_quote_from(quotes(), &gateway).unwrap().quote_id,
+            "express-1"
+        );
+        assert_eq!(
+            first_quote_from(quotes(), &[BackendType::Intent])
+                .unwrap()
+                .quote_id,
+            "intent-1"
+        );
+        assert!(first_quote_from(quotes(), &[BackendType::Its]).is_none());
+        assert_eq!(backend_names(&[BackendType::Intent]), "intent");
+        assert_eq!(backend_names(&gateway), "gateway or gateway-express");
     }
 
     #[test]

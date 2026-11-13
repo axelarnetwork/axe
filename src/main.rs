@@ -313,6 +313,47 @@ async fn run_relay(
     .await
 }
 
+async fn run_rfq_test(
+    command: cli::TestCommands,
+    global_network: Option<types::Network>,
+) -> Result<()> {
+    let cli::TestCommands::Rfq {
+        route,
+        source,
+        amount,
+        recipient,
+        timeout_secs,
+        api,
+        config,
+        private_key,
+        sender,
+        dry_run,
+        json,
+    } = command
+    else {
+        unreachable!("run_rfq_test called with another test command")
+    };
+    let private_key = commands::intents::resolve_private_key(
+        private_key,
+        std::env::var("EVM_PRIVATE_KEY").ok(),
+        std::env::var("PRIVATE_KEY").ok(),
+    )
+    .ok();
+    commands::intents::rfq_test(commands::intents::RfqTestArgs {
+        network: cli::resolve_network(global_network, config.as_deref())?,
+        route,
+        source,
+        amount,
+        recipient,
+        timeout: std::time::Duration::from_secs(timeout_secs),
+        rfq_url: api.rfq_url,
+        config,
+        wallet: commands::intents::RfqWallet::resolve(dry_run, sender, private_key)?,
+        json,
+    })
+    .await
+}
+
 async fn run_test(
     command: cli::TestCommands,
     global_network: Option<types::Network>,
@@ -321,6 +362,7 @@ async fn run_test(
         command @ cli::TestCommands::Gmp { .. } => run_gmp_test(command, global_network).await,
         command @ cli::TestCommands::Relay { .. } => run_relay(command, global_network).await,
         command @ cli::TestCommands::Its { .. } => run_its_test(command, global_network).await,
+        command @ cli::TestCommands::Rfq { .. } => run_rfq_test(command, global_network).await,
         command @ cli::TestCommands::LoadTest { .. } => {
             run_load_test(command, global_network).await
         }
