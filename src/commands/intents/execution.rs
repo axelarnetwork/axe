@@ -1000,7 +1000,7 @@ mod tests {
     use super::*;
 
     use super::super::types::{
-        AssetId, Backend, BackendType, Fees, QuoteInput, QuoteOutput, SelectionReason, Validity,
+        AssetId, Backend, BackendType, Fees, QuoteInput, QuoteOutput, Validity,
     };
 
     #[tokio::test]
@@ -1061,7 +1061,7 @@ mod tests {
     fn quote_with_actions(actions: Vec<Action>) -> Quote {
         Quote {
             quote_id: "quote-id".to_owned(),
-            selection_reason: SelectionReason::BestAvailable,
+            selection_reason: "best_available".to_owned(),
             backend: Backend {
                 kind: BackendType::Intent,
                 name: "solver".to_owned(),

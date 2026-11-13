@@ -142,7 +142,7 @@ pub struct QuoteResponse {
 #[serde(rename_all = "camelCase")]
 pub struct Quote {
     pub quote_id: String,
-    pub selection_reason: SelectionReason,
+    pub selection_reason: String,
     pub backend: Backend,
     pub estimated_time_seconds: u64,
     pub validity: Validity,
@@ -150,12 +150,6 @@ pub struct Quote {
     pub output: QuoteOutput,
     pub fees: Fees,
     pub actions: Vec<Action>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SelectionReason {
-    BestAvailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -903,6 +897,80 @@ mod tests {
             "53338194000000"
         );
         assert_eq!(serde_json::to_value(typed).unwrap(), response);
+    }
+
+    #[test]
+    fn quote_response_accepts_its_quotes_with_any_selection_reason() {
+        let response = json!({
+            "quotes": [{
+                "actions": [
+                    {
+                        "chain": "eip155:43113",
+                        "id": "approve",
+                        "label": "Approve WAVAX",
+                        "payload": {
+                            "data": "0x095ea7b3",
+                            "from": "0x000000000000000000000000000000000000dEaD",
+                            "to": "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
+                            "type": "evm_transaction",
+                            "value": "0"
+                        },
+                        "type": "approval"
+                    },
+                    {
+                        "chain": "eip155:43113",
+                        "id": "transfer",
+                        "label": "Bridge via Axelar",
+                        "payload": {
+                            "data": "0x9a985d99",
+                            "from": "0x000000000000000000000000000000000000dEaD",
+                            "to": "0xe4f05a0D5541C03d07f5175147E92D796Cae8db6",
+                            "type": "evm_transaction",
+                            "value": "1648692639775883"
+                        },
+                        "type": "transaction"
+                    }
+                ],
+                "backend": { "metadata": {}, "name": "axelar", "tracking": {}, "type": "its" },
+                "estimatedTimeSeconds": 60,
+                "fees": {
+                    "integrator": null,
+                    "user": {
+                        "amount": "1648692639775883",
+                        "amountUsdApprox": "0.013536",
+                        "paymentMethod": "tx_value",
+                        "quoteTreatment": "outside_quote",
+                        "token": { "chain": "eip155:43113", "symbol": "AVAX", "type": "native" }
+                    }
+                },
+                "input": {
+                    "amount": "100000000000000",
+                    "chain": "eip155:43113",
+                    "token": "0xd00ae08403B9bbb9124bB305C09058E32C39A48c"
+                },
+                "output": {
+                    "amount": "100000000000000",
+                    "chain": "eip155:11155111",
+                    "minimumAmount": "100000000000000",
+                    "token": "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069"
+                },
+                "quoteId": "its_347d85f4-9dda-4ec0-ba95-97603b46a712",
+                "selectionReason": "only_route",
+                "validity": { "quoteExpiresAt": "2026-11-13T23:02:45.068848584Z", "type": "expires_at" }
+            }]
+        });
+
+        let typed: QuoteResponse = serde_json::from_value(response).unwrap();
+        let quote = &typed.quotes[0];
+
+        assert_eq!(quote.selection_reason, "only_route");
+        assert_eq!(quote.backend.kind, BackendType::Its);
+        let ids: Vec<_> = quote
+            .actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect();
+        assert_eq!(ids, ["approve", "transfer"]);
     }
 
     #[test]

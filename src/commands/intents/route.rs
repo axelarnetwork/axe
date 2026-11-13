@@ -1208,7 +1208,7 @@ fn average_quote_ms(plans: &[RoutePlan]) -> u64 {
 mod tests {
     use super::*;
     use crate::commands::intents::types::{
-        Backend, BackendType, Fees, QuoteInput, QuoteOutput, SelectionReason, Validity,
+        Backend, BackendType, Fees, QuoteInput, QuoteOutput, Validity,
     };
 
     fn asset(chain: &str, token: &str, balance: u64, native: bool) -> WalletAsset {
@@ -1403,7 +1403,7 @@ mod tests {
         let to = asset("eip155:2", "b", 0, false);
         let quote = Quote {
             quote_id: "quote-id".into(),
-            selection_reason: SelectionReason::BestAvailable,
+            selection_reason: "best_available".to_owned(),
             backend: Backend {
                 kind: BackendType::Intent,
                 name: "Axelar Intents".into(),
