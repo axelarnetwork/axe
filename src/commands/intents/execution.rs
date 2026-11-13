@@ -931,6 +931,8 @@ async fn wait_for_fulfillment(
                     }
                     TransferState::AwaitingDeposit
                     | TransferState::Pending
+                    | TransferState::RefundPending
+                    | TransferState::RefundInitiated
                     | TransferState::NotFound => {}
                 }
             }

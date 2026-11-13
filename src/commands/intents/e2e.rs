@@ -14,14 +14,16 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::Signer;
 
 use self::funding::{SourceChain, top_up_wrapped_native};
-use self::poll::{PollEnd, PollLimits, watch_status};
+use self::poll::{PollEnd, PollLimits, refund_in_progress, watch_status};
 use self::report::{ActionTx, Output, RunReport};
 use self::routes::{RoutePlan, SourceFunding};
 use crate::commands::intents::client::RfqClient;
 use crate::commands::intents::execution::{action_request, submit_action};
 use crate::commands::intents::execution_lock::ExecutionLock;
 use crate::commands::intents::route::{DiscoveryFeedback, resolve_evm_chains};
-use crate::commands::intents::types::{ChainInfo, Quote, QuoteOutcome, QuoteRequest, TimedQuote};
+use crate::commands::intents::types::{
+    ChainInfo, Quote, QuoteOutcome, QuoteRequest, TimedQuote, TransferState,
+};
 use crate::config::ChainsConfig;
 use crate::evm::EvmEndpoints;
 use crate::types::Network;
@@ -246,14 +248,21 @@ fn settle(end: PollEnd, quote_id: &str, timeout: Duration, report: &mut RunRepor
             Err(eyre!("quote {quote_id} ended {state}"))
         }
         PollEnd::TimedOut(last) => {
-            let state = last
-                .as_ref()
-                .map_or("never read", |status| status.state.label());
+            let state = last.as_ref().map(|status| status.state);
             report.status = last;
-            Err(eyre!(
-                "quote {quote_id} did not reach DONE within {} s (last state: {state})",
-                timeout.as_secs()
-            ))
+            let label = state.map_or("never read", TransferState::label);
+            let error = if state.is_some_and(refund_in_progress) {
+                eyre!(
+                    "quote {quote_id} was being refunded when the {} s timeout passed (last state: {label})",
+                    timeout.as_secs()
+                )
+            } else {
+                eyre!(
+                    "quote {quote_id} did not reach DONE within {} s (last state: {label})",
+                    timeout.as_secs()
+                )
+            };
+            Err(error)
         }
     }
 }
@@ -263,7 +272,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::commands::intents::types::{StatusResponse, TransferState};
+    use crate::commands::intents::types::StatusResponse;
 
     const FUJI: &str = "eip155:43113";
 
@@ -412,5 +421,39 @@ mod tests {
             report.status.map(|status| status.state),
             Some(TransferState::Pending)
         );
+    }
+
+    #[test]
+    fn settles_every_refund_state_as_a_failure() {
+        let mut report = its_report();
+        let error = settle(
+            PollEnd::Failed(status("REFUNDED")),
+            "its_quote",
+            Duration::from_secs(2700),
+            &mut report,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "quote its_quote ended refunded");
+
+        for (state, label) in [
+            ("REFUND_PENDING", "refund pending"),
+            ("REFUND_INITIATED", "refund initiated"),
+        ] {
+            let mut report = its_report();
+            let error = settle(
+                PollEnd::TimedOut(Some(status(state))),
+                "its_quote",
+                Duration::from_secs(2700),
+                &mut report,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "quote its_quote was being refunded when the 2700 s timeout passed (last state: {label})"
+                )
+            );
+            assert!(report.status.is_some());
+        }
     }
 }

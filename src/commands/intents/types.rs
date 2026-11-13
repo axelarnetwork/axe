@@ -387,6 +387,10 @@ pub enum TransferState {
     AwaitingDeposit,
     Pending,
     Done,
+    /// Will not be fulfilled, and a refund is decided but not yet submitted.
+    RefundPending,
+    /// Refund submitted, its source-chain transaction not yet observed.
+    RefundInitiated,
     Refunded,
     Failed,
     NotFound,
@@ -398,6 +402,8 @@ impl TransferState {
             Self::AwaitingDeposit => "awaiting deposit",
             Self::Pending => "pending",
             Self::Done => "done",
+            Self::RefundPending => "refund pending",
+            Self::RefundInitiated => "refund initiated",
             Self::Refunded => "refunded",
             Self::Failed => "failed",
             Self::NotFound => "not found",
@@ -812,6 +818,22 @@ mod tests {
         assert!(!TransferState::AwaitingDeposit.is_terminal());
         assert!(!TransferState::Pending.is_terminal());
         assert!(!TransferState::NotFound.is_terminal());
+        assert!(!TransferState::RefundPending.is_terminal());
+        assert!(!TransferState::RefundInitiated.is_terminal());
+    }
+
+    #[test]
+    fn parses_the_refund_states_before_refunded() {
+        for (wire, state) in [
+            ("REFUND_PENDING", TransferState::RefundPending),
+            ("REFUND_INITIATED", TransferState::RefundInitiated),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<TransferState>(json!(wire)).unwrap(),
+                state
+            );
+            assert_eq!(serde_json::to_value(state).unwrap(), json!(wire));
+        }
     }
 
     #[test]

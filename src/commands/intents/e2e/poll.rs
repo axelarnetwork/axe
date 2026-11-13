@@ -43,6 +43,9 @@ where
             Ok(status) => {
                 if last.as_ref().map(|last| last.state) != Some(status.state) {
                     output.transition(&status);
+                    if refund_in_progress(status.state) {
+                        output.warn("the transfer is being refunded and will not reach DONE");
+                    }
                 }
                 match terminal(status.state) {
                     Some(Terminal::Done) => return PollEnd::Done(status),
@@ -56,13 +59,25 @@ where
     PollEnd::TimedOut(last)
 }
 
+/// A refund rfq-api has decided or submitted but not yet seen land. The
+/// watch goes on until the refund settles or the timeout passes.
+pub const fn refund_in_progress(state: TransferState) -> bool {
+    matches!(
+        state,
+        TransferState::RefundPending | TransferState::RefundInitiated
+    )
+}
+
 const fn terminal(state: TransferState) -> Option<Terminal> {
     match state {
         TransferState::Done => Some(Terminal::Done),
         TransferState::Failed | TransferState::NotFound | TransferState::Refunded => {
             Some(Terminal::Failed)
         }
-        TransferState::AwaitingDeposit | TransferState::Pending => None,
+        TransferState::AwaitingDeposit
+        | TransferState::Pending
+        | TransferState::RefundPending
+        | TransferState::RefundInitiated => None,
     }
 }
 
@@ -130,8 +145,61 @@ mod tests {
         ] {
             assert_eq!(terminal(state), Some(Terminal::Failed));
         }
-        assert_eq!(terminal(TransferState::AwaitingDeposit), None);
-        assert_eq!(terminal(TransferState::Pending), None);
+        for state in [
+            TransferState::AwaitingDeposit,
+            TransferState::Pending,
+            TransferState::RefundPending,
+            TransferState::RefundInitiated,
+        ] {
+            assert_eq!(terminal(state), None);
+        }
+    }
+
+    #[test]
+    fn only_the_unsettled_refund_states_count_as_a_refund_in_progress() {
+        assert!(refund_in_progress(TransferState::RefundPending));
+        assert!(refund_in_progress(TransferState::RefundInitiated));
+        for state in [
+            TransferState::AwaitingDeposit,
+            TransferState::Pending,
+            TransferState::Done,
+            TransferState::Refunded,
+            TransferState::Failed,
+            TransferState::NotFound,
+        ] {
+            assert!(!refund_in_progress(state));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn keeps_polling_through_refund_states_until_the_refund_lands() {
+        let (fetch, polls) = scripted(VecDeque::from([
+            Ok(status("PENDING")),
+            Ok(status("REFUND_PENDING")),
+            Ok(status("REFUND_INITIATED")),
+            Ok(status("REFUND_INITIATED")),
+            Ok(status("REFUNDED")),
+        ]));
+
+        let end = watch_status(fetch, LIMITS, Output::Json).await;
+
+        assert!(matches!(end, PollEnd::Failed(status) if status.state == TransferState::Refunded));
+        assert_eq!(*polls.lock().unwrap(), 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unsettled_refund_runs_into_the_timeout() {
+        let (fetch, _) = scripted(VecDeque::from([
+            Ok(status("REFUND_PENDING")),
+            Ok(status("REFUND_INITIATED")),
+        ]));
+
+        let end = watch_status(fetch, LIMITS, Output::Json).await;
+
+        assert!(matches!(
+            end,
+            PollEnd::TimedOut(Some(status)) if status.state == TransferState::RefundInitiated
+        ));
     }
 
     #[tokio::test(start_paused = true)]

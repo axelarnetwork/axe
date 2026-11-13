@@ -59,8 +59,10 @@ of those routes end to end: it requests an `EXACT_INPUT` quote, picks the
 first quote from the route's backend, sends every quoted action on the source
 chain in order, then polls `/rfq/v1/status` every 15 seconds until the
 transfer is `DONE`. `FAILED`, `NOT_FOUND`, `REFUNDED`, a reverted action, or
-the timeout (45 minutes by default) fail the command. A failed status poll is
-retried.
+the timeout (45 minutes by default) fail the command. `REFUND_PENDING` and
+`REFUND_INITIATED` are reported and polling continues until the refund lands
+or the timeout passes, so a refunded transfer always fails the run. A failed
+status poll is retried.
 
 ```bash
 axe --network testnet test rfq --route its
