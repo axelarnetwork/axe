@@ -10,28 +10,37 @@ const NATIVE_TOKEN: &str = "0x0000000000000000000000000000000000000000";
 const WRAPPED_DEFAULT_AMOUNT: u64 = 100_000_000_000_000;
 const GATEWAY_DEFAULT_AMOUNT: u64 = 1_000_000;
 
-/// A token deployed on both EVM sources and as a Solana mint.
-struct ItsToken {
-    avalanche: &'static str,
-    ethereum: &'static str,
-    solana: &'static str,
+/// One value per EVM source chain.
+#[derive(Clone, Copy, Debug)]
+struct BySource<T> {
+    avalanche: T,
+    ethereum: T,
 }
 
-/// A gateway token on both EVM sources.
-struct GatewayToken {
-    avalanche: &'static str,
-    ethereum: &'static str,
+impl<T: Copy> BySource<T> {
+    const fn on(&self, source: RfqSource) -> T {
+        match source {
+            RfqSource::Avalanche => self.avalanche,
+            RfqSource::Ethereum => self.ethereum,
+        }
+    }
+}
+
+/// A wrapped native token as deployed on both EVM sources and on Solana.
+#[derive(Clone, Copy, Debug)]
+struct WrappedToken {
+    evm: BySource<&'static str>,
+    solana: &'static str,
 }
 
 /// The chains and tokens one network's routes run over. Addresses match
 /// rfq-api's vendored axelar-app network configs.
 struct NetworkTokens {
-    avalanche: Chain,
-    ethereum: Chain,
+    chains: BySource<Chain>,
     solana: Chain,
-    wavax: ItsToken,
-    weth: ItsToken,
-    usdc: GatewayToken,
+    /// Each source chain's own wrapped native token: WAVAX and WETH.
+    wrapped_native: BySource<WrappedToken>,
+    usdc: BySource<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,59 +49,83 @@ pub struct Chain {
     pub label: &'static str,
 }
 
-const TESTNET: NetworkTokens = NetworkTokens {
-    avalanche: Chain {
-        caip2: "eip155:43113",
-        label: "Avalanche Fuji",
+const WAVAX_TESTNET: WrappedToken = WrappedToken {
+    evm: BySource {
+        avalanche: "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
+        ethereum: "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069",
     },
-    ethereum: Chain {
-        caip2: "eip155:11155111",
-        label: "Ethereum Sepolia",
+    solana: "8d7dmvUho3uAKZPceCbFr9k1LjQMZzPwHTFTDrhrP9kH",
+};
+
+const WETH_TESTNET: WrappedToken = WrappedToken {
+    evm: BySource {
+        avalanche: "0xd7680446338b2C078910d2D01125b0509b5F6337",
+        ethereum: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9",
+    },
+    solana: "HUHo4T9cEbpyBv5N8t33fopd8YL7jXF6SMtM1p3tBrAY",
+};
+
+const TESTNET: NetworkTokens = NetworkTokens {
+    chains: BySource {
+        avalanche: Chain {
+            caip2: "eip155:43113",
+            label: "Avalanche Fuji",
+        },
+        ethereum: Chain {
+            caip2: "eip155:11155111",
+            label: "Ethereum Sepolia",
+        },
     },
     solana: Chain {
         caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
         label: "Solana devnet",
     },
-    wavax: ItsToken {
-        avalanche: "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
-        ethereum: "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069",
-        solana: "8d7dmvUho3uAKZPceCbFr9k1LjQMZzPwHTFTDrhrP9kH",
+    wrapped_native: BySource {
+        avalanche: WAVAX_TESTNET,
+        ethereum: WETH_TESTNET,
     },
-    weth: ItsToken {
-        avalanche: "0xd7680446338b2C078910d2D01125b0509b5F6337",
-        ethereum: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9",
-        solana: "HUHo4T9cEbpyBv5N8t33fopd8YL7jXF6SMtM1p3tBrAY",
-    },
-    usdc: GatewayToken {
+    usdc: BySource {
         avalanche: "0x57F1c63497AEe0bE305B8852b354CEc793da43bB",
         ethereum: "0x254d06f33bDc5b8ee05b2ea472107E300226659A",
     },
 };
 
-const MAINNET: NetworkTokens = NetworkTokens {
-    avalanche: Chain {
-        caip2: "eip155:43114",
-        label: "Avalanche",
+const WAVAX_MAINNET: WrappedToken = WrappedToken {
+    evm: BySource {
+        avalanche: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+        ethereum: "0x38Cb2e8b5A4e34c38c87A56b2F4681D0579DAdD5",
     },
-    ethereum: Chain {
-        caip2: "eip155:1",
-        label: "Ethereum",
+    solana: "5xMfUDBky6FF72h1Dc1x4LEwTZAxJKsy3iUV85cTodGA",
+};
+
+const WETH_MAINNET: WrappedToken = WrappedToken {
+    evm: BySource {
+        avalanche: "0x50498dC52bCd3dAeB54B7225A7d2FA8D536F313E",
+        ethereum: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    },
+    solana: "9VbXPX6Xd7wHSirGXf6r7FhCVzzCLFxnF3xtqGyAcHZf",
+};
+
+const MAINNET: NetworkTokens = NetworkTokens {
+    chains: BySource {
+        avalanche: Chain {
+            caip2: "eip155:43114",
+            label: "Avalanche",
+        },
+        ethereum: Chain {
+            caip2: "eip155:1",
+            label: "Ethereum",
+        },
     },
     solana: Chain {
         caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
         label: "Solana",
     },
-    wavax: ItsToken {
-        avalanche: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-        ethereum: "0x38Cb2e8b5A4e34c38c87A56b2F4681D0579DAdD5",
-        solana: "5xMfUDBky6FF72h1Dc1x4LEwTZAxJKsy3iUV85cTodGA",
+    wrapped_native: BySource {
+        avalanche: WAVAX_MAINNET,
+        ethereum: WETH_MAINNET,
     },
-    weth: ItsToken {
-        avalanche: "0x50498dC52bCd3dAeB54B7225A7d2FA8D536F313E",
-        ethereum: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        solana: "9VbXPX6Xd7wHSirGXf6r7FhCVzzCLFxnF3xtqGyAcHZf",
-    },
-    usdc: GatewayToken {
+    usdc: BySource {
         avalanche: "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC",
         ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
     },
@@ -108,39 +141,6 @@ impl NetworkTokens {
             )),
         }
     }
-
-    const fn chain(&self, source: RfqSource) -> Chain {
-        match source {
-            RfqSource::Avalanche => self.avalanche,
-            RfqSource::Ethereum => self.ethereum,
-        }
-    }
-
-    /// The source chain's own wrapped native token.
-    const fn wrapped_native(&self, source: RfqSource) -> &ItsToken {
-        match source {
-            RfqSource::Avalanche => &self.wavax,
-            RfqSource::Ethereum => &self.weth,
-        }
-    }
-}
-
-impl ItsToken {
-    const fn on(&self, source: RfqSource) -> &'static str {
-        match source {
-            RfqSource::Avalanche => self.avalanche,
-            RfqSource::Ethereum => self.ethereum,
-        }
-    }
-}
-
-impl GatewayToken {
-    const fn on(&self, source: RfqSource) -> &'static str {
-        match source {
-            RfqSource::Avalanche => self.avalanche,
-            RfqSource::Ethereum => self.ethereum,
-        }
-    }
 }
 
 /// A token on a chain.
@@ -150,24 +150,15 @@ pub struct RouteAsset {
     pub token: &'static str,
 }
 
-/// How the wallet holds what the route spends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SourceFunding {
-    /// Native gas, spent directly.
-    Native,
-    /// The source chain's wrapped native token, topped up by wrapping native
-    /// gas when the wallet holds too little.
-    WrappedNative,
-    /// A token the wallet must already hold.
-    Held,
-}
-
 /// A route resolved against one network's chains and tokens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoutePlan {
+    pub route: RfqRoute,
     pub from: RouteAsset,
     pub to: RouteAsset,
-    pub funding: SourceFunding,
+    /// Whether the source token is the wrapped native token, topped up by
+    /// wrapping native gas when the wallet holds too little.
+    pub wrap_shortfall: bool,
     /// Backends whose quotes the route accepts.
     pub backends: &'static [BackendType],
     pub default_amount: u64,
@@ -177,51 +168,50 @@ impl RoutePlan {
     pub fn resolve(network: Network, route: RfqRoute, source: RfqSource) -> Result<Self> {
         let tokens = NetworkTokens::for_network(network)?;
         let other = source.other();
-        let wrapped = tokens.wrapped_native(source);
+        let wrapped = tokens.wrapped_native.on(source);
         let from = |token| RouteAsset {
-            chain: tokens.chain(source),
+            chain: tokens.chains.on(source),
+            token,
+        };
+        let to = |token| RouteAsset {
+            chain: tokens.chains.on(other),
             token,
         };
         let plan = match route {
             RfqRoute::Its => Self {
-                from: from(wrapped.on(source)),
-                to: RouteAsset {
-                    chain: tokens.chain(other),
-                    token: wrapped.on(other),
-                },
-                funding: SourceFunding::WrappedNative,
+                route,
+                from: from(wrapped.evm.on(source)),
+                to: to(wrapped.evm.on(other)),
+                wrap_shortfall: true,
                 backends: &[BackendType::Its],
                 default_amount: WRAPPED_DEFAULT_AMOUNT,
             },
             RfqRoute::NativeWrap => Self {
+                route,
                 from: from(NATIVE_TOKEN),
-                to: RouteAsset {
-                    chain: tokens.chain(other),
-                    token: wrapped.on(other),
-                },
-                funding: SourceFunding::Native,
+                to: to(wrapped.evm.on(other)),
+                wrap_shortfall: false,
                 backends: &[BackendType::Its],
                 default_amount: WRAPPED_DEFAULT_AMOUNT,
             },
             // rfq-api quotes gateway-express instead of gateway when express
             // covers the amount.
             RfqRoute::Gateway => Self {
+                route,
                 from: from(tokens.usdc.on(source)),
-                to: RouteAsset {
-                    chain: tokens.chain(other),
-                    token: tokens.usdc.on(other),
-                },
-                funding: SourceFunding::Held,
+                to: to(tokens.usdc.on(other)),
+                wrap_shortfall: false,
                 backends: &[BackendType::Gateway, BackendType::GatewayExpress],
                 default_amount: GATEWAY_DEFAULT_AMOUNT,
             },
             RfqRoute::Solana => Self {
-                from: from(wrapped.on(source)),
+                route,
+                from: from(wrapped.evm.on(source)),
                 to: RouteAsset {
                     chain: tokens.solana,
                     token: wrapped.solana,
                 },
-                funding: SourceFunding::WrappedNative,
+                wrap_shortfall: true,
                 backends: &[BackendType::Its],
                 default_amount: WRAPPED_DEFAULT_AMOUNT,
             },
@@ -230,7 +220,7 @@ impl RoutePlan {
     }
 
     pub fn delivers_to_solana(&self) -> bool {
-        self.to.chain.caip2.starts_with("solana:")
+        self.route == RfqRoute::Solana
     }
 
     /// The recipient as typed, else the sender for EVM destinations or the
@@ -241,16 +231,16 @@ impl RoutePlan {
         sender: Address,
         configured_solana: Option<Pubkey>,
     ) -> Result<Recipient> {
+        let route = self.route;
         match (self.delivers_to_solana(), explicit) {
             (false, Some(value)) => value
                 .parse()
                 .map(Recipient::Evm)
-                .wrap_err_with(|| format!("--recipient {value} is not an EVM address")),
+                .wrap_err_with(|| format!("--recipient {value} is not an EVM address ({route} route)")),
             (false, None) => Ok(Recipient::Evm(sender)),
-            (true, Some(value)) => value
-                .parse()
-                .map(Recipient::Solana)
-                .wrap_err_with(|| format!("--recipient {value} is not a Solana address")),
+            (true, Some(value)) => value.parse().map(Recipient::Solana).wrap_err_with(|| {
+                format!("--recipient {value} is not a Solana address ({route} route)")
+            }),
             (true, None) => configured_solana.map(Recipient::Solana).ok_or_else(|| {
                 eyre!(
                     "the solana route needs --recipient set to a Solana address; no Solana key is configured"
@@ -296,7 +286,7 @@ mod tests {
         );
         assert_eq!(fuji.to.chain.caip2, "eip155:11155111");
         assert_eq!(fuji.to.token, "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069");
-        assert_eq!(fuji.funding, SourceFunding::WrappedNative);
+        assert!(fuji.wrap_shortfall);
         assert_eq!(fuji.backends, &[BackendType::Its]);
         assert_eq!(fuji.default_amount, 100_000_000_000_000);
 
@@ -317,7 +307,7 @@ mod tests {
         let route = plan(RfqRoute::NativeWrap, RfqSource::Avalanche);
         assert_eq!(route.from.token, NATIVE_TOKEN);
         assert_eq!(route.to.token, "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069");
-        assert_eq!(route.funding, SourceFunding::Native);
+        assert!(!route.wrap_shortfall);
         assert_eq!(route.backends, &[BackendType::Its]);
     }
 
@@ -329,7 +319,7 @@ mod tests {
             "0x254d06f33bDc5b8ee05b2ea472107E300226659A"
         );
         assert_eq!(route.to.token, "0x57F1c63497AEe0bE305B8852b354CEc793da43bB");
-        assert_eq!(route.funding, SourceFunding::Held);
+        assert!(!route.wrap_shortfall);
         assert_eq!(
             route.backends,
             &[BackendType::Gateway, BackendType::GatewayExpress]
@@ -348,6 +338,7 @@ mod tests {
             fuji.to.token,
             "8d7dmvUho3uAKZPceCbFr9k1LjQMZzPwHTFTDrhrP9kH"
         );
+        assert!(fuji.wrap_shortfall);
         assert!(fuji.delivers_to_solana());
 
         let sepolia = plan(RfqRoute::Solana, RfqSource::Ethereum);

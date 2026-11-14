@@ -1,11 +1,11 @@
 mod benchmark;
 mod client;
-mod e2e;
 mod execution;
 mod execution_lock;
 mod inventory;
 mod presentation;
 mod read;
+mod rfq_test;
 mod route;
 mod stats;
 mod stress;
@@ -40,9 +40,9 @@ pub use benchmark::{
     QuoteBenchmarkArgs, QuoteBenchmarkLimit, QuoteBenchmarkMode, QuoteBenchmarkTarget,
     benchmark_quotes, benchmark_quotes_data,
 };
-pub use e2e::{RfqRoute, RfqSource, RfqTestArgs, Wallet as RfqWallet, run as rfq_test};
 pub use inventory::{InventoryArgs, inventory, inventory_report};
 pub use read::{ApiArgs, CatalogArgs, StatusArgs, catalog, catalog_data, status, status_data};
+pub use rfq_test::{RfqRoute, RfqSource, RfqTestArgs, Wallet as RfqWallet, run as rfq_test};
 pub use stress::{StressArgs, run as stress};
 pub use traffic::{TrafficArgs, run as traffic};
 

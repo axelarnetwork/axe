@@ -664,6 +664,28 @@ pub async fn send_tx_robust_with_warning(
     ))
 }
 
+/// [`send_tx_robust_with_warning`], failing when the mined transaction
+/// reverted.
+pub async fn send_tx_confirmed(
+    endpoints: &EvmEndpoints,
+    signer: &PrivateKeySigner,
+    tx: TransactionRequest,
+    label: &str,
+    receipt_timeout: std::time::Duration,
+    on_warning: impl Fn(&str),
+) -> Result<TxHash> {
+    let receipt =
+        send_tx_robust_with_warning(endpoints, signer, tx, label, receipt_timeout, on_warning)
+            .await?;
+    if !receipt.status() {
+        return Err(eyre::eyre!(
+            "{label} reverted in transaction {}",
+            receipt.transaction_hash
+        ));
+    }
+    Ok(receipt.transaction_hash)
+}
+
 /// Whether ANY of this send's broadcast transactions (original or a fee-bump
 /// replacement) is visible on any endpoint - mined or pending. See
 /// [`tx_known_by_hash`] - a replacement round makes the set plural.

@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use alloy::hex;
-use alloy::primitives::{Address, Bytes, TxHash, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
@@ -18,11 +18,11 @@ use super::types::{
     LegResult, PreparedDeposit, Quote, QuoteOutcome, QuoteRequest, RoundTripInputBudget, RoutePlan,
     RunLimits, StatusOutput, SubmittedIntent, TimedQuote, TransferState, WalletAsset, parse_amount,
 };
-use crate::evm::{ERC20, EvmEndpoints, send_tx_robust_with_warning};
+use crate::evm::{ERC20, EvmEndpoints, send_tx_confirmed};
 use crate::retry::retry_with_fallback_all;
 use crate::ui;
 
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(super) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const MIN_QUOTE_LIFETIME: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -513,48 +513,19 @@ async fn execute_actions(
     let endpoints = EvmEndpoints::connect(std::slice::from_ref(&chain.rpc_url))?;
     let mut last_hash = None;
     for action in actions {
-        let hash = submit_action(
+        let request = action_request(action, signer.address(), &source.id.chain_id)?;
+        let hash = send_tx_confirmed(
             &endpoints,
             signer,
-            &source.id.chain_id,
-            action,
-            label,
+            request,
+            &format!("{label} action '{}'", action.id),
+            RECEIPT_TIMEOUT,
             |message| feedback.warn(message),
         )
         .await?;
         last_hash = Some(hash.to_string());
     }
     Ok(last_hash)
-}
-
-/// Send one quoted action and wait for its receipt. A revert is an error.
-pub(super) async fn submit_action(
-    endpoints: &EvmEndpoints,
-    signer: &PrivateKeySigner,
-    chain_id: &str,
-    action: &Action,
-    label: &str,
-    on_warning: impl Fn(&str),
-) -> Result<TxHash> {
-    let request = action_request(action, signer.address(), chain_id)?;
-    let receipt = send_tx_robust_with_warning(
-        endpoints,
-        signer,
-        request,
-        label,
-        RECEIPT_TIMEOUT,
-        on_warning,
-    )
-    .await?;
-    if !receipt.status() {
-        return Err(eyre!(
-            "{} action '{}' reverted in transaction {}",
-            label,
-            action.id,
-            receipt.transaction_hash
-        ));
-    }
-    Ok(receipt.transaction_hash)
 }
 
 pub(super) fn action_request(

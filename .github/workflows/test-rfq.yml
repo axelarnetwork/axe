@@ -1,11 +1,11 @@
 name: Test RFQ routes
 
-run-name: "RFQ routes: ${{ inputs.network || 'testnet' }} · ${{ inputs.routes || 'its native-wrap gateway solana' }} from ${{ inputs.source || 'avalanche' }}"
+run-name: "RFQ routes: ${{ inputs.network || 'testnet' }} · ${{ inputs.routes || 'its,native-wrap,gateway,solana' }} from ${{ inputs.source || 'avalanche' }}"
 
-# End-to-end check of the rfq-api routes that gate ITS quotes on mainnet. Each
-# route is quoted, every quoted action is sent on the source chain, and the
-# quote's status is polled until DONE (`axe test rfq`). Scheduled runs cover
-# testnet; mainnet runs only through a manual dispatch.
+# End-to-end check of the rfq-api routes that gate ITS quotes on mainnet
+# (`axe test rfq`). Each route is quoted and its actions are sent on the
+# source chain in turn, then every transfer's status is polled until DONE.
+# Scheduled runs cover testnet; mainnet runs only through a manual dispatch.
 #
 # Funding the shared EVM wallet needs on the source chain: native gas for the
 # ITS fees (paid as transaction value) and the native-wrap amount, plus the
@@ -27,10 +27,10 @@ on:
           - testnet
           - mainnet
       routes:
-        description: Space-separated routes to run, in order (its, native-wrap, gateway, solana)
+        description: Comma-separated routes to run, in order (its, native-wrap, gateway, solana)
         type: string
         required: true
-        default: its native-wrap gateway solana
+        default: its,native-wrap,gateway,solana
       source:
         description: Source chain (Fuji or Sepolia on testnet)
         type: choice
@@ -52,40 +52,15 @@ concurrency:
 jobs:
   test-rfq:
     runs-on: ubuntu-latest
-    # Four routes, each polled for up to 45 minutes.
-    timeout-minutes: 200
+    # The sends take minutes, then every transfer is polled for up to 45
+    # minutes at once.
+    timeout-minutes: 75
+    env:
+      NETWORK: ${{ inputs.network || 'testnet' }}
+      ROUTES: ${{ inputs.routes || 'its,native-wrap,gateway,solana' }}
+      SOURCE: ${{ inputs.source || 'avalanche' }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve requested routes
-        id: options
-        shell: bash
-        env:
-          INPUT_NETWORK: ${{ inputs.network }}
-          INPUT_ROUTES: ${{ inputs.routes }}
-          INPUT_SOURCE: ${{ inputs.source }}
-        run: |
-          set -euo pipefail
-          NETWORK="${INPUT_NETWORK:-testnet}"
-          ROUTES="${INPUT_ROUTES:-its native-wrap gateway solana}"
-          SOURCE="${INPUT_SOURCE:-avalanche}"
-          for route in $ROUTES; do
-            case "$route" in
-              its|native-wrap|gateway|solana) ;;
-              *)
-                echo "::error::Unknown route: $route (expected its, native-wrap, gateway, solana)" >&2
-                exit 1 ;;
-            esac
-          done
-          if [ -z "${ROUTES// /}" ]; then
-            echo "::error::No routes requested" >&2
-            exit 1
-          fi
-          {
-            echo "network=$NETWORK"
-            echo "routes=$ROUTES"
-            echo "source=$SOURCE"
-          } >> "$GITHUB_OUTPUT"
 
       # Prefer the binary built for this exact commit, but fall back to a local
       # release build when no artifact exists.
@@ -118,67 +93,58 @@ jobs:
         shell: bash
         run: cargo build --release --locked
 
-      - name: Clone axelar-contract-deployments (sibling)
+      - name: Clone chains config (sibling)
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 \
-            https://github.com/axelarnetwork/axelar-contract-deployments.git \
-            "$GITHUB_WORKSPACE/../axelar-contract-deployments"
+          DEPLOYMENTS="$GITHUB_WORKSPACE/../axelar-contract-deployments"
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/axelarnetwork/axelar-contract-deployments.git "$DEPLOYMENTS"
+          git -C "$DEPLOYMENTS" sparse-checkout set axelar-chains-config/info
 
-      # The source chain's RPC comes from chains-config. Apply optional private
-      # endpoints to a runner-temp copy so RPC credentials never enter either
-      # repository working tree.
-      - name: Prepare chains config
+      # Testnet takes private RPCs through FUJI_RPC_URL and SEP_RPC_URL.
+      # Mainnet has no such override, so its endpoints go into a runner-temp
+      # copy of the config, keeping RPC credentials out of both working trees.
+      - name: Prepare mainnet chains config
         id: config
+        if: env.NETWORK == 'mainnet'
         shell: bash
         env:
-          NETWORK: ${{ steps.options.outputs.network }}
-          AVALANCHE_TESTNET_RPC: ${{ secrets.AVALANCHE_TESTNET_RPC }}
-          ETHEREUM_TESTNET_RPC: ${{ secrets.ETHEREUM_TESTNET_RPC }}
           AVALANCHE_MAINNET_RPC: ${{ secrets.AVALANCHE_MAINNET_RPC }}
           ETHEREUM_MAINNET_RPC: ${{ secrets.ETHEREUM_MAINNET_RPC }}
         run: |
           set -euo pipefail
-          if [ "$NETWORK" = mainnet ]; then
-            AVALANCHE_CHAIN_ID=43114; ETHEREUM_CHAIN_ID=1
-            AVALANCHE_RPC="${AVALANCHE_MAINNET_RPC:-}"; ETHEREUM_RPC="${ETHEREUM_MAINNET_RPC:-}"
-          else
-            AVALANCHE_CHAIN_ID=43113; ETHEREUM_CHAIN_ID=11155111
-            AVALANCHE_RPC="${AVALANCHE_TESTNET_RPC:-}"; ETHEREUM_RPC="${ETHEREUM_TESTNET_RPC:-}"
-          fi
-          SOURCE="$GITHUB_WORKSPACE/../axelar-contract-deployments/axelar-chains-config/info/$NETWORK.json"
-          TARGET="$RUNNER_TEMP/rfq-$NETWORK.json"
+          SOURCE_CONFIG="$GITHUB_WORKSPACE/../axelar-contract-deployments/axelar-chains-config/info/mainnet.json"
+          TARGET="$RUNNER_TEMP/rfq-mainnet.json"
           jq \
-            --argjson avalanche_id "$AVALANCHE_CHAIN_ID" \
-            --argjson ethereum_id "$ETHEREUM_CHAIN_ID" \
-            --arg avalanche "$AVALANCHE_RPC" \
-            --arg ethereum "$ETHEREUM_RPC" \
-            '(.chains[] | select(.chainId == $avalanche_id).rpc) |= if $avalanche == "" then . else $avalanche end
-             | (.chains[] | select(.chainId == $ethereum_id).rpc) |= if $ethereum == "" then . else $ethereum end' \
-            "$SOURCE" > "$TARGET"
+            --arg avalanche "${AVALANCHE_MAINNET_RPC:-}" \
+            --arg ethereum "${ETHEREUM_MAINNET_RPC:-}" \
+            '(.chains[] | select(.chainId == 43114).rpc) |= if $avalanche == "" then . else $avalanche end
+             | (.chains[] | select(.chainId == 1).rpc) |= if $ethereum == "" then . else $ethereum end' \
+            "$SOURCE_CONFIG" > "$TARGET"
           chmod 600 "$TARGET"
           echo "path=$TARGET" >> "$GITHUB_OUTPUT"
 
       - name: Run routes
-        id: routes
         shell: bash
         env:
           CHAINS_CONFIG: ${{ steps.config.outputs.path }}
+          FUJI_RPC_URL: ${{ secrets.AVALANCHE_TESTNET_RPC }}
+          SEP_RPC_URL: ${{ secrets.ETHEREUM_TESTNET_RPC }}
           EVM_PRIVATE_KEY: ${{ secrets.EVM_PRIVATE_KEY }}
           SOLANA_PRIVATE_KEY: ${{ secrets.SOLANA_PRIVATE_KEY }}
-          NETWORK: ${{ steps.options.outputs.network }}
-          ROUTES: ${{ steps.options.outputs.routes }}
-          SOURCE: ${{ steps.options.outputs.source }}
         run: |
           set -euo pipefail
           if [ -z "${EVM_PRIVATE_KEY:-}" ]; then
             echo "::error::The EVM_PRIVATE_KEY repository secret is required" >&2
             exit 1
           fi
+          if [ -z "${CHAINS_CONFIG:-}" ]; then
+            unset CHAINS_CONFIG
+          fi
           # The solana route's default recipient is the configured Solana key's
-          # address. axe reads SOLANA_PRIVATE_KEY as a keypair file path; the
-          # secret holds the JSON array, so write it to a runner-temp file.
+          # address. axe reads SOLANA_PRIVATE_KEY as a keypair file path, and
+          # the secret holds the JSON array, so write it to a runner-temp file.
           if [ -z "${SOLANA_PRIVATE_KEY:-}" ]; then
             unset SOLANA_PRIVATE_KEY
           elif [[ "$SOLANA_PRIVATE_KEY" == \[* ]]; then
@@ -187,65 +153,38 @@ jobs:
             chmod 600 "$KEY_FILE"
             export SOLANA_PRIVATE_KEY="$KEY_FILE"
           fi
-
-          RESULTS="$RUNNER_TEMP/rfq-results"
-          mkdir -p "$RESULTS"
-          echo "dir=$RESULTS" >> "$GITHUB_OUTPUT"
-          FAILED=0
-          # Serial: every route spends from the same wallet.
-          for route in $ROUTES; do
-            echo "::group::$route"
-            # stdout carries the JSON summary; progress streams on stderr.
-            if ./target/release/axe --network "$NETWORK" test rfq \
-                --route "$route" --source "$SOURCE" --json > "$RESULTS/$route.json"; then
-              echo success > "$RESULTS/$route.status"
-            else
-              echo failure > "$RESULTS/$route.status"
-              FAILED=1
-            fi
-            echo "::endgroup::"
-          done
-          exit "$FAILED"
+          # stdout carries the JSON summary, and progress streams on stderr.
+          ./target/release/axe --network "$NETWORK" test rfq \
+            --route "$ROUTES" --source "$SOURCE" --json > "$RUNNER_TEMP/rfq-summary.json"
 
       - name: Write RFQ route summary
         if: always()
         shell: bash
-        env:
-          NETWORK: ${{ steps.options.outputs.network }}
-          ROUTES: ${{ steps.options.outputs.routes }}
-          SOURCE: ${{ steps.options.outputs.source }}
-          RESULTS: ${{ steps.routes.outputs.dir }}
         run: |
           set -uo pipefail
+          SUMMARY="$RUNNER_TEMP/rfq-summary.json"
           {
             echo "## RFQ routes: $NETWORK from $SOURCE"
             echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! jq -e '.routes | length > 0' "$SUMMARY" > /dev/null 2>&1; then
+            echo "_No route summary was written; check the Run routes step log._" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
             echo "| Status | Route | Backend | Quote | Final state | Elapsed | Error |"
             echo "|---|---|---|---|---|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          PASSED=0
-          TOTAL=0
-          for route in $ROUTES; do
-            TOTAL=$((TOTAL + 1))
-            STATUS=$(cat "$RESULTS/$route.status" 2>/dev/null || echo "not run")
-            ROW=$(jq -er '[
+            jq -r '.routes[] | [
+                (if .error == null then "✓" else "✗" end),
+                .route,
                 (.backend // "-"),
                 (.quoteId // "-"),
                 (.status.state // "-"),
                 ((.elapsedSecs | tostring) + " s"),
                 ((.error // "") | gsub("[|\r\n]"; " ") | .[0:200])
-              ] | join(" | ")' "$RESULTS/$route.json" 2>/dev/null \
-              || echo "- | - | - | - | no summary; see the job log")
-            if [ "$STATUS" = success ]; then
-              PASSED=$((PASSED + 1))
-              echo "| ✓ | $route | $ROW |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| ✗ ($STATUS) | $route | $ROW |" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-          {
+              ] | "| " + join(" | ") + " |"' "$SUMMARY"
             echo ""
-            echo "**$PASSED / $TOTAL passed**"
+            jq -r '"**\([.routes[] | select(.error == null)] | length) / \(.routes | length) passed**"' "$SUMMARY"
           } >> "$GITHUB_STEP_SUMMARY"
           cat "$GITHUB_STEP_SUMMARY"
-          [ "$TOTAL" -gt 0 ] && [ "$PASSED" -eq "$TOTAL" ]
+          jq -e 'all(.routes[]; .error == null)' "$SUMMARY" > /dev/null

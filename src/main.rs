@@ -318,7 +318,7 @@ async fn run_rfq_test(
     global_network: Option<types::Network>,
 ) -> Result<()> {
     let cli::TestCommands::Rfq {
-        route,
+        routes,
         source,
         amount,
         recipient,
@@ -333,25 +333,48 @@ async fn run_rfq_test(
     else {
         unreachable!("run_rfq_test called with another test command")
     };
-    let private_key = commands::intents::resolve_private_key(
-        private_key,
-        std::env::var("EVM_PRIVATE_KEY").ok(),
-        std::env::var("PRIVATE_KEY").ok(),
-    )
-    .ok();
     commands::intents::rfq_test(commands::intents::RfqTestArgs {
         network: cli::resolve_network(global_network, config.as_deref())?,
-        route,
+        routes,
         source,
         amount,
         recipient,
         timeout: std::time::Duration::from_secs(timeout_secs),
         rfq_url: api.rfq_url,
         config,
-        wallet: commands::intents::RfqWallet::resolve(dry_run, sender, private_key)?,
+        wallet: rfq_wallet(dry_run, sender, private_key)?,
         json,
     })
     .await
+}
+
+/// The signing key, or for a dry run the address quotes are requested for.
+fn rfq_wallet(
+    dry_run: bool,
+    sender: Option<alloy::primitives::Address>,
+    private_key: Option<String>,
+) -> Result<commands::intents::RfqWallet> {
+    // clap has already read EVM_PRIVATE_KEY into the flag.
+    let private_key = commands::intents::resolve_private_key(
+        private_key,
+        None,
+        std::env::var("PRIVATE_KEY").ok(),
+    );
+    if !dry_run {
+        let signer = private_key?
+            .parse()
+            .map_err(|_| eyre::eyre!("the EVM private key is not valid hex"))?;
+        return Ok(commands::intents::RfqWallet::Signer(signer));
+    }
+    let private_key = private_key.ok();
+    if sender.is_none() && private_key.is_none() {
+        return Err(eyre::eyre!(
+            "a dry run needs --sender or an EVM key (EVM_PRIVATE_KEY, PRIVATE_KEY, or --private-key)"
+        ));
+    }
+    Ok(commands::intents::RfqWallet::DryRun(
+        commands::intents::resolve_quote_sender(sender, private_key)?,
+    ))
 }
 
 async fn run_test(

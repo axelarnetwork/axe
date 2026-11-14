@@ -413,6 +413,11 @@ impl TransferState {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Refunded | Self::Failed)
     }
+
+    /// A refund that is decided or submitted but not yet seen landing.
+    pub const fn refund_in_progress(self) -> bool {
+        matches!(self, Self::RefundPending | Self::RefundInitiated)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -820,6 +825,22 @@ mod tests {
         assert!(!TransferState::NotFound.is_terminal());
         assert!(!TransferState::RefundPending.is_terminal());
         assert!(!TransferState::RefundInitiated.is_terminal());
+    }
+
+    #[test]
+    fn only_unsettled_refunds_are_in_progress() {
+        assert!(TransferState::RefundPending.refund_in_progress());
+        assert!(TransferState::RefundInitiated.refund_in_progress());
+        for state in [
+            TransferState::AwaitingDeposit,
+            TransferState::Pending,
+            TransferState::Done,
+            TransferState::Refunded,
+            TransferState::Failed,
+            TransferState::NotFound,
+        ] {
+            assert!(!state.refund_in_progress());
+        }
     }
 
     #[test]
