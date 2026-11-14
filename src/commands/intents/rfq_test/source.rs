@@ -31,12 +31,7 @@ pub struct SourceChain {
 }
 
 impl SourceChain {
-    pub async fn connect(
-        network: Network,
-        config: Option<PathBuf>,
-        chain: Chain,
-        output: Output,
-    ) -> Result<Self> {
+    pub async fn connect(network: Network, config: Option<PathBuf>, chain: Chain) -> Result<Self> {
         let chain_id = chain
             .caip2
             .strip_prefix("eip155:")
@@ -46,11 +41,7 @@ impl SourceChain {
             .await?
             .into_path();
         let config = ChainsConfig::load(&config_path).await?;
-        let feedback = match output {
-            Output::Human => DiscoveryFeedback::Detailed,
-            Output::Json => DiscoveryFeedback::Quiet,
-        };
-        let rpc_url = resolve_evm_rpc(&config, chain_id, chain.label, feedback)
+        let rpc_url = resolve_evm_rpc(&config, chain_id, chain.label, DiscoveryFeedback::Detailed)
             .await
             .ok_or_else(|| eyre!("{} has no working RPC in the chains config", chain.label))?;
         Ok(Self {

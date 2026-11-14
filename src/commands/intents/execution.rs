@@ -487,7 +487,7 @@ async fn require_quote(client: &RfqClient, request: &QuoteRequest) -> Result<Tim
     }
 }
 
-fn validate_quote_lifetime(quote: &Quote) -> Result<()> {
+pub(super) fn validate_quote_lifetime(quote: &Quote) -> Result<()> {
     let remaining = quote.quote_expires_in();
     if remaining < MIN_QUOTE_LIFETIME {
         return Err(eyre!(

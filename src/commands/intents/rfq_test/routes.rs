@@ -1,5 +1,5 @@
-use alloy::primitives::{Address, U256};
-use eyre::{Result, WrapErr, eyre};
+use alloy::primitives::{Address, U256, address};
+use eyre::{Result, eyre};
 use solana_sdk::pubkey::Pubkey;
 
 use super::types::{Recipient, RfqRoute, RfqSource};
@@ -7,8 +7,11 @@ use crate::commands::intents::types::{BackendType, OrderType, QuoteRequest};
 use crate::types::Network;
 
 const NATIVE_TOKEN: &str = "0x0000000000000000000000000000000000000000";
-const WRAPPED_DEFAULT_AMOUNT: u64 = 100_000_000_000_000;
-const GATEWAY_DEFAULT_AMOUNT: u64 = 1_000_000;
+// rfq-api tells transfers apart by sender, contract, token and amount, so
+// routes that share a token get distinct amounts.
+const ITS_DEFAULT_AMOUNT: u64 = 100_000_000_000_000;
+const NATIVE_WRAP_DEFAULT_AMOUNT: u64 = 110_000_000_000_000;
+const SOLANA_DEFAULT_AMOUNT: u64 = 120_000_000_000_000;
 
 /// One value per EVM source chain.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +44,12 @@ struct NetworkTokens {
     /// Each source chain's own wrapped native token: WAVAX and WETH.
     wrapped_native: BySource<WrappedToken>,
     usdc: BySource<&'static str>,
+    /// The contract every quoted transaction calls and every approval names.
+    axelar_app: BySource<Address>,
+    /// The most native gas, in wei, a quote may charge as transaction value.
+    max_fee: BySource<u128>,
+    /// `None` where the gateway transfer fee exceeds any small amount.
+    gateway_default_amount: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +97,17 @@ const TESTNET: NetworkTokens = NetworkTokens {
         avalanche: "0x57F1c63497AEe0bE305B8852b354CEc793da43bB",
         ethereum: "0x254d06f33bDc5b8ee05b2ea472107E300226659A",
     },
+    axelar_app: BySource {
+        avalanche: address!("0xe4f05a0D5541C03d07f5175147E92D796Cae8db6"),
+        ethereum: address!("0xe4f05a0D5541C03d07f5175147E92D796Cae8db6"),
+    },
+    // Observed fees peak at about 0.05 AVAX and 0.0002 ETH, on the solana
+    // route.
+    max_fee: BySource {
+        avalanche: 250_000_000_000_000_000,
+        ethereum: 10_000_000_000_000_000,
+    },
+    gateway_default_amount: Some(1_000_000),
 };
 
 const WAVAX_MAINNET: WrappedToken = WrappedToken {
@@ -129,6 +149,17 @@ const MAINNET: NetworkTokens = NetworkTokens {
         avalanche: "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC",
         ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
     },
+    axelar_app: BySource {
+        avalanche: address!("0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401"),
+        ethereum: address!("0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401"),
+    },
+    // About 25 to 30 USD at the time of writing.
+    max_fee: BySource {
+        avalanche: 1_000_000_000_000_000_000,
+        ethereum: 10_000_000_000_000_000,
+    },
+    // Axelar charges a flat 61.5 USDC between Avalanche and Ethereum.
+    gateway_default_amount: None,
 };
 
 impl NetworkTokens {
@@ -161,7 +192,9 @@ pub struct RoutePlan {
     pub wrap_shortfall: bool,
     /// Backends whose quotes the route accepts.
     pub backends: &'static [BackendType],
-    pub default_amount: u64,
+    pub default_amount: Option<u64>,
+    pub axelar_app: Address,
+    pub max_fee: U256,
 }
 
 impl RoutePlan {
@@ -177,76 +210,91 @@ impl RoutePlan {
             chain: tokens.chains.on(other),
             token,
         };
-        let plan = match route {
-            RfqRoute::Its => Self {
-                route,
-                from: from(wrapped.evm.on(source)),
-                to: to(wrapped.evm.on(other)),
-                wrap_shortfall: true,
-                backends: &[BackendType::Its],
-                default_amount: WRAPPED_DEFAULT_AMOUNT,
-            },
-            RfqRoute::NativeWrap => Self {
-                route,
-                from: from(NATIVE_TOKEN),
-                to: to(wrapped.evm.on(other)),
-                wrap_shortfall: false,
-                backends: &[BackendType::Its],
-                default_amount: WRAPPED_DEFAULT_AMOUNT,
-            },
+        let plan = |from: RouteAsset,
+                    to: RouteAsset,
+                    wrap_shortfall: bool,
+                    backends: &'static [BackendType],
+                    default_amount: Option<u64>| Self {
+            route,
+            from,
+            to,
+            wrap_shortfall,
+            backends,
+            default_amount,
+            axelar_app: tokens.axelar_app.on(source),
+            max_fee: U256::from(tokens.max_fee.on(source)),
+        };
+        Ok(match route {
+            RfqRoute::Its => plan(
+                from(wrapped.evm.on(source)),
+                to(wrapped.evm.on(other)),
+                true,
+                &[BackendType::Its],
+                Some(ITS_DEFAULT_AMOUNT),
+            ),
+            RfqRoute::NativeWrap => plan(
+                from(NATIVE_TOKEN),
+                to(wrapped.evm.on(other)),
+                false,
+                &[BackendType::Its],
+                Some(NATIVE_WRAP_DEFAULT_AMOUNT),
+            ),
             // rfq-api quotes gateway-express instead of gateway when express
             // covers the amount.
-            RfqRoute::Gateway => Self {
-                route,
-                from: from(tokens.usdc.on(source)),
-                to: to(tokens.usdc.on(other)),
-                wrap_shortfall: false,
-                backends: &[BackendType::Gateway, BackendType::GatewayExpress],
-                default_amount: GATEWAY_DEFAULT_AMOUNT,
-            },
-            RfqRoute::Solana => Self {
-                route,
-                from: from(wrapped.evm.on(source)),
-                to: RouteAsset {
+            RfqRoute::Gateway => plan(
+                from(tokens.usdc.on(source)),
+                to(tokens.usdc.on(other)),
+                false,
+                &[BackendType::Gateway, BackendType::GatewayExpress],
+                tokens.gateway_default_amount,
+            ),
+            RfqRoute::Solana => plan(
+                from(wrapped.evm.on(source)),
+                RouteAsset {
                     chain: tokens.solana,
                     token: wrapped.solana,
                 },
-                wrap_shortfall: true,
-                backends: &[BackendType::Its],
-                default_amount: WRAPPED_DEFAULT_AMOUNT,
-            },
-        };
-        Ok(plan)
+                true,
+                &[BackendType::Its],
+                Some(SOLANA_DEFAULT_AMOUNT),
+            ),
+        })
+    }
+
+    /// `--amount`, else the route's default.
+    pub fn amount(&self, explicit: Option<U256>) -> Result<U256> {
+        explicit
+            .or(self.default_amount.map(U256::from))
+            .ok_or_else(|| {
+                eyre!(
+                    "the {} route has no default amount on this network because Axelar's transfer fee exceeds any small one; pass --amount",
+                    self.route
+                )
+            })
+    }
+
+    pub fn spends_native(&self) -> bool {
+        self.route == RfqRoute::NativeWrap
     }
 
     pub fn delivers_to_solana(&self) -> bool {
         self.route == RfqRoute::Solana
     }
 
-    /// The recipient as typed, else the sender for EVM destinations or the
-    /// configured Solana key for Solana ones.
+    /// `--solana-recipient` on the solana route, else `--recipient` or the
+    /// sender.
     pub fn recipient(
         &self,
-        explicit: Option<&str>,
+        evm: Option<Address>,
+        solana: Option<Pubkey>,
         sender: Address,
-        configured_solana: Option<Pubkey>,
     ) -> Result<Recipient> {
-        let route = self.route;
-        match (self.delivers_to_solana(), explicit) {
-            (false, Some(value)) => value
-                .parse()
-                .map(Recipient::Evm)
-                .wrap_err_with(|| format!("--recipient {value} is not an EVM address ({route} route)")),
-            (false, None) => Ok(Recipient::Evm(sender)),
-            (true, Some(value)) => value.parse().map(Recipient::Solana).wrap_err_with(|| {
-                format!("--recipient {value} is not a Solana address ({route} route)")
-            }),
-            (true, None) => configured_solana.map(Recipient::Solana).ok_or_else(|| {
-                eyre!(
-                    "the solana route needs --recipient set to a Solana address; no Solana key is configured"
-                )
-            }),
+        if self.delivers_to_solana() {
+            return solana
+                .map(Recipient::Solana)
+                .ok_or_else(|| eyre!("the solana route needs --solana-recipient"));
         }
+        Ok(Recipient::Evm(evm.unwrap_or(sender)))
     }
 
     pub fn quote_request(
@@ -286,9 +334,13 @@ mod tests {
         );
         assert_eq!(fuji.to.chain.caip2, "eip155:11155111");
         assert_eq!(fuji.to.token, "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069");
-        assert!(fuji.wrap_shortfall);
+        assert!(fuji.wrap_shortfall && !fuji.spends_native());
         assert_eq!(fuji.backends, &[BackendType::Its]);
-        assert_eq!(fuji.default_amount, 100_000_000_000_000);
+        assert_eq!(
+            fuji.axelar_app,
+            address!("0xe4f05a0D5541C03d07f5175147E92D796Cae8db6")
+        );
+        assert_eq!(fuji.max_fee, U256::from(250_000_000_000_000_000u128));
 
         let sepolia = plan(RfqRoute::Its, RfqSource::Ethereum);
         assert_eq!(
@@ -300,6 +352,7 @@ mod tests {
             sepolia.to.token,
             "0xd7680446338b2C078910d2D01125b0509b5F6337"
         );
+        assert_eq!(sepolia.max_fee, U256::from(10_000_000_000_000_000u128));
     }
 
     #[test]
@@ -307,8 +360,30 @@ mod tests {
         let route = plan(RfqRoute::NativeWrap, RfqSource::Avalanche);
         assert_eq!(route.from.token, NATIVE_TOKEN);
         assert_eq!(route.to.token, "0xEeE9FC09dCf8130b2ba3744b099266b3F1E89069");
-        assert!(!route.wrap_shortfall);
+        assert!(!route.wrap_shortfall && route.spends_native());
         assert_eq!(route.backends, &[BackendType::Its]);
+    }
+
+    #[test]
+    fn routes_sharing_a_token_default_to_distinct_amounts() {
+        let amounts: Vec<U256> = [RfqRoute::Its, RfqRoute::NativeWrap, RfqRoute::Solana]
+            .into_iter()
+            .map(|route| plan(route, RfqSource::Avalanche).amount(None).unwrap())
+            .collect();
+        assert_eq!(
+            amounts,
+            [
+                U256::from(100_000_000_000_000u64),
+                U256::from(110_000_000_000_000u64),
+                U256::from(120_000_000_000_000u64)
+            ]
+        );
+        assert_eq!(
+            plan(RfqRoute::Its, RfqSource::Avalanche)
+                .amount(Some(U256::from(7u8)))
+                .unwrap(),
+            U256::from(7u8)
+        );
     }
 
     #[test]
@@ -324,7 +399,19 @@ mod tests {
             route.backends,
             &[BackendType::Gateway, BackendType::GatewayExpress]
         );
-        assert_eq!(route.default_amount, 1_000_000);
+        assert_eq!(route.amount(None).unwrap(), U256::from(1_000_000u64));
+    }
+
+    #[test]
+    fn mainnet_gateway_needs_an_explicit_amount() {
+        let route =
+            RoutePlan::resolve(Network::Mainnet, RfqRoute::Gateway, RfqSource::Avalanche).unwrap();
+
+        assert!(route.amount(None).is_err());
+        assert_eq!(
+            route.amount(Some(U256::from(70_000_000u64))).unwrap(),
+            U256::from(70_000_000u64)
+        );
     }
 
     #[test]
@@ -355,6 +442,10 @@ mod tests {
             RoutePlan::resolve(Network::Mainnet, RfqRoute::Its, RfqSource::Avalanche).unwrap();
         assert_eq!(route.from.chain.caip2, "eip155:43114");
         assert_eq!(route.to.chain.caip2, "eip155:1");
+        assert_eq!(
+            route.axelar_app,
+            address!("0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401")
+        );
 
         for network in [Network::DevnetAmplifier, Network::Stagenet] {
             assert!(RoutePlan::resolve(network, RfqRoute::Its, RfqSource::Avalanche).is_err());
@@ -365,54 +456,33 @@ mod tests {
     fn evm_recipients_default_to_the_sender() {
         let route = plan(RfqRoute::Its, RfqSource::Avalanche);
         let sender = Address::from([9u8; 20]);
-        let other = "0x000000000000000000000000000000000000dEaD";
+        let other = Address::from([8u8; 20]);
 
         assert_eq!(
-            route.recipient(None, sender, None).unwrap(),
+            route.recipient(None, None, sender).unwrap(),
             Recipient::Evm(sender)
         );
         assert_eq!(
-            route.recipient(Some(other), sender, None).unwrap(),
-            Recipient::Evm(other.parse().unwrap())
-        );
-        assert!(
             route
-                .recipient(
-                    Some("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"),
-                    sender,
-                    None
-                )
-                .is_err()
+                .recipient(Some(other), Some(Pubkey::new_unique()), sender)
+                .unwrap(),
+            Recipient::Evm(other)
         );
     }
 
     #[test]
-    fn solana_recipients_come_from_the_flag_or_the_configured_key() {
+    fn the_solana_route_needs_a_solana_recipient() {
         let route = plan(RfqRoute::Solana, RfqSource::Avalanche);
         let sender = Address::from([9u8; 20]);
-        let typed = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
-        let configured = Pubkey::new_unique();
+        let solana = Pubkey::new_unique();
 
         assert_eq!(
             route
-                .recipient(Some(typed), sender, Some(configured))
+                .recipient(Some(Address::from([8u8; 20])), Some(solana), sender)
                 .unwrap(),
-            Recipient::Solana(typed.parse().unwrap())
+            Recipient::Solana(solana)
         );
-        assert_eq!(
-            route.recipient(None, sender, Some(configured)).unwrap(),
-            Recipient::Solana(configured)
-        );
-        assert!(route.recipient(None, sender, None).is_err());
-        assert!(
-            route
-                .recipient(
-                    Some("0x000000000000000000000000000000000000dEaD"),
-                    sender,
-                    None
-                )
-                .is_err()
-        );
+        assert!(route.recipient(Some(sender), None, sender).is_err());
     }
 
     #[test]
@@ -428,7 +498,7 @@ mod tests {
         );
 
         let request = serde_json::to_value(route.quote_request(
-            U256::from(route.default_amount),
+            route.amount(None).unwrap(),
             sender,
             recipient,
         ))
@@ -441,7 +511,7 @@ mod tests {
                 "fromToken": "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
                 "toChain": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
                 "toToken": "8d7dmvUho3uAKZPceCbFr9k1LjQMZzPwHTFTDrhrP9kH",
-                "amount": "100000000000000",
+                "amount": "120000000000000",
                 "orderType": "EXACT_INPUT",
                 "sender": "0x000000000000000000000000000000000000dEaD",
                 "recipient": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"

@@ -70,11 +70,6 @@ impl Output {
             &format!("{} {route}", utc_clock()),
             &format!("{} {context}", status.state.label()),
         );
-        if status.state.refund_in_progress() {
-            ui::warn(&format!(
-                "{route}: the transfer is being refunded and will not reach DONE"
-            ));
-        }
     }
 
     pub fn poll_failed(self, route: RfqRoute, error: &eyre::Report) {
@@ -106,6 +101,14 @@ fn human_route_summary(route: &RouteReport, dry_run: bool) -> Result<()> {
     if let Some(status) = &route.status {
         render_status(status, false)?;
     }
+    if let Some(uncertain) = &route.uncertain_submission {
+        ui::warn(&format!(
+            "{} was broadcast without a receipt: {} ({})",
+            uncertain.action,
+            uncertain.tx_hashes.join(", "),
+            uncertain.error
+        ));
+    }
     let elapsed = ui::format_duration(Duration::from_secs(route.elapsed_secs));
     match (&route.error, dry_run) {
         (Some(error), _) => ui::error(&format!("{} route failed: {error}", route.route)),
@@ -123,17 +126,29 @@ pub struct ActionTx {
     pub tx_hash: String,
 }
 
+/// An action whose broadcasts ran out without a receipt. Any of them may
+/// still be mined.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UncertainSubmission {
+    pub action: String,
+    pub tx_hashes: Vec<String>,
+    pub error: String,
+}
+
 /// What checking one route did.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteReport {
     pub route: RfqRoute,
-    pub request: QuoteRequest,
+    /// The quote request, or `None` when the route could not form one.
+    pub request: Option<QuoteRequest>,
     pub quote_id: Option<String>,
     pub backend: Option<BackendType>,
     pub output_amount: Option<String>,
     pub wrap_tx: Option<String>,
     pub transactions: Vec<ActionTx>,
+    pub uncertain_submission: Option<UncertainSubmission>,
     /// The quote's actions, reported by a dry run only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<Action>>,
@@ -145,7 +160,7 @@ pub struct RouteReport {
 }
 
 impl RouteReport {
-    pub const fn new(route: RfqRoute, request: QuoteRequest) -> Self {
+    pub const fn new(route: RfqRoute, request: Option<QuoteRequest>) -> Self {
         Self {
             route,
             request,
@@ -154,6 +169,7 @@ impl RouteReport {
             output_amount: None,
             wrap_tx: None,
             transactions: Vec::new(),
+            uncertain_submission: None,
             actions: None,
             status: None,
             elapsed_secs: 0,
@@ -217,7 +233,7 @@ mod tests {
     fn report(route: RfqRoute) -> RouteReport {
         RouteReport::new(
             route,
-            QuoteRequest {
+            Some(QuoteRequest {
                 from_chain: "eip155:43113".to_owned(),
                 from_token: "0xfrom".to_owned(),
                 to_chain: "eip155:11155111".to_owned(),
@@ -226,7 +242,7 @@ mod tests {
                 order_type: OrderType::ExactInput,
                 sender: "0xsender".to_owned(),
                 recipient: "0xrecipient".to_owned(),
-            },
+            }),
         )
     }
 

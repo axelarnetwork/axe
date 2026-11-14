@@ -655,14 +655,45 @@ pub async fn send_tx_robust_with_warning(
             }
         }
     }
-    Err(eyre::eyre!(
-        "{label}: no receipt after {SEND_ROUNDS} broadcast rounds{}",
-        match last_hash {
-            Some(hash) => format!(" (last tx {hash:#x})"),
-            None => String::new(),
-        }
-    ))
+    Err(rounds_exhausted(label, sent_hashes, last_hash))
 }
+
+fn rounds_exhausted(label: &str, mut sent: Vec<TxHash>, last: Option<TxHash>) -> eyre::Report {
+    let Some(last) = last else {
+        return eyre::eyre!("{label}: no receipt after {SEND_ROUNDS} broadcast rounds");
+    };
+    sent.retain(|hash| *hash != last);
+    sent.push(last);
+    eyre::Report::new(UnconfirmedBroadcast {
+        label: label.to_owned(),
+        hashes: sent,
+    })
+}
+
+/// A send whose broadcast rounds ran out without a receipt. Any of its
+/// transactions may still be mined.
+#[derive(Debug)]
+pub struct UnconfirmedBroadcast {
+    pub label: String,
+    /// Every transaction the send signed, the last one most recent.
+    pub hashes: Vec<TxHash>,
+}
+
+impl std::fmt::Display for UnconfirmedBroadcast {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: no receipt after {SEND_ROUNDS} broadcast rounds",
+            self.label
+        )?;
+        match self.hashes.last() {
+            Some(hash) => write!(formatter, " (last tx {hash:#x})"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for UnconfirmedBroadcast {}
 
 /// [`send_tx_robust_with_warning`], failing when the mined transaction
 /// reverted.
@@ -1199,10 +1230,30 @@ mod tests {
     use alloy::transports::mock::Asserter;
 
     use super::{
-        AVALANCHE_FUJI_CHAIN_ID, EvmEndpoints, is_pending_state_error, nonce_contention_backoff,
-        nonce_held_by_pooled_tx, parse_expected_nonce, send_error_may_mean_landed,
-        should_retry_fill,
+        AVALANCHE_FUJI_CHAIN_ID, EvmEndpoints, SEND_ROUNDS, TxHash, UnconfirmedBroadcast,
+        is_pending_state_error, nonce_contention_backoff, nonce_held_by_pooled_tx,
+        parse_expected_nonce, send_error_may_mean_landed, should_retry_fill,
     };
+
+    #[test]
+    fn an_unconfirmed_broadcast_reads_as_before_and_keeps_its_hashes() {
+        let last = TxHash::from([2u8; 32]);
+        let error = eyre::Report::new(UnconfirmedBroadcast {
+            label: "deposit".to_owned(),
+            hashes: vec![TxHash::from([1u8; 32]), last],
+        });
+
+        assert_eq!(
+            error.to_string(),
+            format!("deposit: no receipt after {SEND_ROUNDS} broadcast rounds (last tx {last:#x})")
+        );
+        assert_eq!(
+            error
+                .downcast_ref::<UnconfirmedBroadcast>()
+                .map(|unconfirmed| unconfirmed.hashes.len()),
+            Some(2)
+        );
+    }
 
     fn mocked_endpoints(asserter: Asserter) -> EvmEndpoints {
         EvmEndpoints {

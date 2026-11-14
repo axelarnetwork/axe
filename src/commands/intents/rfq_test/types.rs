@@ -93,9 +93,10 @@ pub struct RfqTestArgs {
     /// Source amount in base units for a single route, or `None` for each
     /// route's default.
     pub amount: Option<U256>,
-    /// Destination recipient for every route as typed, or `None` for each
-    /// route's default.
-    pub recipient: Option<String>,
+    /// Recipient on the EVM routes, or `None` for the sender.
+    pub recipient: Option<Address>,
+    /// Recipient on the solana route, which has no default.
+    pub solana_recipient: Option<Pubkey>,
     pub timeout: Duration,
     pub rfq_url: Option<String>,
     /// Chains config for the source RPC, or `None` to resolve it from the

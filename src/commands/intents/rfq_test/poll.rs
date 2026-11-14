@@ -2,10 +2,12 @@ use std::future::Future;
 use std::time::Duration;
 
 use eyre::{Result, eyre};
+use reqwest::StatusCode;
 use tokio::time::Instant;
 
 use super::report::Output;
 use super::types::RfqRoute;
+use crate::commands::intents::client::RfqHttpError;
 use crate::commands::intents::types::{StatusResponse, TransferState};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -13,15 +15,17 @@ const POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// How a status watch ended.
 #[derive(Debug)]
 pub enum PollEnd {
-    /// DONE, a terminal failure, or NOT_FOUND, which for an ITS or gateway
-    /// quote means rfq-api does not know the quote ID.
+    /// DONE, or a state that already fails the route: a terminal failure, a
+    /// refund in any stage, or NOT_FOUND, which for an ITS or gateway quote
+    /// means rfq-api does not know the quote ID.
     Settled(StatusResponse),
     /// The timeout passed first, with the last status read, if any.
     TimedOut(Option<StatusResponse>),
 }
 
 /// Poll a quote's status until it settles or `timeout` passes. A failed poll
-/// is retried, not fatal: an upstream outage answers 502.
+/// is retried, since an upstream outage answers 502, unless the API refused
+/// the request itself.
 pub async fn watch_status<F, Fut>(
     mut fetch: F,
     quote_id: &str,
@@ -37,6 +41,7 @@ where
     let mut last: Option<StatusResponse> = None;
     while Instant::now() < deadline {
         match fetch().await {
+            Err(error) if is_refused(&error) => return Err(error),
             Err(error) => output.poll_failed(route, &error),
             Ok(status) if status.quote_id != quote_id => {
                 return Err(eyre!(
@@ -48,7 +53,10 @@ where
                 if last.as_ref().map(|last| last.state) != Some(status.state) {
                     output.transition(route, &status);
                 }
-                if status.state.is_terminal() || status.state == TransferState::NotFound {
+                if status.state.is_terminal()
+                    || status.state.refund_in_progress()
+                    || status.state == TransferState::NotFound
+                {
                     return Ok(PollEnd::Settled(status));
                 }
                 last = Some(status);
@@ -57,6 +65,13 @@ where
         tokio::time::sleep(POLL_INTERVAL).await;
     }
     Ok(PollEnd::TimedOut(last))
+}
+
+/// A 4xx other than rate limiting: polling again would get the same answer.
+fn is_refused(error: &eyre::Report) -> bool {
+    error.downcast_ref::<RfqHttpError>().is_some_and(|error| {
+        error.status.is_client_error() && error.status != StatusCode::TOO_MANY_REQUESTS
+    })
 }
 
 #[cfg(test)]
@@ -153,35 +168,61 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn keeps_polling_through_refund_states_until_the_refund_lands() {
-        let (end, polls) = watch(VecDeque::from([
-            Ok(status("PENDING")),
-            Ok(status("REFUND_PENDING")),
-            Ok(status("REFUND_INITIATED")),
-            Ok(status("REFUND_INITIATED")),
-            Ok(status("REFUNDED")),
-        ]))
-        .await;
+    async fn the_first_refund_state_settles_the_watch() {
+        for (state, expected) in [
+            ("REFUND_PENDING", TransferState::RefundPending),
+            ("REFUND_INITIATED", TransferState::RefundInitiated),
+            ("REFUNDED", TransferState::Refunded),
+        ] {
+            let (end, polls) =
+                watch(VecDeque::from([Ok(status("PENDING")), Ok(status(state))])).await;
 
-        assert_eq!(settled_state(&end), Some(TransferState::Refunded));
-        assert_eq!(polls, 5);
+            assert_eq!(settled_state(&end), Some(expected));
+            assert_eq!(polls, 2);
+        }
     }
 
     #[tokio::test(start_paused = true)]
     async fn times_out_with_the_last_status_after_polling_every_interval() {
         let started = Instant::now();
         let (end, polls) = watch(VecDeque::from([
+            Ok(status("AWAITING_DEPOSIT")),
             Ok(status("PENDING")),
-            Ok(status("REFUND_INITIATED")),
         ]))
         .await;
 
         assert!(matches!(
             end,
-            PollEnd::TimedOut(Some(status)) if status.state == TransferState::RefundInitiated
+            PollEnd::TimedOut(Some(status)) if status.state == TransferState::Pending
         ));
         assert_eq!(polls, 180);
         assert!(started.elapsed() >= TIMEOUT);
+    }
+
+    fn http_error(status: StatusCode) -> eyre::Report {
+        eyre::Report::new(RfqHttpError {
+            method: "GET".to_owned(),
+            url: "https://rfq.example/status".to_owned(),
+            status,
+            message: "error".to_owned(),
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_request_ends_the_watch_but_rate_limits_and_outages_retry() {
+        let (fetch, polls) = scripted(VecDeque::from([
+            Err(http_error(StatusCode::TOO_MANY_REQUESTS)),
+            Err(http_error(StatusCode::BAD_GATEWAY)),
+            Err(http_error(StatusCode::BAD_REQUEST)),
+            Ok(status("DONE")),
+        ]));
+
+        let error = watch_status(fetch, "its_quote", RfqRoute::Its, TIMEOUT, Output::Json)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("400 Bad Request"));
+        assert_eq!(*polls.lock().unwrap(), 3);
     }
 
     #[tokio::test(start_paused = true)]

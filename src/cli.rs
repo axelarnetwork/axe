@@ -784,15 +784,18 @@ pub enum TestCommands {
         #[arg(long, value_enum, default_value_t)]
         source: RfqSource,
 
-        /// Source amount in base units, for a single route (default 10^14 of
-        /// the wrapped native token, or 1 USDC on the gateway route)
+        /// Source amount in base units, for a single route (each route has
+        /// its own default, and mainnet gateway has none)
         #[arg(long)]
         amount: Option<U256>,
 
-        /// Destination recipient for every route (default the sender on EVM,
-        /// the SOLANA_PRIVATE_KEY keypair's address on Solana)
+        /// Recipient on the EVM routes (default the sender)
         #[arg(long)]
-        recipient: Option<String>,
+        recipient: Option<Address>,
+
+        /// Recipient on the solana route, which needs one
+        #[arg(long)]
+        solana_recipient: Option<solana_sdk::pubkey::Pubkey>,
 
         /// Seconds to poll each transfer for DONE before failing it
         #[arg(long, alias = "timeout", default_value = "2700", value_parser = clap::value_parser!(u64).range(1..))]
@@ -1666,6 +1669,10 @@ mod tests {
             "sepolia",
             "--amount",
             "5000",
+            "--recipient",
+            "0x000000000000000000000000000000000000bEEF",
+            "--solana-recipient",
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
             "--dry-run",
             "--sender",
             "0x000000000000000000000000000000000000dEaD",
@@ -1680,6 +1687,8 @@ mod tests {
                     routes,
                     source,
                     amount,
+                    recipient,
+                    solana_recipient,
                     timeout_secs,
                     sender,
                     dry_run,
@@ -1694,6 +1703,7 @@ mod tests {
         assert_eq!(routes, [RfqRoute::NativeWrap]);
         assert_eq!(source, RfqSource::Ethereum);
         assert_eq!(amount, Some(U256::from(5_000u64)));
+        assert!(recipient.is_some() && solana_recipient.is_some());
         assert_eq!(timeout_secs, 60);
         assert!(sender.is_some() && dry_run && json);
     }
@@ -1720,6 +1730,18 @@ mod tests {
         const DEAD: &str = "0x000000000000000000000000000000000000dEaD";
         assert!(Cli::try_parse_from(["axe", "test", "rfq"]).is_err());
         assert!(Cli::try_parse_from(["axe", "test", "rfq", "--route", "bridge"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "axe",
+                "test",
+                "rfq",
+                "--route",
+                "its",
+                "--recipient",
+                "9WzD"
+            ])
+            .is_err()
+        );
         assert!(
             Cli::try_parse_from(["axe", "test", "rfq", "--route", "its", "--sender", DEAD])
                 .is_err()

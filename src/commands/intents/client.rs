@@ -190,8 +190,34 @@ async fn response_message(response: reqwest::Response) -> String {
 }
 
 fn http_error(method: &str, url: &str, status: StatusCode, message: &str) -> eyre::Report {
-    eyre!("RFQ {method} {url} returned HTTP {status}: {message}")
+    eyre::Report::new(RfqHttpError {
+        method: method.to_owned(),
+        url: url.to_owned(),
+        status,
+        message: message.to_owned(),
+    })
 }
+
+/// A non-success answer from the RFQ API.
+#[derive(Debug)]
+pub struct RfqHttpError {
+    pub(super) method: String,
+    pub(super) url: String,
+    pub status: StatusCode,
+    pub(super) message: String,
+}
+
+impl std::fmt::Display for RfqHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "RFQ {} {} returned HTTP {}: {}",
+            self.method, self.url, self.status, self.message
+        )
+    }
+}
+
+impl std::error::Error for RfqHttpError {}
 
 fn normalize_base_url(value: &str) -> Result<String> {
     let value = value.trim().trim_end_matches('/');

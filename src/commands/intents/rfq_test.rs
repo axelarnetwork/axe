@@ -1,30 +1,31 @@
+mod checks;
 mod poll;
 mod report;
 mod routes;
 mod source;
 mod types;
 
+use std::future::Future;
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, TxHash};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use eyre::{Result, eyre};
 use futures::future::join_all;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::Signer;
 
+use self::checks::{check_delivery, checked_requests};
 use self::poll::{PollEnd, watch_status};
-use self::report::{ActionTx, Output, RouteReport, RunSummary};
+use self::report::{ActionTx, Output, RouteReport, RunSummary, UncertainSubmission};
 use self::routes::RoutePlan;
 use self::source::SourceChain;
-use self::types::Recipient;
 use crate::commands::intents::client::RfqClient;
-use crate::commands::intents::execution::action_request;
+use crate::commands::intents::execution::validate_quote_lifetime;
 use crate::commands::intents::execution_lock::ExecutionLock;
 use crate::commands::intents::types::{
-    Quote, QuoteOutcome, TimedQuote, TransferState, parse_amount,
+    ActionKind, Quote, QuoteOutcome, QuoteRequest, TimedQuote, TransferState, parse_amount,
 };
+use crate::evm::UnconfirmedBroadcast;
 use crate::ui;
 
 pub use self::types::{RfqRoute, RfqSource, RfqTestArgs, Wallet};
@@ -34,6 +35,13 @@ struct RouteRun {
     plan: RoutePlan,
     report: RouteReport,
     started: Instant,
+}
+
+/// A route whose transaction went out, to be watched.
+struct Submitted {
+    quote: Quote,
+    /// The mined transaction, or every broadcast when none was seen mined.
+    transaction_hashes: Vec<TxHash>,
 }
 
 /// Quote rfq-api routes, send each one's actions on the source chain in turn,
@@ -51,14 +59,14 @@ async fn check_routes(args: RfqTestArgs) -> Result<()> {
     let started = Instant::now();
     let output = Output::new(args.json);
     let client = RfqClient::new(args.network, args.rfq_url.as_deref())?;
-    let mut runs = plan_routes(&args).await?;
+    let mut runs = plan_routes(&args)?;
     let dry_run = matches!(args.wallet, Wallet::DryRun(_));
     output.announce_run(args.network, args.wallet.address(), dry_run);
     match &args.wallet {
         Wallet::DryRun(sender) => quote_routes(&client, *sender, &mut runs, output).await,
         Wallet::Signer(signer) => {
-            let sent = send_routes(&args, &client, signer, &mut runs, output).await;
-            watch_routes(&client, &sent, args.timeout, &mut runs, output).await;
+            let submitted = send_routes(&args, &client, signer, &mut runs, output).await;
+            watch_routes(&client, submitted, args.timeout, &mut runs, output).await;
         }
     }
     let summary = RunSummary {
@@ -72,75 +80,51 @@ async fn check_routes(args: RfqTestArgs) -> Result<()> {
     summary.verdict()
 }
 
-async fn plan_routes(args: &RfqTestArgs) -> Result<Vec<RouteRun>> {
+/// Each route's plan and quote request. A route that cannot form a request
+/// is reported as failed without stopping the others.
+fn plan_routes(args: &RfqTestArgs) -> Result<Vec<RouteRun>> {
     if args.amount.is_some() && args.routes.len() > 1 {
         return Err(eyre!("--amount applies to a single --route"));
     }
-    let plans = args
+    if let Some(route) = args
         .routes
         .iter()
-        .map(|&route| RoutePlan::resolve(args.network, route, args.source))
-        .collect::<Result<Vec<_>>>()?;
-    let sender = args.wallet.address();
-    let recipients = recipients(&plans, args.recipient.as_deref(), sender).await?;
-    Ok(plans
-        .into_iter()
-        .zip(recipients)
-        .map(|(plan, recipient)| {
-            let amount = args
-                .amount
-                .unwrap_or_else(|| U256::from(plan.default_amount));
-            RouteRun {
-                report: RouteReport::new(plan.route, plan.quote_request(amount, sender, recipient)),
-                plan,
-                started: Instant::now(),
-            }
-        })
-        .collect())
-}
-
-/// Each route's recipient: `--recipient` when given, else the route's
-/// default, reading the configured Solana key at most once.
-async fn recipients(
-    plans: &[RoutePlan],
-    explicit: Option<&str>,
-    sender: Address,
-) -> Result<Vec<Recipient>> {
-    let configured_solana = if explicit.is_none() && plans.iter().any(RoutePlan::delivers_to_solana)
+        .enumerate()
+        .find_map(|(index, route)| args.routes[..index].contains(route).then_some(route))
     {
-        configured_solana_key().await?
-    } else {
-        None
-    };
-    plans
-        .iter()
-        .map(|plan| plan.recipient(explicit, sender, configured_solana))
-        .collect()
-}
-
-/// The configured Solana key's address: `SOLANA_PRIVATE_KEY` as a keypair
-/// file path, else the Solana CLI's default keypair when one exists.
-async fn configured_solana_key() -> Result<Option<Pubkey>> {
-    let path = std::env::var("SOLANA_PRIVATE_KEY")
-        .ok()
-        .filter(|path| !path.trim().is_empty());
-    let keypair = crate::solana::load_keypair(path.as_deref()).await;
-    match (keypair, path) {
-        (Ok(keypair), _) => Ok(Some(keypair.pubkey())),
-        (Err(_), None) => Ok(None),
-        // The variable may hold key material rather than a path, so the
-        // loader's message, which quotes it, is not repeated.
-        (Err(_), Some(_)) => Err(eyre!(
-            "SOLANA_PRIVATE_KEY does not name a readable Solana keypair file"
-        )),
+        return Err(eyre!("--route {route} is given more than once"));
     }
+    let sender = args.wallet.address();
+    args.routes
+        .iter()
+        .map(|&route| {
+            let plan = RoutePlan::resolve(args.network, route, args.source)?;
+            let request = plan
+                .recipient(args.recipient, args.solana_recipient, sender)
+                .and_then(|recipient| {
+                    Ok(plan.quote_request(plan.amount(args.amount)?, sender, recipient))
+                });
+            let mut report = RouteReport::new(route, request.as_ref().ok().cloned());
+            if let Err(error) = &request {
+                report.finish(Some(error), Duration::ZERO);
+            }
+            Ok(RouteRun {
+                plan,
+                report,
+                started: Instant::now(),
+            })
+        })
+        .collect()
 }
 
 async fn quote_routes(client: &RfqClient, sender: Address, runs: &mut [RouteRun], output: Output) {
     for run in runs {
-        output.announce_route(&run.plan, &run.report.request);
+        let Some(request) = run.report.request.clone() else {
+            continue;
+        };
+        output.announce_route(&run.plan, &request);
         run.started = Instant::now();
-        let result = quote_route(client, sender, run, output).await;
+        let result = quote_route(client, sender, run, &request, output).await;
         run.report
             .finish(result.as_ref().err(), run.started.elapsed());
     }
@@ -150,54 +134,55 @@ async fn quote_route(
     client: &RfqClient,
     sender: Address,
     run: &mut RouteRun,
+    request: &QuoteRequest,
     output: Output,
 ) -> Result<()> {
-    let quote = request_quote(client, run, output).await?;
-    action_requests(&quote, sender, run.plan.from.chain.caip2)?;
+    let quote = request_quote(client, run, request, output).await?;
+    checked_requests(&quote, &run.plan, request, sender)?;
     run.report.actions = Some(quote.actions);
     Ok(())
 }
 
-/// Send every route's actions in turn while holding the wallet lock. Returns,
-/// per route, the quote ID of a route whose actions were all sent.
+/// Send every route's actions in turn while holding the wallet lock.
+/// Returns, per route, what was submitted.
 async fn send_routes(
     args: &RfqTestArgs,
     client: &RfqClient,
     signer: &PrivateKeySigner,
     runs: &mut [RouteRun],
     output: Output,
-) -> Vec<Option<String>> {
+) -> Vec<Option<Submitted>> {
+    let mut submitted: Vec<Option<Submitted>> = runs.iter().map(|_| None).collect();
     let Some(chain) = runs.first().map(|run| run.plan.from.chain) else {
-        return Vec::new();
+        return submitted;
     };
     let connected = async {
         let lock = ExecutionLock::acquire(signer.address())?;
-        let source = SourceChain::connect(args.network, args.config.clone(), chain, output).await?;
+        let source = SourceChain::connect(args.network, args.config.clone(), chain).await?;
         Ok::<_, eyre::Report>((lock, source))
     }
     .await;
     let (_lock, source) = match connected {
         Ok(connected) => connected,
         Err(error) => {
-            for run in runs.iter_mut() {
+            for run in runs.iter_mut().filter(|run| run.report.error.is_none()) {
                 run.report.finish(Some(&error), Duration::ZERO);
             }
-            return vec![None; runs.len()];
+            return submitted;
         }
     };
-    let mut sent = Vec::with_capacity(runs.len());
-    for run in runs {
-        output.announce_route(&run.plan, &run.report.request);
+    for (run, slot) in runs.iter_mut().zip(&mut submitted) {
+        let Some(request) = run.report.request.clone() else {
+            continue;
+        };
+        output.announce_route(&run.plan, &request);
         run.started = Instant::now();
-        match send_route(client, &source, signer, run, output).await {
-            Ok(quote_id) => sent.push(Some(quote_id)),
-            Err(error) => {
-                run.report.finish(Some(&error), run.started.elapsed());
-                sent.push(None);
-            }
+        match send_route(client, &source, signer, run, &request, output).await {
+            Ok(sent) => *slot = Some(sent),
+            Err(error) => run.report.finish(Some(&error), run.started.elapsed()),
         }
     }
-    sent
+    submitted
 }
 
 async fn send_route(
@@ -205,75 +190,144 @@ async fn send_route(
     source: &SourceChain,
     signer: &PrivateKeySigner,
     run: &mut RouteRun,
+    request: &QuoteRequest,
     output: Output,
-) -> Result<String> {
+) -> Result<Submitted> {
     if run.plan.wrap_shortfall {
-        let amount = parse_amount(&run.report.request.amount)?;
+        let amount = parse_amount(&request.amount)?;
         let wrap = source
             .wrap_shortfall(signer, run.plan.from.token, amount, output)
             .await?;
         run.report.wrap_tx = wrap.map(|hash| hash.to_string());
     }
-    let quote = request_quote(client, run, output).await?;
-    let requests = action_requests(&quote, signer.address(), run.plan.from.chain.caip2)?;
-    for (action, request) in quote.actions.iter().zip(requests) {
-        let hash = source
-            .send(signer, request, &format!("rfq action '{}'", action.id))
-            .await?;
-        output.kv(&format!("action {}", action.id), &hash.to_string());
-        run.report.transactions.push(ActionTx {
-            action: action.id.clone(),
-            tx_hash: hash.to_string(),
-        });
-    }
-    Ok(quote.quote_id)
+    let quote = request_quote(client, run, request, output).await?;
+    let requests = checked_requests(&quote, &run.plan, request, signer.address())?;
+    let send = |request, label: String| async move { source.send(signer, request, &label).await };
+    let transaction_hashes = send_actions(send, &quote, requests, &mut run.report, output).await?;
+    Ok(Submitted {
+        quote,
+        transaction_hashes,
+    })
 }
 
-/// Watch every sent route's status concurrently, then settle each one.
+/// Send the checked actions in order. Returns the transaction's hashes: the
+/// mined one, or every broadcast when its rounds ran out without a receipt,
+/// since the transfer may still land.
+async fn send_actions<F, Fut>(
+    mut send: F,
+    quote: &Quote,
+    requests: Vec<TransactionRequest>,
+    report: &mut RouteReport,
+    output: Output,
+) -> Result<Vec<TxHash>>
+where
+    F: FnMut(TransactionRequest, String) -> Fut,
+    Fut: Future<Output = Result<TxHash>>,
+{
+    let mut transaction_hashes = Vec::new();
+    for (action, request) in quote.actions.iter().zip(requests) {
+        validate_quote_lifetime(quote)?;
+        match send(request, format!("rfq action '{}'", action.id)).await {
+            Ok(hash) => {
+                output.kv(&format!("action {}", action.id), &hash.to_string());
+                report.transactions.push(ActionTx {
+                    action: action.id.clone(),
+                    tx_hash: hash.to_string(),
+                });
+                if action.kind == ActionKind::Transaction {
+                    transaction_hashes = vec![hash];
+                }
+            }
+            Err(error) => {
+                let Some(unconfirmed) = error.downcast_ref::<UnconfirmedBroadcast>() else {
+                    return Err(error);
+                };
+                report.uncertain_submission = Some(UncertainSubmission {
+                    action: action.id.clone(),
+                    tx_hashes: unconfirmed.hashes.iter().map(ToString::to_string).collect(),
+                    error: ui::scrub_urls(&format!("{error:#}")),
+                });
+                if action.kind != ActionKind::Transaction {
+                    return Err(error);
+                }
+                ui::warn(&format!(
+                    "{}: watching quote {} anyway",
+                    ui::scrub_urls(&error.to_string()),
+                    quote.quote_id
+                ));
+                return Ok(unconfirmed.hashes.clone());
+            }
+        }
+    }
+    Ok(transaction_hashes)
+}
+
+/// Watch every submitted route's status concurrently, then settle each one.
+/// An interrupt settles the routes still being watched as failed, so the
+/// summary is still written.
 async fn watch_routes(
     client: &RfqClient,
-    sent: &[Option<String>],
+    submitted: Vec<Option<Submitted>>,
     timeout: Duration,
     runs: &mut [RouteRun],
     output: Output,
 ) {
     let watches: Vec<_> = runs
         .iter()
-        .zip(sent)
-        .filter_map(|(run, quote_id)| {
-            let quote_id = quote_id.as_deref()?;
-            let route = run.plan.route;
-            Some(watch_status(
-                move || client.status(quote_id),
-                quote_id,
-                route,
-                timeout,
-                output,
-            ))
+        .zip(&submitted)
+        .filter_map(|(run, sent)| {
+            let quote_id = sent.as_ref()?.quote.quote_id.as_str();
+            let (route, started) = (run.plan.route, run.started);
+            Some(async move {
+                let end =
+                    watch_status(|| client.status(quote_id), quote_id, route, timeout, output)
+                        .await;
+                (end, started.elapsed())
+            })
         })
         .collect();
     if watches.is_empty() {
         return;
     }
     output.section(&format!("watching {} transfers", watches.len()));
-    let mut ends = join_all(watches).await.into_iter();
-    for (run, quote_id) in runs.iter_mut().zip(sent) {
-        let Some(quote_id) = quote_id else {
+    let interrupted = async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    };
+    let ends = tokio::select! {
+        ends = join_all(watches) => Some(ends),
+        () = interrupted => None,
+    };
+    let mut ends = ends.map(Vec::into_iter);
+    for (run, sent) in runs.iter_mut().zip(submitted) {
+        let Some(sent) = sent else {
             continue;
         };
-        let Some(end) = ends.next() else {
-            break;
-        };
-        let result = end.and_then(|end| settle(end, quote_id, timeout, &mut run.report));
-        run.report
-            .finish(result.as_ref().err(), run.started.elapsed());
+        match ends.as_mut().and_then(Iterator::next) {
+            Some((end, elapsed)) => {
+                let result =
+                    end.and_then(|end| settle(end, &sent, &run.plan, timeout, &mut run.report));
+                run.report.finish(result.as_ref().err(), elapsed);
+            }
+            None => run.report.finish(
+                Some(&eyre!(
+                    "interrupted before quote {} reached DONE",
+                    sent.quote.quote_id
+                )),
+                run.started.elapsed(),
+            ),
+        }
     }
 }
 
-async fn request_quote(client: &RfqClient, run: &mut RouteRun, output: Output) -> Result<Quote> {
-    let outcome = client
-        .quote_from(&run.report.request, run.plan.backends)
-        .await?;
+async fn request_quote(
+    client: &RfqClient,
+    run: &mut RouteRun,
+    request: &QuoteRequest,
+    output: Output,
+) -> Result<Quote> {
+    let outcome = client.quote_from(request, run.plan.backends).await?;
     let quote = match outcome {
         QuoteOutcome::Available(timed) => {
             let TimedQuote { quote, .. } = *timed;
@@ -294,32 +348,24 @@ async fn request_quote(client: &RfqClient, run: &mut RouteRun, output: Output) -
     Ok(quote)
 }
 
-/// Every action as a transaction request, each checked to be an EVM
-/// transaction on the source chain from the sender before any is sent.
-fn action_requests(
-    quote: &Quote,
-    sender: Address,
-    source_chain: &str,
-) -> Result<Vec<TransactionRequest>> {
-    if quote.actions.is_empty() {
-        return Err(eyre!("quote {} has no actions", quote.quote_id));
-    }
-    quote
-        .actions
-        .iter()
-        .map(|action| action_request(action, sender, source_chain))
-        .collect()
-}
-
-fn settle(end: PollEnd, quote_id: &str, timeout: Duration, report: &mut RouteReport) -> Result<()> {
+fn settle(
+    end: PollEnd,
+    sent: &Submitted,
+    plan: &RoutePlan,
+    timeout: Duration,
+    report: &mut RouteReport,
+) -> Result<()> {
+    let quote_id = &sent.quote.quote_id;
     match end {
         PollEnd::Settled(status) => {
             let state = status.state;
+            let delivered = (state == TransferState::Done)
+                .then(|| check_delivery(&status, plan, &sent.quote, &sent.transaction_hashes));
             report.status = Some(status);
-            if state == TransferState::Done {
-                return Ok(());
+            match delivered {
+                Some(delivered) => delivered,
+                None => Err(eyre!("quote {quote_id} ended {}", state.label())),
             }
-            Err(eyre!("quote {quote_id} ended {}", state.label()))
         }
         PollEnd::TimedOut(last) => {
             let error = eyre!(
@@ -336,138 +382,275 @@ fn settle(end: PollEnd, quote_id: &str, timeout: Duration, report: &mut RouteRep
 
 #[cfg(test)]
 mod tests {
+    use alloy::primitives::U256;
     use serde_json::json;
 
     use super::*;
     use crate::commands::intents::types::StatusResponse;
     use crate::types::Network;
 
-    const FUJI: &str = "eip155:43113";
     const TIMEOUT: Duration = Duration::from_secs(2700);
+    const SENDER: Address =
+        alloy::primitives::address!("0x000000000000000000000000000000000000dEaD");
 
-    fn sender() -> Address {
-        "0x000000000000000000000000000000000000dEaD"
-            .parse()
-            .unwrap()
+    fn args(routes: Vec<RfqRoute>) -> RfqTestArgs {
+        RfqTestArgs {
+            network: Network::Testnet,
+            routes,
+            source: RfqSource::Avalanche,
+            amount: None,
+            recipient: None,
+            solana_recipient: None,
+            timeout: TIMEOUT,
+            rfq_url: None,
+            config: None,
+            wallet: Wallet::DryRun(SENDER),
+            json: true,
+        }
     }
 
-    fn quote(actions: &serde_json::Value) -> Quote {
-        serde_json::from_value(json!({
-            "quoteId": "its_quote",
-            "selectionReason": "only_route",
-            "backend": { "type": "its", "name": "axelar", "tracking": {}, "metadata": {} },
-            "estimatedTimeSeconds": 60,
-            "validity": { "type": "expires_at", "quoteExpiresAt": "2026-11-13T23:02:45Z" },
-            "input": { "chain": FUJI, "token": "0xfrom", "amount": "1" },
-            "output": { "chain": "eip155:11155111", "token": "0xto", "amount": "1" },
-            "fees": { "integrator": null },
-            "actions": actions
-        }))
-        .unwrap()
+    fn its_plan() -> RoutePlan {
+        RoutePlan::resolve(Network::Testnet, RfqRoute::Its, RfqSource::Avalanche).unwrap()
     }
 
-    fn evm_action(id: &str, chain: &str, from: &str) -> serde_json::Value {
-        json!({
-            "id": id,
-            "label": id,
-            "type": "transaction",
-            "chain": chain,
-            "payload": {
-                "type": "evm_transaction",
-                "from": from,
-                "to": "0xe4f05a0D5541C03d07f5175147E92D796Cae8db6",
-                "data": "0x1234",
-                "value": "5"
-            }
-        })
+    fn submitted(sent: TxHash) -> Submitted {
+        let plan = its_plan();
+        Submitted {
+            quote: serde_json::from_value(json!({
+                "quoteId": "its_quote",
+                "selectionReason": "only_route",
+                "backend": { "type": "its", "name": "axelar", "tracking": {}, "metadata": {} },
+                "estimatedTimeSeconds": 60,
+                "validity": { "type": "expires_at", "quoteExpiresAt": "2026-11-13T23:02:45Z" },
+                "input": { "chain": plan.from.chain.caip2, "token": plan.from.token, "amount": "100" },
+                "output": { "chain": plan.to.chain.caip2, "token": plan.to.token, "amount": "100" },
+                "fees": { "integrator": null },
+                "actions": []
+            }))
+            .unwrap(),
+            transaction_hashes: vec![sent],
+        }
     }
 
-    fn status(state: &str) -> StatusResponse {
+    fn status(state: &str, source_tx: TxHash, amount: &str) -> StatusResponse {
+        let plan = its_plan();
         serde_json::from_value(json!({
             "quoteId": "its_quote",
             "state": state,
             "backend": { "type": "its", "name": "axelar", "tracking": {}, "metadata": {} },
-            "source": null,
+            "source": {
+                "chain": plan.from.chain.caip2,
+                "txHash": source_tx.to_string(),
+                "messageId": "0xmessage-1",
+                "timestamp": "2026-11-13T23:02:45Z"
+            },
             "destination": null,
-            "output": null,
+            "output": { "chain": plan.to.chain.caip2, "token": plan.to.token, "amount": amount },
             "refund": null,
             "details": {}
         }))
         .unwrap()
     }
 
-    fn its_report() -> RouteReport {
-        let plan =
-            RoutePlan::resolve(Network::Testnet, RfqRoute::Its, RfqSource::Avalanche).unwrap();
-        let request = plan.quote_request(
-            U256::from(plan.default_amount),
-            sender(),
-            plan.recipient(None, sender(), None).unwrap(),
-        );
-        RouteReport::new(RfqRoute::Its, request)
+    fn report() -> RouteReport {
+        RouteReport::new(RfqRoute::Its, None)
     }
 
-    #[test]
-    fn builds_every_action_in_order_on_the_source_chain_from_the_sender() {
-        let dead = sender().to_string();
-        let quote = quote(&json!([
-            evm_action("approve", FUJI, &dead),
-            evm_action("transfer", FUJI, &dead)
-        ]));
-
-        let requests = action_requests(&quote, sender(), FUJI).unwrap();
-
-        assert_eq!(requests.len(), 2);
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.chain_id == Some(43_113))
-        );
+    fn quote_with_actions(expires_at: &str) -> Quote {
+        let action = |id: &str, kind: &str| {
+            json!({
+                "id": id,
+                "label": id,
+                "type": kind,
+                "chain": "eip155:43113",
+                "payload": {
+                    "type": "evm_transaction",
+                    "from": SENDER.to_string(),
+                    "to": SENDER.to_string(),
+                    "data": "0x",
+                    "value": "0"
+                }
+            })
+        };
+        let mut quote = submitted(TxHash::ZERO).quote;
+        quote.validity.quote_expires_at = expires_at.parse().unwrap();
+        quote.actions = serde_json::from_value(json!([
+            action("approve", "approval"),
+            action("transfer", "transaction")
+        ]))
+        .unwrap();
+        quote
     }
 
-    #[test]
-    fn rejects_a_quote_before_sending_when_any_action_is_unsendable() {
-        let dead = sender().to_string();
-        let other = Address::from([1u8; 20]).to_string();
-        for actions in [
-            json!([]),
-            json!([
-                evm_action("approve", FUJI, &dead),
-                evm_action("transfer", "eip155:1", &dead)
-            ]),
-            json!([
-                evm_action("approve", FUJI, &dead),
-                evm_action("transfer", FUJI, &other)
-            ]),
-        ] {
-            assert!(action_requests(&quote(&actions), sender(), FUJI).is_err());
-        }
+    fn unconfirmed(hashes: Vec<TxHash>) -> eyre::Report {
+        eyre::Report::new(UnconfirmedBroadcast {
+            label: "rfq action 'transfer'".to_owned(),
+            hashes,
+        })
     }
 
-    #[test]
-    fn only_done_settles_as_a_pass() {
-        let mut report = its_report();
-        settle(
-            PollEnd::Settled(status("DONE")),
-            "its_quote",
-            TIMEOUT,
+    /// Sends by answering each action with the next scripted result.
+    async fn send_scripted(
+        quote: &Quote,
+        answers: Vec<Result<TxHash>>,
+        report: &mut RouteReport,
+    ) -> (Result<Vec<TxHash>>, Vec<String>) {
+        let mut answers = answers.into_iter();
+        let mut labels = Vec::new();
+        let send = |_request, label: String| {
+            labels.push(label);
+            std::future::ready(answers.next().unwrap_or_else(|| Err(eyre!("no answer"))))
+        };
+        let requests = vec![TransactionRequest::default(); quote.actions.len()];
+        let result = send_actions(send, quote, requests, report, Output::Json).await;
+        (result, labels)
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_transfer_is_still_watched_with_every_broadcast() {
+        let quote = quote_with_actions("2099-01-01T00:00:00Z");
+        let broadcasts = vec![TxHash::from([4u8; 32]), TxHash::from([5u8; 32])];
+        let mut report = report();
+
+        let (hashes, labels) = send_scripted(
+            &quote,
+            vec![
+                Ok(TxHash::from([3u8; 32])),
+                Err(unconfirmed(broadcasts.clone())),
+            ],
             &mut report,
+        )
+        .await;
+
+        assert_eq!(hashes.unwrap(), broadcasts);
+        assert_eq!(labels, ["rfq action 'approve'", "rfq action 'transfer'"]);
+        assert_eq!(report.transactions.len(), 1);
+        let uncertain = report.uncertain_submission.unwrap();
+        assert_eq!(uncertain.action, "transfer");
+        assert_eq!(uncertain.tx_hashes.len(), 2);
+        assert!(uncertain.error.contains("no receipt after"));
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_approval_or_a_failed_send_stops_the_route() {
+        let quote = quote_with_actions("2099-01-01T00:00:00Z");
+
+        let mut report_unconfirmed = report();
+        let (result, labels) = send_scripted(
+            &quote,
+            vec![Err(unconfirmed(vec![TxHash::from([4u8; 32])]))],
+            &mut report_unconfirmed,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(labels.len(), 1);
+        assert_eq!(
+            report_unconfirmed
+                .uncertain_submission
+                .map(|uncertain| uncertain.action),
+            Some("approve".to_owned())
+        );
+
+        let mut report_failed = report();
+        let (result, _) = send_scripted(
+            &quote,
+            vec![Ok(TxHash::from([3u8; 32])), Err(eyre!("transfer reverted"))],
+            &mut report_failed,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(report_failed.uncertain_submission.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_expired_quote_is_not_sent() {
+        let quote = quote_with_actions("2020-01-01T00:00:00Z");
+        let (result, labels) = send_scripted(&quote, vec![Ok(TxHash::ZERO)], &mut report()).await;
+
+        assert!(result.is_err());
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn a_route_without_a_request_fails_alone() {
+        let runs = plan_routes(&args(vec![RfqRoute::Its, RfqRoute::Solana])).unwrap();
+
+        assert!(runs[0].report.error.is_none());
+        assert!(runs[0].report.request.is_some());
+        assert!(runs[1].report.request.is_none());
+        assert!(
+            runs[1]
+                .report
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("--solana-recipient"))
+        );
+    }
+
+    #[test]
+    fn repeated_routes_and_a_shared_amount_are_refused() {
+        assert!(plan_routes(&args(vec![RfqRoute::Its, RfqRoute::Gateway, RfqRoute::Its])).is_err());
+        let mut shared = args(vec![RfqRoute::Its, RfqRoute::Gateway]);
+        shared.amount = Some(U256::from(1u8));
+        assert!(plan_routes(&shared).is_err());
+    }
+
+    #[test]
+    fn done_passes_only_with_our_transaction_and_the_quoted_output() {
+        let ours = TxHash::from([1u8; 32]);
+        let sent = submitted(ours);
+
+        let mut passed = report();
+        settle(
+            PollEnd::Settled(status("DONE", ours, "100")),
+            &sent,
+            &its_plan(),
+            TIMEOUT,
+            &mut passed,
         )
         .unwrap();
         assert_eq!(
-            report.status.map(|status| status.state),
+            passed.status.map(|status| status.state),
             Some(TransferState::Done)
         );
 
+        let mut short = report();
+        let error = settle(
+            PollEnd::Settled(status("DONE", ours, "99")),
+            &sent,
+            &its_plan(),
+            TIMEOUT,
+            &mut short,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("below the quoted 100"));
+        assert!(short.status.is_some());
+
+        let error = settle(
+            PollEnd::Settled(status("DONE", TxHash::from([2u8; 32]), "100")),
+            &sent,
+            &its_plan(),
+            TIMEOUT,
+            &mut report(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("did not send"));
+    }
+
+    #[test]
+    fn other_settled_states_fail_with_their_label() {
+        let ours = TxHash::from([1u8; 32]);
         for (state, label) in [
             ("FAILED", "failed"),
             ("NOT_FOUND", "not found"),
+            ("REFUND_PENDING", "refund pending"),
             ("REFUNDED", "refunded"),
         ] {
-            let mut report = its_report();
+            let mut report = report();
             let error = settle(
-                PollEnd::Settled(status(state)),
-                "its_quote",
+                PollEnd::Settled(status(state, ours, "100")),
+                &submitted(ours),
+                &its_plan(),
                 TIMEOUT,
                 &mut report,
             )
@@ -479,28 +662,28 @@ mod tests {
 
     #[test]
     fn a_timeout_fails_with_the_last_state_read() {
-        let mut report = its_report();
+        let ours = TxHash::from([1u8; 32]);
+        let mut timed_out = report();
         let error = settle(
-            PollEnd::TimedOut(Some(status("REFUND_INITIATED"))),
-            "its_quote",
+            PollEnd::TimedOut(Some(status("PENDING", ours, "100"))),
+            &submitted(ours),
+            &its_plan(),
             TIMEOUT,
-            &mut report,
+            &mut timed_out,
         )
         .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "quote its_quote did not reach DONE within 2700 s (last state: refund initiated)"
+            "quote its_quote did not reach DONE within 2700 s (last state: pending)"
         );
-        assert_eq!(
-            report.status.map(|status| status.state),
-            Some(TransferState::RefundInitiated)
-        );
+        assert!(timed_out.status.is_some());
 
         let error = settle(
             PollEnd::TimedOut(None),
-            "its_quote",
+            &submitted(ours),
+            &its_plan(),
             TIMEOUT,
-            &mut its_report(),
+            &mut report(),
         )
         .unwrap_err();
         assert!(error.to_string().ends_with("(last state: never read)"));
