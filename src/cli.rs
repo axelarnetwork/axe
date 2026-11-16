@@ -590,6 +590,8 @@ pub struct IntentStressOptions {
 
     /// Maximum cumulative input volume in token units. Defaults to 20 only without a run mode.
     /// Without an input or deposit cap, uses unlimited settlement allowances.
+    // clippy 1.100 reads the two `None` defaults as one attribute given twice.
+    #[allow(clippy::duplicated_attributes)]
     #[arg(
         long,
         default_value = "20",
@@ -601,6 +603,8 @@ pub struct IntentStressOptions {
 
     /// Maximum native gas spend per source chain for deposits. Approvals are extra.
     /// Defaults to 0.01 only without --duration-secs or --continuous.
+    // clippy 1.100 reads the two `None` defaults as one attribute given twice.
+    #[allow(clippy::duplicated_attributes)]
     #[arg(
         long,
         default_value = "0.01",
