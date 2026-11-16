@@ -338,26 +338,44 @@ impl DestinationVerifier for SolanaDestinationVerifier {
                     Ok((index, command_id))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let client = Arc::clone(&self.rpc_client);
-            let network = self.network;
-            let results = task::spawn_blocking(move || {
-                batch_check_solana_incoming_messages(&client, network, &data)
-            })
-            .await
-            .wrap_err("Solana destination check task failed")??;
-            Ok(results
-                .into_iter()
-                .map(|(index, status)| DestinationObservation {
-                    index,
-                    status: match status {
-                        None => DestinationStatus::Pending,
-                        Some(0) => DestinationStatus::Approved { command_id: None },
-                        Some(_) => DestinationStatus::Executed { command_id: None },
-                    },
-                })
-                .collect())
+            observe_solana_incoming_messages(Arc::clone(&self.rpc_client), self.network, data).await
         })
     }
+}
+
+/// Observe Solana IncomingMessage PDAs for `(tx_index, command_id)` pairs.
+/// An RPC failure keeps the whole batch in flight for the next poll, the way
+/// EVM destinations behave (mainnet arbitrum -> solana ITS died on one closed
+/// connection otherwise).
+pub(super) async fn observe_solana_incoming_messages(
+    client: Arc<RpcClient>,
+    network: Network,
+    data: Vec<(usize, [u8; 32])>,
+) -> Result<Vec<DestinationObservation>> {
+    let checked =
+        task::spawn_blocking(move || batch_check_solana_incoming_messages(&client, network, &data))
+            .await
+            .wrap_err("Solana destination check task failed")?;
+    let results = match checked {
+        Ok(results) => results,
+        Err(error) => {
+            ui::warn(&format!(
+                "Solana destination check failed (keeping in-flight): {error}"
+            ));
+            return Ok(Vec::new());
+        }
+    };
+    Ok(results
+        .into_iter()
+        .map(|(index, status)| DestinationObservation {
+            index,
+            status: match status {
+                None => DestinationStatus::Pending,
+                Some(0) => DestinationStatus::Approved { command_id: None },
+                Some(_) => DestinationStatus::Executed { command_id: None },
+            },
+        })
+        .collect())
 }
 
 pub(in crate::commands::load_test::verify) struct StellarDestinationVerifier {
@@ -521,5 +539,25 @@ mod stellar_view_tests {
     #[test]
     fn non_bool_answer_is_an_error() {
         assert!(stellar_view_or_retry(Ok(None), "approval", "m-1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod solana_observation_tests {
+    use std::sync::Arc;
+
+    use solana_client::rpc_client::RpcClient;
+
+    use super::observe_solana_incoming_messages;
+    use crate::types::Network;
+
+    #[tokio::test]
+    async fn rpc_failure_keeps_the_batch_in_flight() {
+        let unreachable = Arc::new(RpcClient::new("http://127.0.0.1:1".to_string()));
+        let observations =
+            observe_solana_incoming_messages(unreachable, Network::Mainnet, vec![(0, [7; 32])])
+                .await
+                .unwrap();
+        assert!(observations.is_empty());
     }
 }

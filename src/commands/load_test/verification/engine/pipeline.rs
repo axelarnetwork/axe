@@ -22,13 +22,12 @@ use serde::de::DeserializeOwned;
 use solana_client::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
 use tokio::sync::mpsc;
-use tokio::{task, time};
+use tokio::time;
 
 use super::POLL_INTERVAL;
 use super::PendingTx;
 use super::checks::{
-    batch_check_solana_incoming_messages, check_evm_command_executed,
-    check_evm_is_message_approved, check_evm_is_message_executed,
+    check_evm_command_executed, check_evm_is_message_approved, check_evm_is_message_executed,
 };
 use super::legacy;
 use super::report::compute_peak_throughput;
@@ -832,24 +831,12 @@ impl DestinationVerifier for SolanaItsDestinationVerifier {
                     Ok((index, keccak256(&input).into()))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let client = Arc::clone(&self.rpc_client);
-            let network = self.network;
-            let results = task::spawn_blocking(move || {
-                batch_check_solana_incoming_messages(&client, network, &data)
-            })
+            destination::observe_solana_incoming_messages(
+                Arc::clone(&self.rpc_client),
+                self.network,
+                data,
+            )
             .await
-            .wrap_err("Solana ITS destination check task failed")??;
-            Ok(results
-                .into_iter()
-                .map(|(index, status)| DestinationObservation {
-                    index,
-                    status: match status {
-                        None => DestinationStatus::Pending,
-                        Some(0) => DestinationStatus::Approved { command_id: None },
-                        Some(_) => DestinationStatus::Executed { command_id: None },
-                    },
-                })
-                .collect())
         })
     }
 }
