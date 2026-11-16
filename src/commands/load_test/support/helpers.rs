@@ -72,19 +72,27 @@ pub(crate) async fn ensure_sender_receiver_on_evm_chain(
 /// with a short backoff. Some EVM RPCs (Hyperliquid mainnet observed) return
 /// empty code for live contracts under concurrent load; without retries that
 /// triggers a wasteful on-chain redeploy of a SenderReceiver that's still there.
+/// RPC errors share the same attempts: one rate-limited read used to abort the
+/// run before anything was sent.
 async fn get_code_with_retry<P: Provider>(provider: &P, addr: Address) -> Result<Bytes> {
     const ATTEMPTS: u32 = 6;
-    let mut last = Bytes::new();
+    let mut last = Ok(Bytes::new());
     for attempt in 0..ATTEMPTS {
         if attempt > 0 {
             time::sleep(backoff_for_attempt(attempt - 1)).await;
         }
-        last = provider.get_code_at(addr).await?;
-        if !last.is_empty() {
-            return Ok(last);
+        last = provider.get_code_at(addr).await;
+        match &last {
+            Ok(code) if !code.is_empty() => break,
+            Ok(_) => {}
+            Err(error) => ui::warn(&format!(
+                "eth_getCode({addr}): attempt {}/{ATTEMPTS} failed: {}",
+                attempt + 1,
+                ui::scrub_urls(&error.to_string())
+            )),
         }
     }
-    Ok(last)
+    Ok(last?)
 }
 
 /// Minimal schema for this repo's `axe-tokens/<network>.json` overlay files:
@@ -401,8 +409,7 @@ pub(crate) async fn ensure_evm_contract_deployed(
 ) -> Result<()> {
     let provider =
         ProviderBuilder::new().connect_http(rpc_url.parse().map_err(|e| eyre::eyre!("{e}"))?);
-    let code = provider
-        .get_code_at(addr)
+    let code = retry_all("eth_getCode", || async { provider.get_code_at(addr).await })
         .await
         .map_err(|e| eyre::eyre!("eth_getCode for {contract_label} ({addr}) failed: {e}"))?;
     if code.is_empty() {
@@ -1465,6 +1472,25 @@ mod tests {
         mock.push_failure_msg("upstream timeout");
         mock.push_success(&Bytes::from(GATEWAY.abi_encode()));
         assert!(check(mock).await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_survives_a_transient_code_read_failure() {
+        // Arc's public RPC rate-limits: one 429 on the code read aborted the run.
+        let mock = Asserter::new();
+        mock.push_failure_msg("HTTP error 429 with body: Too Many Requests");
+        mock.push_success(&"0x6080");
+        mock.push_success(&Bytes::from(GATEWAY.abi_encode()));
+        assert!(check(mock).await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn receiver_check_fails_the_run_when_the_code_read_keeps_failing() {
+        let mock = Asserter::new();
+        for _ in 0..DEFAULT_ATTEMPTS {
+            mock.push_failure_msg("HTTP error 429 with body: Too Many Requests");
+        }
+        assert!(check(mock).await.is_err());
     }
 
     #[tokio::test]
