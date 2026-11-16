@@ -1270,6 +1270,16 @@ mod tests {
     }
 
     #[test]
+    fn fee_history_head_race_retries_the_fill() {
+        // The exact Arc wording that failed mainnet cron run 43865381418.
+        let head_race = eyre::eyre!(
+            "server returned an error response: error code -32602: request beyond head \
+             block: requested 31540128, head 31540127"
+        );
+        assert!(should_retry_fill(&head_race));
+    }
+
+    #[test]
     fn landed_signatures_are_detected() {
         // Hedera lost-response landing surfaces as "Nonce too low" on re-send.
         assert!(send_error_may_mean_landed(
