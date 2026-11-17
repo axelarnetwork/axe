@@ -14,13 +14,16 @@ use crate::types::Network;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RfqRoute {
-    /// The source chain's wrapped native token over ITS to the other EVM chain
+    /// An ITS token to the other EVM chain: the source chain's wrapped native
+    /// token on testnet, AI on mainnet
     Its,
     /// Native gas, wrapped on the source, over ITS to the other EVM chain
+    /// (testnet only)
     NativeWrap,
     /// The gateway USDC token to the other EVM chain, plain or express
     Gateway,
-    /// The source chain's wrapped native token over ITS to Solana
+    /// The source chain's wrapped native token over ITS to Solana (testnet
+    /// only)
     Solana,
 }
 

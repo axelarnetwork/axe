@@ -97,14 +97,27 @@ impl SourceChain {
         Ok(Some(hash))
     }
 
+    /// Fail unless `owner` holds at least `amount` of `token`, so a short
+    /// wallet stops before it pays for an approval.
+    pub async fn require_balance(&self, token: &str, owner: Address, amount: U256) -> Result<()> {
+        let token: Address = token.parse().wrap_err("invalid source token address")?;
+        let balance = self.token_balance(token, owner).await?;
+        match shortfall(amount, balance) {
+            Some(_) => Err(eyre!(
+                "the wallet holds {balance} base units of {token}, less than the {amount} the route sends"
+            )),
+            None => Ok(()),
+        }
+    }
+
     async fn token_balance(&self, token: Address, owner: Address) -> Result<U256> {
         retry_with_fallback_all(
-            "rfq wrapped balance",
+            "rfq token balance",
             self.endpoints.providers(),
             |provider| async move { ERC20::new(token, provider).balanceOf(owner).call().await },
         )
         .await
-        .map_err(|error| eyre!("could not read the wrapped native balance: {error}"))
+        .map_err(|error| eyre!("could not read the {token} balance: {error}"))
     }
 
     /// WETH9 `deposit()` on `token`, paying `amount` of native gas.

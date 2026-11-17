@@ -1,6 +1,6 @@
 name: Test RFQ routes
 
-run-name: "RFQ routes: ${{ inputs.network || 'testnet' }} · ${{ inputs.routes || 'its,native-wrap,gateway,solana' }} from ${{ inputs.source || 'avalanche' }}"
+run-name: "RFQ routes: ${{ inputs.network || 'testnet' }} · ${{ inputs.routes || ((inputs.network || 'testnet') == 'mainnet' && 'its,gateway' || 'its,native-wrap,gateway,solana') }} from ${{ inputs.source || 'avalanche' }}"
 
 # End-to-end check of the rfq-api routes that gate ITS quotes on mainnet
 # (`axe test rfq`). Each route is quoted and its actions are sent on the
@@ -30,10 +30,10 @@ on:
           - testnet
           - mainnet
       routes:
-        description: Comma-separated routes to run, in order (its, native-wrap, gateway, solana; its and gateway on mainnet)
+        description: Comma-separated routes to run, in order (its, native-wrap, gateway, solana). Empty runs every route the network offers, its and gateway on mainnet
         type: string
-        required: true
-        default: its,native-wrap,gateway,solana
+        required: false
+        default: ''
       source:
         description: Source chain (Fuji or Sepolia on testnet)
         type: choice
@@ -61,7 +61,7 @@ jobs:
     timeout-minutes: 135
     env:
       NETWORK: ${{ inputs.network || 'testnet' }}
-      ROUTES: ${{ inputs.routes || 'its,native-wrap,gateway,solana' }}
+      ROUTES: ${{ inputs.routes || ((inputs.network || 'testnet') == 'mainnet' && 'its,gateway' || 'its,native-wrap,gateway,solana') }}
       SOURCE: ${{ inputs.source || 'avalanche' }}
     steps:
       - uses: actions/checkout@v4

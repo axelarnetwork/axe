@@ -86,9 +86,10 @@ axe --network testnet test rfq --route native-wrap --dry-run --sender <address>
 AxelarApp addresses come from the network configs rfq-api resolves quotes
 against, for testnet and mainnet. Amounts are base units and differ per route,
 because rfq-api tells transfers of the same token apart by amount. `--amount`
-overrides it for a single route. On mainnet only `its` and `gateway` run,
+overrides it for a single route. Mainnet offers only `its` and `gateway`,
 because axelar-app lists WAVAX and WETH only on their origin chains, and `its`
-sends AI, which the wallet must hold.
+sends AI. A route the network doesn't offer stops the run before anything is
+quoted.
 
 Before anything is signed, a quote must take exactly the requested input and
 deliver the route's destination token, and its actions must be an optional
@@ -102,8 +103,9 @@ The key comes from `EVM_PRIVATE_KEY`, then `PRIVATE_KEY`, or `--private-key`.
 `--recipient` sets the EVM routes' recipient, the sender by default. The
 `solana` route needs `--solana-recipient`. A route that cannot form its
 request fails without stopping the others. When the wallet holds less of the
-wrapped native token than the amount, the testnet `its` and `solana` routes wrap the
-difference first with the token's `deposit()`. The source RPC comes from the
+wrapped native token than the amount, the testnet `its` and `solana` routes
+wrap the difference first with the token's `deposit()`; any other token route
+fails before its quote. The source RPC comes from the
 chains config, with the intent RPC overrides applied. The wallet lock is held
 only while the actions are sent. A transaction whose broadcasts run out
 without a receipt is recorded with every hash it broadcast, and its quote is
@@ -119,9 +121,9 @@ The `Test RFQ routes` workflow runs all four routes on testnet every 6 hours,
 in one invocation and in the `intents-testnet` concurrency group because it
 shares the intents wallet. The solana route's recipient is the
 `RFQ_E2E_SOLANA_RECIPIENT` repository variable. Mainnet runs only through a
-manual dispatch, which also picks the routes (`its,gateway` on mainnet) and the
-source chain. The step
-summary lists each route with ✓ or ✗, and any failed route fails the run.
+manual dispatch, which also picks the source chain and, optionally, the routes;
+by default it runs every route the network offers. The step summary lists each
+route with ✓ or ✗, and any failed route fails the run.
 
 ## Through MCP
 

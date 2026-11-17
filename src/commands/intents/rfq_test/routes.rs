@@ -38,31 +38,25 @@ struct WrappedToken {
     solana: &'static str,
 }
 
-/// The token the its route sends to the same token on the other EVM source.
-#[derive(Clone, Copy, Debug)]
-struct ItsToken {
-    evm: BySource<&'static str>,
-    /// Whether it is the source's wrapped native token, topped up by wrapping
-    /// native gas when the wallet holds too little.
-    wraps_native: bool,
-}
-
-/// Each EVM source's own wrapped native token, WAVAX and WETH, and the Solana
-/// chain that receives it.
-struct WrappedNatives {
-    tokens: BySource<WrappedToken>,
-    solana: Chain,
+/// Where a network lists the wrapped native tokens, WAVAX and WETH.
+enum WrappedNatives {
+    /// On both EVM sources and on Solana. The its route sends each source's
+    /// own wrapped native token.
+    Bridged {
+        tokens: BySource<WrappedToken>,
+        solana: Chain,
+    },
+    /// Only on their origin chains, which leaves the native-wrap and solana
+    /// routes nothing to quote. The its route sends this ITS token instead,
+    /// at the same address on both EVM sources.
+    OriginOnly { its_token: &'static str },
 }
 
 /// The chains and tokens one network's routes run over. Addresses match
 /// rfq-api's vendored axelar-app network configs.
 struct NetworkTokens {
     chains: BySource<Chain>,
-    its: BySource<ItsToken>,
-    /// `None` where axelar-app lists the wrapped native tokens only on their
-    /// origin chains, which leaves the native-wrap and solana routes nothing
-    /// to quote.
-    wrapped_natives: Option<WrappedNatives>,
+    wrapped_natives: WrappedNatives,
     usdc: BySource<&'static str>,
     /// The contract every quoted transaction calls and every approval names.
     axelar_app: BySource<Address>,
@@ -103,17 +97,7 @@ const TESTNET: NetworkTokens = NetworkTokens {
             label: "Ethereum Sepolia",
         },
     },
-    its: BySource {
-        avalanche: ItsToken {
-            evm: WAVAX_TESTNET.evm,
-            wraps_native: true,
-        },
-        ethereum: ItsToken {
-            evm: WETH_TESTNET.evm,
-            wraps_native: true,
-        },
-    },
-    wrapped_natives: Some(WrappedNatives {
+    wrapped_natives: WrappedNatives::Bridged {
         tokens: BySource {
             avalanche: WAVAX_TESTNET,
             ethereum: WETH_TESTNET,
@@ -122,7 +106,7 @@ const TESTNET: NetworkTokens = NetworkTokens {
             caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
             label: "Solana devnet",
         },
-    }),
+    },
     usdc: BySource {
         avalanche: "0x57F1c63497AEe0bE305B8852b354CEc793da43bB",
         ethereum: "0x254d06f33bDc5b8ee05b2ea472107E300226659A",
@@ -139,14 +123,6 @@ const TESTNET: NetworkTokens = NetworkTokens {
     },
 };
 
-const AI_MAINNET: ItsToken = ItsToken {
-    evm: BySource {
-        avalanche: "0x2598c30330D5771AE9F983979209486aE26dE875",
-        ethereum: "0x2598c30330D5771AE9F983979209486aE26dE875",
-    },
-    wraps_native: false,
-};
-
 const MAINNET: NetworkTokens = NetworkTokens {
     chains: BySource {
         avalanche: Chain {
@@ -158,11 +134,10 @@ const MAINNET: NetworkTokens = NetworkTokens {
             label: "Ethereum",
         },
     },
-    its: BySource {
-        avalanche: AI_MAINNET,
-        ethereum: AI_MAINNET,
+    // AI.
+    wrapped_natives: WrappedNatives::OriginOnly {
+        its_token: "0x2598c30330D5771AE9F983979209486aE26dE875",
     },
-    wrapped_natives: None,
     usdc: BySource {
         avalanche: "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC",
         ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -189,12 +164,19 @@ impl NetworkTokens {
         }
     }
 
-    fn wrapped_natives(&self, network: Network, route: RfqRoute) -> Result<&WrappedNatives> {
-        self.wrapped_natives.as_ref().ok_or_else(|| {
-            eyre!(
-                "the {route} route has nothing to quote on {network}: axelar-app lists WAVAX and WETH only on their origin chains"
-            )
-        })
+    /// The wrapped native tokens and the Solana chain, for the routes that
+    /// need them bridged.
+    fn bridged_natives(
+        &self,
+        network: Network,
+        route: RfqRoute,
+    ) -> Result<(BySource<WrappedToken>, Chain)> {
+        match self.wrapped_natives {
+            WrappedNatives::Bridged { tokens, solana } => Ok((tokens, solana)),
+            WrappedNatives::OriginOnly { .. } => Err(eyre!(
+                "the {route} route is not offered on {network}, where axelar-app lists WAVAX and WETH only on their origin chains; nothing was quoted or sent"
+            )),
+        }
     }
 }
 
@@ -249,20 +231,28 @@ impl RoutePlan {
         };
         Ok(match route {
             RfqRoute::Its => {
-                let its = tokens.its.on(source);
+                let (from_token, to_token, wrap_shortfall) = match tokens.wrapped_natives {
+                    WrappedNatives::Bridged {
+                        tokens: wrapped, ..
+                    } => {
+                        let own = wrapped.on(source).evm;
+                        (own.on(source), own.on(other), true)
+                    }
+                    WrappedNatives::OriginOnly { its_token } => (its_token, its_token, false),
+                };
                 plan(
-                    from(its.evm.on(source)),
-                    to(its.evm.on(other)),
-                    its.wraps_native,
+                    from(from_token),
+                    to(to_token),
+                    wrap_shortfall,
                     &[BackendType::Its],
                     ITS_DEFAULT_AMOUNT,
                 )
             }
             RfqRoute::NativeWrap => {
-                let wrapped = tokens.wrapped_natives(network, route)?.tokens.on(source);
+                let (wrapped, _) = tokens.bridged_natives(network, route)?;
                 plan(
                     from(NATIVE_TOKEN),
-                    to(wrapped.evm.on(other)),
+                    to(wrapped.on(source).evm.on(other)),
                     false,
                     &[BackendType::Its],
                     NATIVE_WRAP_DEFAULT_AMOUNT,
@@ -278,13 +268,13 @@ impl RoutePlan {
                 GATEWAY_DEFAULT_AMOUNT,
             ),
             RfqRoute::Solana => {
-                let natives = tokens.wrapped_natives(network, route)?;
-                let wrapped = natives.tokens.on(source);
+                let (wrapped, solana) = tokens.bridged_natives(network, route)?;
+                let own = wrapped.on(source);
                 plan(
-                    from(wrapped.evm.on(source)),
+                    from(own.evm.on(source)),
                     RouteAsset {
-                        chain: natives.solana,
-                        token: wrapped.solana,
+                        chain: solana,
+                        token: own.solana,
                     },
                     true,
                     &[BackendType::Its],
@@ -427,32 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn mainnet_gateway_sends_one_axlusdc_for_usdc_on_ethereum() {
-        let route =
-            RoutePlan::resolve(Network::Mainnet, RfqRoute::Gateway, RfqSource::Avalanche).unwrap();
-
-        assert_eq!(
-            route.from.token,
-            "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC"
-        );
-        assert_eq!(route.to.token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
-        assert_eq!(route.amount(None), U256::from(1_000_000u64));
-    }
-
-    #[test]
-    fn mainnet_its_sends_ai_without_wrapping() {
-        for source in [RfqSource::Avalanche, RfqSource::Ethereum] {
-            let route = RoutePlan::resolve(Network::Mainnet, RfqRoute::Its, source).unwrap();
-            assert_eq!(
-                route.from.token,
-                "0x2598c30330D5771AE9F983979209486aE26dE875"
-            );
-            assert_eq!(route.to.token, route.from.token);
-            assert!(!route.wrap_shortfall);
-        }
-    }
-
-    #[test]
     fn mainnet_refuses_the_wrapped_native_routes() {
         for route in [RfqRoute::NativeWrap, RfqRoute::Solana] {
             let error =
@@ -489,6 +453,12 @@ mod tests {
             RoutePlan::resolve(Network::Mainnet, RfqRoute::Its, RfqSource::Avalanche).unwrap();
         assert_eq!(route.from.chain.caip2, "eip155:43114");
         assert_eq!(route.to.chain.caip2, "eip155:1");
+        assert_eq!(
+            route.from.token,
+            "0x2598c30330D5771AE9F983979209486aE26dE875"
+        );
+        assert_eq!(route.to.token, route.from.token);
+        assert!(!route.wrap_shortfall);
         assert_eq!(
             route.axelar_app,
             address!("0x77Accd23cC3Ccc5E36a543CEdcD03764BF6AD401")

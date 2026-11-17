@@ -785,7 +785,7 @@ pub enum TestCommands {
         source: RfqSource,
 
         /// Source amount in base units, for a single route (each route has
-        /// its own default, and mainnet gateway has none)
+        /// its own default)
         #[arg(long)]
         amount: Option<U256>,
 

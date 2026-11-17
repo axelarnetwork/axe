@@ -80,8 +80,9 @@ async fn check_routes(args: RfqTestArgs) -> Result<()> {
     summary.verdict()
 }
 
-/// Each route's plan and quote request. A route that cannot form a request
-/// is reported as failed without stopping the others.
+/// Each route's plan and quote request. A route the network doesn't offer
+/// stops the run before anything is quoted; a route that cannot form a
+/// request is reported as failed without stopping the others.
 fn plan_routes(args: &RfqTestArgs) -> Result<Vec<RouteRun>> {
     if args.amount.is_some() && args.routes.len() > 1 {
         return Err(eyre!("--amount applies to a single --route"));
@@ -191,12 +192,16 @@ async fn send_route(
     request: &QuoteRequest,
     output: Output,
 ) -> Result<Submitted> {
+    let amount = parse_amount(&request.amount)?;
     if run.plan.wrap_shortfall {
-        let amount = parse_amount(&request.amount)?;
         let wrap = source
             .wrap_shortfall(signer, run.plan.from.token, amount, output)
             .await?;
         run.report.wrap_tx = wrap.map(|hash| hash.to_string());
+    } else if !run.plan.spends_native() {
+        source
+            .require_balance(run.plan.from.token, signer.address(), amount)
+            .await?;
     }
     let quote = request_quote(client, run, request, output).await?;
     let requests = checked_requests(&quote, &run.plan, request, signer.address())?;
