@@ -17,6 +17,7 @@ use super::metrics::{ComputeUnitSummary, LoadTestReport, ReportInput, RunIdentit
 use super::run_sizing::SustainedPlan;
 use super::submitter::TransactionSubmitter;
 use super::sustained;
+use super::units::Lamports;
 use crate::config::AxelarChainContract;
 use crate::solana;
 use crate::types::Network;
@@ -39,22 +40,59 @@ fn fund_hint(network: Network, pubkey: &Pubkey) -> String {
     }
 }
 
+/// `sourceTokenSymbol` for the gas quote. The chains-config Solana entries
+/// carry no `tokenSymbol`, unlike the EVM ones.
+const SOL_SYMBOL: &str = "SOL";
+
 struct SolanaSubmitter {
     rpc_url: String,
     network: Network,
     destination_chain: String,
     destination_address: String,
+    pay_gas: Lamports,
 }
 
 impl SolanaSubmitter {
-    fn new(args: &LoadTestArgs, destination_address: &str) -> Self {
+    fn new(args: &LoadTestArgs, destination_address: &str, pay_gas: Lamports) -> Self {
         Self {
             rpc_url: args.source_rpc.to_string(),
             network: args.network,
             destination_chain: args.destination_chain.to_string(),
             destination_address: destination_address.to_string(),
+            pay_gas,
         }
     }
+}
+
+/// `PayGas` for this run's calls: the relayer's quote for the route when it
+/// is above [`solana::MIN_PAY_GAS_LAMPORTS`], else that floor, so a fee rise
+/// on the route cannot leave the message unexecuted.
+async fn route_pay_gas(args: &LoadTestArgs) -> Lamports {
+    let quote = match args.network {
+        Network::DevnetAmplifier => None,
+        _ => {
+            super::gas_estimate::estimate_route_gas(
+                args.network,
+                &args.source_axelar_id,
+                &args.destination_axelar_id,
+                SOL_SYMBOL,
+                super::gas_estimate::DEFAULT_DEST_GAS_LIMIT,
+            )
+            .await
+        }
+    };
+    let pay_gas = pay_gas_for(args.network, quote);
+    ui::kv("gas value", &format!("{} lamports", pay_gas.get()));
+    pay_gas
+}
+
+/// Devnet-amplifier's relayer takes no gas, so nothing is paid there.
+fn pay_gas_for(network: Network, quote: Option<u128>) -> Lamports {
+    if network == Network::DevnetAmplifier {
+        return Lamports::new(0);
+    }
+    let quoted = quote.map_or(0, |lamports| u64::try_from(lamports).unwrap_or(u64::MAX));
+    Lamports::new(quoted.max(solana::MIN_PAY_GAS_LAMPORTS))
 }
 
 struct SolanaSubmitJob {
@@ -70,6 +108,7 @@ impl TransactionSubmitter for SolanaSubmitter {
         let network = self.network;
         let destination_chain = self.destination_chain.clone();
         let destination_address = self.destination_address.clone();
+        let pay_gas = self.pay_gas;
         async move {
             spawn_blocking(move || {
                 send_sol_tx(
@@ -79,6 +118,7 @@ impl TransactionSubmitter for SolanaSubmitter {
                     &destination_chain,
                     &destination_address,
                     &job.payload,
+                    pay_gas,
                 )
             })
             .await
@@ -133,6 +173,7 @@ pub async fn run_load_test_with_metrics(
     let payload_encoder = payload_encoding.prepare(args.network);
 
     let main_keypair = solana::load_keypair(args.keypair.as_deref()).await?;
+    let pay_gas = route_pay_gas(args).await;
     let source_rpc = args.source_rpc.to_string();
     let network = args.network;
     let keypairs = spawn_blocking(move || {
@@ -154,7 +195,7 @@ pub async fn run_load_test_with_metrics(
         })
         .collect();
     let burst = super::submitter::run_burst(
-        SolanaSubmitter::new(args, destination_address),
+        SolanaSubmitter::new(args, destination_address, pay_gas),
         jobs,
         key_count,
     )
@@ -220,11 +261,20 @@ fn send_sol_tx(
     dest_chain: &str,
     dest_addr: &str,
     payload: &[u8],
+    pay_gas: Lamports,
 ) -> TxMetrics {
     let submit_start = Instant::now();
     let source_addr = keypair.pubkey().to_string();
     let payload_hash = hex::encode(keccak256(payload));
-    match solana::send_call_contract(solana_rpc, keypair, network, dest_chain, dest_addr, payload) {
+    match solana::send_call_contract(
+        solana_rpc,
+        keypair,
+        network,
+        dest_chain,
+        dest_addr,
+        payload,
+        pay_gas.get(),
+    ) {
         Ok((_sig, mut metrics)) => {
             metrics.payload = payload.to_vec();
             metrics.payload_hash = payload_hash;
@@ -243,46 +293,36 @@ fn send_sol_tx(
 async fn prepare_sustained_keypairs(
     args: &LoadTestArgs,
     plan: SustainedPlan,
+    pay_gas: Lamports,
 ) -> eyre::Result<Arc<Vec<Arc<dyn Signer + Send + Sync>>>> {
     let main_keypair = solana::load_keypair(args.keypair.as_deref()).await?;
     let source_rpc = args.source_rpc.to_string();
-    let destination_chain = args.destination_chain.to_string();
     let network = args.network;
 
     spawn_blocking(move || {
-        prepare_sustained_keypairs_blocking(
-            &source_rpc,
-            &destination_chain,
-            network,
-            plan,
-            &main_keypair,
-        )
+        prepare_sustained_keypairs_blocking(&source_rpc, network, plan, &main_keypair, pay_gas)
     })
     .await?
 }
 
 fn prepare_sustained_keypairs_blocking(
     source_rpc: &str,
-    destination_chain: &str,
     network: Network,
     plan: SustainedPlan,
     main_keypair: &Keypair,
+    pay_gas: Lamports,
 ) -> eyre::Result<Arc<Vec<Arc<dyn Signer + Send + Sync>>>> {
     check_wallet_balance(source_rpc, network, main_keypair)?;
 
     let pool_size = plan.tps * plan.key_cycle;
     let derived = keypairs::derive_keypairs(main_keypair, pool_size)?;
     let fires_per_key = (plan.duration_secs / plan.key_cycle as u64).max(1);
-    let gas_per_tx = match network {
-        Network::DevnetAmplifier => 0,
-        _ => solana::pay_gas_lamports(destination_chain),
-    };
     keypairs::ensure_funded_for_sustained(
         source_rpc,
         main_keypair,
         &derived,
         fires_per_key,
-        super::units::Lamports::new(gas_per_tx),
+        pay_gas,
     )?;
     ui::info(&format!(
         "derived {} Solana signing keys (pool: {} tx/s × {}s cycle)",
@@ -319,7 +359,8 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         Option::None => Option::None,
     };
 
-    let keypairs_pool = prepare_sustained_keypairs(args, plan).await?;
+    let pay_gas = route_pay_gas(args).await;
+    let keypairs_pool = prepare_sustained_keypairs(args, plan, pay_gas).await?;
 
     let spinner = ui::wait_spinner(&format!("[0/{duration_secs}s] starting sustained send..."));
     // Send a clone to the verification task so it can display progress.
@@ -336,7 +377,7 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         .is_ok();
 
     let make_task = sustained::submission_tasks(
-        SolanaSubmitter::new(args, destination_address),
+        SolanaSubmitter::new(args, destination_address, pay_gas),
         move |key_index, _nonce| SolanaSubmitJob {
             signer: Arc::clone(&keypairs_pool[key_index]),
             payload: payload_encoder.encode(&payload),
@@ -371,4 +412,37 @@ pub(super) async fn run_sustained_load_test_with_metrics(
         total_expected,
         pool_size,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Lamports, pay_gas_for};
+    use crate::solana::MIN_PAY_GAS_LAMPORTS;
+    use crate::types::Network;
+
+    #[test]
+    fn a_quote_above_the_floor_is_paid() {
+        // Testnet solana -> solana quoted 5_081_695 raw (x1.5 = 7_622_542) on
+        // 2026-11-17, while axe paid 500_000 and the relayer refused it.
+        let above = MIN_PAY_GAS_LAMPORTS + 1;
+        assert_eq!(
+            pay_gas_for(Network::Testnet, Some(u128::from(above))),
+            Lamports::new(above)
+        );
+    }
+
+    #[test]
+    fn a_low_or_missing_quote_pays_the_floor() {
+        let floor = Lamports::new(MIN_PAY_GAS_LAMPORTS);
+        assert_eq!(pay_gas_for(Network::Mainnet, Some(109_122)), floor);
+        assert_eq!(pay_gas_for(Network::Testnet, None), floor);
+    }
+
+    #[test]
+    fn devnet_pays_no_gas() {
+        assert_eq!(
+            pay_gas_for(Network::DevnetAmplifier, Some(u128::MAX)),
+            Lamports::new(0)
+        );
+    }
 }

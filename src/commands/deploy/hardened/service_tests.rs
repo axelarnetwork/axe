@@ -20,12 +20,22 @@ fn service_server(
     let encoded = base64::engine::general_purpose::STANDARD.encode(query.to_string());
     let expected = format!("GET /cosmwasm/wasm/v1/contract/registry/smart/{encoded} HTTP/1.1");
     let body = json!({"data":response}).to_string();
+    // The LCD client first reads the primary's head to check it is advancing.
+    let head = json!({"block":{"header":{"time":chrono::Utc::now().to_rfc3339()}}}).to_string();
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 4096];
-        let size = stream.read(&mut request).unwrap();
-        assert!(String::from_utf8_lossy(&request[..size]).starts_with(&expected));
-        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]).to_string();
+            let is_head = request.starts_with("GET /cosmos/base/tendermint/v1beta1/blocks/latest ");
+            let reply = if is_head { &head } else { &body };
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+            if !is_head {
+                assert!(request.starts_with(&expected));
+                break;
+            }
+        }
     });
     (url, server)
 }

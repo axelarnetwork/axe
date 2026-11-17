@@ -28,22 +28,12 @@ use crate::commands::load_test::metrics::{TxMetrics, TxOutcome};
 use crate::types::Network;
 use crate::ui;
 
-/// Lamports attached as `PayGas` for a sol→`destination_chain` GMP call.
-///
-/// Testnet observation (Axelarscan): sol→sol consistently spends ~0.0002 SOL
-/// on relayer bookkeeping, so 0.0005 SOL is ~2.5× headroom. Other destinations
-/// keep the historical 0.01 SOL until we confirm a smaller amount is safe on
-/// mainnet, where destination-execution cost is converted via price oracles
-/// and can push the required SOL payment higher than testnet shows.
-pub fn pay_gas_lamports(destination_chain: &str) -> u64 {
-    // Match every env's Solana axelar id: "solana" (mainnet/testnet),
-    // "solana-stagenet-3" (stagenet), "solana-18" (devnet).
-    if destination_chain.starts_with("solana") {
-        500_000
-    } else {
-        10_000_000
-    }
-}
+/// Least lamports attached as `PayGas` to a Solana-source GMP call, whatever
+/// the destination. Solana to Solana used to pay 0.0005 SOL, until Axelar's
+/// base fee for that route rose from ~0.0002 to ~0.0012 SOL on 2026-10-13
+/// and the testnet relayer started refusing it with `INSUFFICIENT_GAS`.
+/// Excess gas is refunded to the payer.
+pub const MIN_PAY_GAS_LAMPORTS: u64 = 10_000_000;
 
 /// Send a call_contract instruction to the Solana Axelar Gateway.
 /// Returns the transaction signature and per-tx metrics.
@@ -54,6 +44,7 @@ pub fn send_call_contract(
     destination_chain: &str,
     destination_address: &str,
     payload: &[u8],
+    pay_gas_lamports: u64,
 ) -> Result<(String, TxMetrics)> {
     let submit_start = Instant::now();
     let rpc_client = rpc_client(rpc_url);
@@ -100,6 +91,7 @@ pub fn send_call_contract(
                 destination_chain,
                 destination_address,
                 payload,
+                pay_gas_lamports,
             );
             vec![pay_gas_ix, call_contract_ix]
         }
@@ -149,6 +141,7 @@ fn build_pay_gas_instruction(
     destination_chain: &str,
     destination_address: &str,
     payload: &[u8],
+    amount: u64,
 ) -> Instruction {
     let gas_service_id = network.solana_gas_service_id();
     let payload_hash: [u8; 32] = solana_sdk::keccak::hash(payload).to_bytes();
@@ -164,7 +157,7 @@ fn build_pay_gas_instruction(
         destination_chain: destination_chain.to_string(),
         destination_address: destination_address.to_string(),
         payload_hash,
-        amount: pay_gas_lamports(destination_chain),
+        amount,
         refund_address: fee_payer,
     }
     .data();

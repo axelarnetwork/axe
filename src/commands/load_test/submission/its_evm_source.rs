@@ -51,7 +51,7 @@ use crate::config::ChainContract;
 use crate::config::ChainsConfig;
 use crate::evm::{
     ERC20, EvmEndpoints, InterchainTokenFactory, InterchainTokenService, connect_evm_signed,
-    deterministic_view_failure, send_tx_robust,
+    describe_send_error, deterministic_view_failure, send_tx_robust,
 };
 use crate::retry::{retry_with_fallback, retry_with_fallback_all};
 use crate::types::Network;
@@ -873,7 +873,7 @@ pub(super) async fn execute_interchain_transfer(
         Ok(receipt) => {
             receipt_to_metrics(&receipt, receipt.transaction_hash, its_proxy, submit_start)
         }
-        Err(error) => make_failure(submit_start, &error.to_string()),
+        Err(error) => make_failure(submit_start, &describe_send_error(&error)),
     }
 }
 

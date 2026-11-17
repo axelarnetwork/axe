@@ -233,6 +233,12 @@ pub fn is_transient_default<E: std::fmt::Display>(err: &E) -> bool {
         // state (nonce/gas fills, eth_call probes). Endpoint-transient — the
         // same call succeeds on retry or on the next endpoint.
         || msg.contains("state not available for pending block")
+        // Arc rejects an `eth_feeHistory` whose newest block is past the
+        // serving node's head ("request beyond head block: requested N, head
+        // N-1"). It killed the fee fill of mainnet cron run 43865381418, most
+        // likely a fill racing a new block, so it is retried like any other
+        // endpoint-transient error.
+        || msg.contains("request beyond head block")
 }
 
 #[cfg(test)]
@@ -356,6 +362,7 @@ mod tests {
             "429 Too Many Requests",
             "network error",
             "error code -32000: state not available for pending block",
+            "error code -32602: request beyond head block: requested 31540128, head 31540127",
         ] {
             assert!(is_transient_default(&s), "expected transient: {s}");
         }

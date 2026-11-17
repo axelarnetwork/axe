@@ -263,15 +263,7 @@ impl GmpFailFast {
         }
         self.last_check = Instant::now();
         for tx in txs.iter_mut().filter(|tx| tx.is_active()) {
-            let lookup = async {
-                if let Some(rec) = gmp_api::search_by_message_id(base, &tx.message_id).await? {
-                    return Ok::<_, eyre::Report>(Some(rec));
-                }
-                match tx.message_id.rsplit_once('-') {
-                    Some((source_tx, _)) => gmp_api::search_by_tx(base, source_tx).await,
-                    None => Ok(None),
-                }
-            };
+            let lookup = gmp_verdict_record(base, tx);
             let Ok(Ok(Some(rec))) = time::timeout(GMP_API_RECHECK_TIMEOUT, lookup).await else {
                 continue;
             };
@@ -290,34 +282,47 @@ impl GmpFailFast {
     }
 }
 
+/// The GMP-API record that answers for `tx`'s final outcome.
+///
+/// A hub-routed ITS transfer is two GMP messages, and the first (source to
+/// hub) reads "executed" as soon as the hub ran. Once the hub to destination
+/// leg is known, only its record says whether the destination executed or
+/// rejected the transfer: testnet solana -> arc-8 was reported as passed on a
+/// leg Axelarscan had marked failed. That leg is looked up by its exact id,
+/// because the hub tx hash also matches the first leg it executed.
+async fn gmp_verdict_record(base: &str, tx: &PendingTx) -> Result<Option<gmp_api::ExpressRecord>> {
+    if let Some(leg) = tx.second_leg() {
+        return gmp_api::search_by_message_id(base, &leg.message_id).await;
+    }
+    // Prefer the exact `message_id` Axelarscan keys on. If it isn't indexed in
+    // that form for this source chain, fall back to the source tx id (the
+    // portion before the event-index suffix).
+    if let Some(rec) = gmp_api::search_by_message_id(base, &tx.message_id).await? {
+        return Ok(Some(rec));
+    }
+    match tx.message_id.rsplit_once('-') {
+        Some((source_tx, _)) => gmp_api::search_by_tx(base, source_tx).await,
+        None => Ok(None),
+    }
+}
+
 /// Best-effort, non-fatal final check: ask the Axelarscan GMP API whether this
 /// message actually executed on-chain. A slow final leg or a missed poll can
 /// leave an executed transfer looking failed at the inactivity timeout (the
 /// MOU-3/MOU-4 failure mode); this is the safety net layered on top of those
 /// fixes. Retries so a transient API error or a message still transitioning to
 /// executed does not become a permanent failed verdict.
-async fn gmp_api_reports_executed(network: Network, message_id: &str) -> bool {
+async fn gmp_api_reports_executed(network: Network, tx: &PendingTx) -> bool {
     let Some(base) = gmp_api::base_url(network) else {
         // devnet-amplifier has no Axelarscan — no recheck possible; the
         // on-chain poll verdict stands.
         return false;
     };
     for attempt in 0..GMP_API_RECHECK_ATTEMPTS {
-        let lookup = async {
-            // Prefer the exact `message_id` Axelarscan keys on. If it isn't
-            // indexed in that form for this source chain, fall back to the
-            // source tx id (the portion before the event-index suffix).
-            if let Some(rec) = gmp_api::search_by_message_id(base, message_id).await? {
-                return Ok::<bool, eyre::Report>(rec.is_executed());
-            }
-            if let Some((source_tx, _)) = message_id.rsplit_once('-')
-                && let Some(rec) = gmp_api::search_by_tx(base, source_tx).await?
-            {
-                return Ok(rec.is_executed());
-            }
-            Ok(false)
-        };
-        if let Ok(Ok(true)) = time::timeout(GMP_API_RECHECK_TIMEOUT, lookup).await {
+        let lookup = gmp_verdict_record(base, tx);
+        if let Ok(Ok(Some(rec))) = time::timeout(GMP_API_RECHECK_TIMEOUT, lookup).await
+            && rec.is_executed()
+        {
             return true;
         }
         if attempt + 1 < GMP_API_RECHECK_ATTEMPTS {
@@ -377,7 +382,7 @@ async fn finalize_timed_out_txs(
         if !tx.is_active() {
             continue;
         }
-        let executed = gmp_api_reports_executed(network, &tx.message_id).await;
+        let executed = gmp_api_reports_executed(network, tx).await;
         mark_timed_out_tx(tx, executed, approval_label, execution_label);
     }
 }
@@ -1759,12 +1764,14 @@ mod tests {
     use std::time::Instant;
 
     use alloy::primitives::{Address, FixedBytes};
+    use serde_json::json;
 
     use super::super::state::PendingTxInput;
     use super::{
-        DestinationObservation, DestinationStatus, PendingTx, Phase,
-        apply_destination_observations, mark_timed_out_tx, parse_payload_hash,
+        DestinationObservation, DestinationStatus, PayloadHash, PendingTx, Phase, SecondLeg,
+        apply_destination_observations, gmp_verdict_record, mark_timed_out_tx, parse_payload_hash,
     };
+    use crate::evm::test_rpc::serve;
 
     fn pending_at(phase: Phase) -> PendingTx {
         PendingTx::new(PendingTxInput {
@@ -1806,6 +1813,48 @@ mod tests {
         assert!(!tx.recovered_via_api());
         assert_eq!(tx.timing.executed_ok, None);
         assert_eq!(tx.failure_reason(), Some("EVM approval: timed out"));
+    }
+
+    #[tokio::test]
+    async fn gmp_verdict_comes_from_the_destination_leg_once_discovered() {
+        // Testnet solana -> arc-8: the hub leg read "executed" while the
+        // destination leg had failed, and the run was reported as passed.
+        let failed_leg = json!({ "data": [{ "message_id": "0xhub-7", "status": "error" }] });
+        let (base, api) = serve(vec![Some(failed_leg)]).await;
+        let mut tx = pending_at(Phase::DiscoverSecondLeg);
+        let second_leg = SecondLeg {
+            message_id: "0xhub-7".into(),
+            payload_hash: PayloadHash::from(FixedBytes::from([3; 32])),
+            source_address: "hub".to_string(),
+            destination_address: "destination".to_string(),
+        };
+        assert!(tx.discover_second_leg(second_leg, Phase::Approved));
+
+        let record = gmp_verdict_record(&base, &tx).await.unwrap().unwrap();
+
+        assert!(record.is_failed());
+        assert!(!record.is_executed());
+        let requests = api.await.unwrap();
+        assert_eq!(requests, vec![json!({ "messageId": "0xhub-7" })]);
+    }
+
+    #[tokio::test]
+    async fn gmp_verdict_of_a_single_leg_falls_back_to_the_source_tx() {
+        let executed = json!({ "data": [{ "message_id": "m", "status": "executed" }] });
+        let (base, api) = serve(vec![Some(json!({ "data": [] })), Some(executed)]).await;
+        let tx = pending_at(Phase::Approved);
+
+        let record = gmp_verdict_record(&base, &tx).await.unwrap().unwrap();
+
+        assert!(record.is_executed());
+        let requests = api.await.unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                json!({ "messageId": "0xdeadbeef-0" }),
+                json!({ "txHash": "0xdeadbeef" })
+            ]
+        );
     }
 
     #[test]
