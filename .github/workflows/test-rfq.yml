@@ -9,11 +9,11 @@ run-name: "RFQ routes: ${{ inputs.network || 'testnet' }} · ${{ inputs.routes |
 #
 # Funding the shared EVM wallet needs on the source chain: native gas for the
 # ITS fees (paid as transaction value) and the native-wrap amount, plus the
-# gateway USDC (aUSDC on testnet). The its and solana routes wrap native gas
-# themselves when the wallet's wrapped balance is short. The solana route
-# delivers to the RFQ_E2E_SOLANA_RECIPIENT repository variable and fails
-# without it. On mainnet the gateway route has no default amount, since
-# Axelar's Avalanche to Ethereum transfer fee is 61.5 USDC.
+# gateway USDC (aUSDC on testnet). On testnet the its and solana routes wrap
+# native gas themselves when the wallet's wrapped balance is short. The solana
+# route delivers to the RFQ_E2E_SOLANA_RECIPIENT repository variable and fails
+# without it. Mainnet runs only its and gateway, and its sends AI, which the
+# wallet must hold.
 on:
   # Every 6 hours, clear of the intents (00:30, 12:30) and route (00:00,
   # 12:00) schedules.
@@ -30,7 +30,7 @@ on:
           - testnet
           - mainnet
       routes:
-        description: Comma-separated routes to run, in order (its, native-wrap, gateway, solana)
+        description: Comma-separated routes to run, in order (its, native-wrap, gateway, solana; its and gateway on mainnet)
         type: string
         required: true
         default: its,native-wrap,gateway,solana

@@ -75,9 +75,9 @@ axe --network testnet test rfq --route native-wrap --dry-run --sender <address>
 
 | Route | Source token | Destination | Accepted backends | Default amount |
 |---|---|---|---|---|
-| `its` | wrapped native (WAVAX, or WETH from Ethereum) | the same token on the other EVM chain | `its` | 10^14 |
+| `its` | wrapped native on testnet (WAVAX, or WETH from Ethereum), AI on mainnet | the same token on the other EVM chain | `its` | 10^14 |
 | `native-wrap` | native AVAX or ETH, wrapped on the source | the wrapped token on the other EVM chain | `its` | 1.1 x 10^14 |
-| `gateway` | gateway USDC (aUSDC on testnet) | the same token on the other EVM chain | `gateway`, `gateway-express` | 1 USDC on testnet, none on mainnet |
+| `gateway` | gateway USDC (aUSDC on testnet, axlUSDC or Ethereum's USDC on mainnet) | the gateway USDC on the other EVM chain | `gateway`, `gateway-express` | 1 USDC |
 | `solana` | wrapped native | its Solana mint | `its` | 1.2 x 10^14 |
 
 `--route` takes several routes, repeated or comma-separated, each at most once.
@@ -86,8 +86,9 @@ axe --network testnet test rfq --route native-wrap --dry-run --sender <address>
 AxelarApp addresses come from the network configs rfq-api resolves quotes
 against, for testnet and mainnet. Amounts are base units and differ per route,
 because rfq-api tells transfers of the same token apart by amount. `--amount`
-overrides it for a single route. Mainnet gateway transfers between Avalanche
-and Ethereum pay Axelar a flat 61.5 USDC, so that route needs `--amount`.
+overrides it for a single route. On mainnet only `its` and `gateway` run,
+because axelar-app lists WAVAX and WETH only on their origin chains, and `its`
+sends AI, which the wallet must hold.
 
 Before anything is signed, a quote must take exactly the requested input and
 deliver the route's destination token, and its actions must be an optional
@@ -101,7 +102,7 @@ The key comes from `EVM_PRIVATE_KEY`, then `PRIVATE_KEY`, or `--private-key`.
 `--recipient` sets the EVM routes' recipient, the sender by default. The
 `solana` route needs `--solana-recipient`. A route that cannot form its
 request fails without stopping the others. When the wallet holds less of the
-wrapped native token than the amount, the `its` and `solana` routes wrap the
+wrapped native token than the amount, the testnet `its` and `solana` routes wrap the
 difference first with the token's `deposit()`. The source RPC comes from the
 chains config, with the intent RPC overrides applied. The wallet lock is held
 only while the actions are sent. A transaction whose broadcasts run out
@@ -118,7 +119,8 @@ The `Test RFQ routes` workflow runs all four routes on testnet every 6 hours,
 in one invocation and in the `intents-testnet` concurrency group because it
 shares the intents wallet. The solana route's recipient is the
 `RFQ_E2E_SOLANA_RECIPIENT` repository variable. Mainnet runs only through a
-manual dispatch, which also picks the routes and the source chain. The step
+manual dispatch, which also picks the routes (`its,gateway` on mainnet) and the
+source chain. The step
 summary lists each route with ✓ or ✗, and any failed route fails the run.
 
 ## Through MCP

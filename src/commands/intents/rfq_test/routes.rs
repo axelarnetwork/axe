@@ -12,6 +12,8 @@ const NATIVE_TOKEN: &str = "0x0000000000000000000000000000000000000000";
 const ITS_DEFAULT_AMOUNT: u64 = 100_000_000_000_000;
 const NATIVE_WRAP_DEFAULT_AMOUNT: u64 = 110_000_000_000_000;
 const SOLANA_DEFAULT_AMOUNT: u64 = 120_000_000_000_000;
+/// 1 USDC: gateway USDC has 6 decimals on both networks.
+const GATEWAY_DEFAULT_AMOUNT: u64 = 1_000_000;
 
 /// One value per EVM source chain.
 #[derive(Clone, Copy, Debug)]
@@ -36,20 +38,36 @@ struct WrappedToken {
     solana: &'static str,
 }
 
+/// The token the its route sends to the same token on the other EVM source.
+#[derive(Clone, Copy, Debug)]
+struct ItsToken {
+    evm: BySource<&'static str>,
+    /// Whether it is the source's wrapped native token, topped up by wrapping
+    /// native gas when the wallet holds too little.
+    wraps_native: bool,
+}
+
+/// Each EVM source's own wrapped native token, WAVAX and WETH, and the Solana
+/// chain that receives it.
+struct WrappedNatives {
+    tokens: BySource<WrappedToken>,
+    solana: Chain,
+}
+
 /// The chains and tokens one network's routes run over. Addresses match
 /// rfq-api's vendored axelar-app network configs.
 struct NetworkTokens {
     chains: BySource<Chain>,
-    solana: Chain,
-    /// Each source chain's own wrapped native token: WAVAX and WETH.
-    wrapped_native: BySource<WrappedToken>,
+    its: BySource<ItsToken>,
+    /// `None` where axelar-app lists the wrapped native tokens only on their
+    /// origin chains, which leaves the native-wrap and solana routes nothing
+    /// to quote.
+    wrapped_natives: Option<WrappedNatives>,
     usdc: BySource<&'static str>,
     /// The contract every quoted transaction calls and every approval names.
     axelar_app: BySource<Address>,
     /// The most native gas, in wei, a quote may charge as transaction value.
     max_fee: BySource<u128>,
-    /// `None` where the gateway transfer fee exceeds any small amount.
-    gateway_default_amount: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,14 +103,26 @@ const TESTNET: NetworkTokens = NetworkTokens {
             label: "Ethereum Sepolia",
         },
     },
-    solana: Chain {
-        caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
-        label: "Solana devnet",
+    its: BySource {
+        avalanche: ItsToken {
+            evm: WAVAX_TESTNET.evm,
+            wraps_native: true,
+        },
+        ethereum: ItsToken {
+            evm: WETH_TESTNET.evm,
+            wraps_native: true,
+        },
     },
-    wrapped_native: BySource {
-        avalanche: WAVAX_TESTNET,
-        ethereum: WETH_TESTNET,
-    },
+    wrapped_natives: Some(WrappedNatives {
+        tokens: BySource {
+            avalanche: WAVAX_TESTNET,
+            ethereum: WETH_TESTNET,
+        },
+        solana: Chain {
+            caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+            label: "Solana devnet",
+        },
+    }),
     usdc: BySource {
         avalanche: "0x57F1c63497AEe0bE305B8852b354CEc793da43bB",
         ethereum: "0x254d06f33bDc5b8ee05b2ea472107E300226659A",
@@ -107,23 +137,14 @@ const TESTNET: NetworkTokens = NetworkTokens {
         avalanche: 250_000_000_000_000_000,
         ethereum: 10_000_000_000_000_000,
     },
-    gateway_default_amount: Some(1_000_000),
 };
 
-const WAVAX_MAINNET: WrappedToken = WrappedToken {
+const AI_MAINNET: ItsToken = ItsToken {
     evm: BySource {
-        avalanche: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-        ethereum: "0x38Cb2e8b5A4e34c38c87A56b2F4681D0579DAdD5",
+        avalanche: "0x2598c30330D5771AE9F983979209486aE26dE875",
+        ethereum: "0x2598c30330D5771AE9F983979209486aE26dE875",
     },
-    solana: "5xMfUDBky6FF72h1Dc1x4LEwTZAxJKsy3iUV85cTodGA",
-};
-
-const WETH_MAINNET: WrappedToken = WrappedToken {
-    evm: BySource {
-        avalanche: "0x50498dC52bCd3dAeB54B7225A7d2FA8D536F313E",
-        ethereum: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-    },
-    solana: "9VbXPX6Xd7wHSirGXf6r7FhCVzzCLFxnF3xtqGyAcHZf",
+    wraps_native: false,
 };
 
 const MAINNET: NetworkTokens = NetworkTokens {
@@ -137,14 +158,11 @@ const MAINNET: NetworkTokens = NetworkTokens {
             label: "Ethereum",
         },
     },
-    solana: Chain {
-        caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-        label: "Solana",
+    its: BySource {
+        avalanche: AI_MAINNET,
+        ethereum: AI_MAINNET,
     },
-    wrapped_native: BySource {
-        avalanche: WAVAX_MAINNET,
-        ethereum: WETH_MAINNET,
-    },
+    wrapped_natives: None,
     usdc: BySource {
         avalanche: "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC",
         ethereum: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
@@ -158,8 +176,6 @@ const MAINNET: NetworkTokens = NetworkTokens {
         avalanche: 1_000_000_000_000_000_000,
         ethereum: 10_000_000_000_000_000,
     },
-    // Axelar charges a flat 61.5 USDC between Avalanche and Ethereum.
-    gateway_default_amount: None,
 };
 
 impl NetworkTokens {
@@ -171,6 +187,14 @@ impl NetworkTokens {
                 "rfq route checks run on testnet or mainnet, not {network}"
             )),
         }
+    }
+
+    fn wrapped_natives(&self, network: Network, route: RfqRoute) -> Result<&WrappedNatives> {
+        self.wrapped_natives.as_ref().ok_or_else(|| {
+            eyre!(
+                "the {route} route has nothing to quote on {network}: axelar-app lists WAVAX and WETH only on their origin chains"
+            )
+        })
     }
 }
 
@@ -192,7 +216,7 @@ pub struct RoutePlan {
     pub wrap_shortfall: bool,
     /// Backends whose quotes the route accepts.
     pub backends: &'static [BackendType],
-    pub default_amount: Option<u64>,
+    pub default_amount: u64,
     pub axelar_app: Address,
     pub max_fee: U256,
 }
@@ -201,7 +225,6 @@ impl RoutePlan {
     pub fn resolve(network: Network, route: RfqRoute, source: RfqSource) -> Result<Self> {
         let tokens = NetworkTokens::for_network(network)?;
         let other = source.other();
-        let wrapped = tokens.wrapped_native.on(source);
         let from = |token| RouteAsset {
             chain: tokens.chains.on(source),
             token,
@@ -214,7 +237,7 @@ impl RoutePlan {
                     to: RouteAsset,
                     wrap_shortfall: bool,
                     backends: &'static [BackendType],
-                    default_amount: Option<u64>| Self {
+                    default_amount: u64| Self {
             route,
             from,
             to,
@@ -225,20 +248,26 @@ impl RoutePlan {
             max_fee: U256::from(tokens.max_fee.on(source)),
         };
         Ok(match route {
-            RfqRoute::Its => plan(
-                from(wrapped.evm.on(source)),
-                to(wrapped.evm.on(other)),
-                true,
-                &[BackendType::Its],
-                Some(ITS_DEFAULT_AMOUNT),
-            ),
-            RfqRoute::NativeWrap => plan(
-                from(NATIVE_TOKEN),
-                to(wrapped.evm.on(other)),
-                false,
-                &[BackendType::Its],
-                Some(NATIVE_WRAP_DEFAULT_AMOUNT),
-            ),
+            RfqRoute::Its => {
+                let its = tokens.its.on(source);
+                plan(
+                    from(its.evm.on(source)),
+                    to(its.evm.on(other)),
+                    its.wraps_native,
+                    &[BackendType::Its],
+                    ITS_DEFAULT_AMOUNT,
+                )
+            }
+            RfqRoute::NativeWrap => {
+                let wrapped = tokens.wrapped_natives(network, route)?.tokens.on(source);
+                plan(
+                    from(NATIVE_TOKEN),
+                    to(wrapped.evm.on(other)),
+                    false,
+                    &[BackendType::Its],
+                    NATIVE_WRAP_DEFAULT_AMOUNT,
+                )
+            }
             // rfq-api quotes gateway-express instead of gateway when express
             // covers the amount.
             RfqRoute::Gateway => plan(
@@ -246,31 +275,28 @@ impl RoutePlan {
                 to(tokens.usdc.on(other)),
                 false,
                 &[BackendType::Gateway, BackendType::GatewayExpress],
-                tokens.gateway_default_amount,
+                GATEWAY_DEFAULT_AMOUNT,
             ),
-            RfqRoute::Solana => plan(
-                from(wrapped.evm.on(source)),
-                RouteAsset {
-                    chain: tokens.solana,
-                    token: wrapped.solana,
-                },
-                true,
-                &[BackendType::Its],
-                Some(SOLANA_DEFAULT_AMOUNT),
-            ),
+            RfqRoute::Solana => {
+                let natives = tokens.wrapped_natives(network, route)?;
+                let wrapped = natives.tokens.on(source);
+                plan(
+                    from(wrapped.evm.on(source)),
+                    RouteAsset {
+                        chain: natives.solana,
+                        token: wrapped.solana,
+                    },
+                    true,
+                    &[BackendType::Its],
+                    SOLANA_DEFAULT_AMOUNT,
+                )
+            }
         })
     }
 
     /// `--amount`, else the route's default.
-    pub fn amount(&self, explicit: Option<U256>) -> Result<U256> {
-        explicit
-            .or(self.default_amount.map(U256::from))
-            .ok_or_else(|| {
-                eyre!(
-                    "the {} route has no default amount on this network because Axelar's transfer fee exceeds any small one; pass --amount",
-                    self.route
-                )
-            })
+    pub fn amount(&self, explicit: Option<U256>) -> U256 {
+        explicit.unwrap_or_else(|| U256::from(self.default_amount))
     }
 
     pub fn spends_native(&self) -> bool {
@@ -368,7 +394,7 @@ mod tests {
     fn routes_sharing_a_token_default_to_distinct_amounts() {
         let amounts: Vec<U256> = [RfqRoute::Its, RfqRoute::NativeWrap, RfqRoute::Solana]
             .into_iter()
-            .map(|route| plan(route, RfqSource::Avalanche).amount(None).unwrap())
+            .map(|route| plan(route, RfqSource::Avalanche).amount(None))
             .collect();
         assert_eq!(
             amounts,
@@ -379,9 +405,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            plan(RfqRoute::Its, RfqSource::Avalanche)
-                .amount(Some(U256::from(7u8)))
-                .unwrap(),
+            plan(RfqRoute::Its, RfqSource::Avalanche).amount(Some(U256::from(7u8))),
             U256::from(7u8)
         );
     }
@@ -399,19 +423,42 @@ mod tests {
             route.backends,
             &[BackendType::Gateway, BackendType::GatewayExpress]
         );
-        assert_eq!(route.amount(None).unwrap(), U256::from(1_000_000u64));
+        assert_eq!(route.amount(None), U256::from(1_000_000u64));
     }
 
     #[test]
-    fn mainnet_gateway_needs_an_explicit_amount() {
+    fn mainnet_gateway_sends_one_axlusdc_for_usdc_on_ethereum() {
         let route =
             RoutePlan::resolve(Network::Mainnet, RfqRoute::Gateway, RfqSource::Avalanche).unwrap();
 
-        assert!(route.amount(None).is_err());
         assert_eq!(
-            route.amount(Some(U256::from(70_000_000u64))).unwrap(),
-            U256::from(70_000_000u64)
+            route.from.token,
+            "0xfaB550568C688d5D8A52C7d794cb93Edc26eC0eC"
         );
+        assert_eq!(route.to.token, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        assert_eq!(route.amount(None), U256::from(1_000_000u64));
+    }
+
+    #[test]
+    fn mainnet_its_sends_ai_without_wrapping() {
+        for source in [RfqSource::Avalanche, RfqSource::Ethereum] {
+            let route = RoutePlan::resolve(Network::Mainnet, RfqRoute::Its, source).unwrap();
+            assert_eq!(
+                route.from.token,
+                "0x2598c30330D5771AE9F983979209486aE26dE875"
+            );
+            assert_eq!(route.to.token, route.from.token);
+            assert!(!route.wrap_shortfall);
+        }
+    }
+
+    #[test]
+    fn mainnet_refuses_the_wrapped_native_routes() {
+        for route in [RfqRoute::NativeWrap, RfqRoute::Solana] {
+            let error =
+                RoutePlan::resolve(Network::Mainnet, route, RfqSource::Avalanche).unwrap_err();
+            assert!(error.to_string().contains("only on their origin chains"));
+        }
     }
 
     #[test]
@@ -497,12 +544,9 @@ mod tests {
                 .unwrap(),
         );
 
-        let request = serde_json::to_value(route.quote_request(
-            route.amount(None).unwrap(),
-            sender,
-            recipient,
-        ))
-        .unwrap();
+        let request =
+            serde_json::to_value(route.quote_request(route.amount(None), sender, recipient))
+                .unwrap();
 
         assert_eq!(
             request,

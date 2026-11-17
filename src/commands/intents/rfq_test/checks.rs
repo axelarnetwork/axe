@@ -290,7 +290,7 @@ mod tests {
         } else {
             Recipient::Evm(SENDER)
         };
-        plan.quote_request(plan.amount(None).unwrap(), SENDER, recipient)
+        plan.quote_request(plan.amount(None), SENDER, recipient)
     }
 
     fn approve_data(spender: Address, amount: U256) -> String {
@@ -500,7 +500,7 @@ mod tests {
             .contains("above the")
         );
         let native = plan(RfqRoute::NativeWrap);
-        let deposit = native.amount(None).unwrap();
+        let deposit = native.amount(None);
         assert!(
             rejected(&native, |quote| {
                 quote["actions"][0]["payload"]["value"] =
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn the_approval_must_be_exactly_the_input_to_the_axelar_app() {
         let its = plan(RfqRoute::Its);
-        let amount = its.amount(None).unwrap();
+        let amount = its.amount(None);
         for edit in [
             json!({ "data": approve_data(APP, amount + U256::from(1u8)) }),
             json!({ "data": approve_data(Address::from([7u8; 20]), amount) }),

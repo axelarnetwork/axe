@@ -101,9 +101,7 @@ fn plan_routes(args: &RfqTestArgs) -> Result<Vec<RouteRun>> {
             let plan = RoutePlan::resolve(args.network, route, args.source)?;
             let request = plan
                 .recipient(args.recipient, args.solana_recipient, sender)
-                .and_then(|recipient| {
-                    Ok(plan.quote_request(plan.amount(args.amount)?, sender, recipient))
-                });
+                .map(|recipient| plan.quote_request(plan.amount(args.amount), sender, recipient));
             let mut report = RouteReport::new(route, request.as_ref().ok().cloned());
             if let Err(error) = &request {
                 report.finish(Some(error), Duration::ZERO);
