@@ -42,16 +42,27 @@ pub fn warn(msg: &str) {
     {
         return;
     }
+    if STDERR_WARNINGS.try_with(|()| ()).is_ok() {
+        warn_stderr(msg);
+        return;
+    }
     println!("{}", warning_line(msg));
 }
 
 tokio::task_local! {
     static COUNTED_WARNINGS: Arc<AtomicU64>;
+    static STDERR_WARNINGS: ();
 }
 
 /// Collect warnings for a summary while this task runs.
 pub async fn count_warnings<T>(count: Arc<AtomicU64>, work: impl Future<Output = T>) -> T {
     COUNTED_WARNINGS.scope(count, work).await
+}
+
+/// Print warnings to stderr while this task runs, so its stdout stays
+/// machine-readable.
+pub async fn warnings_to_stderr<T>(work: impl Future<Output = T>) -> T {
+    STDERR_WARNINGS.scope((), work).await
 }
 
 /// Print a warning to stderr so structured stdout remains machine-readable.
@@ -275,6 +286,16 @@ mod tests {
         assert_eq!(first.load(Ordering::Relaxed), 2);
         assert_eq!(second.load(Ordering::Relaxed), 1);
         assert!(COUNTED_WARNINGS.try_with(|_| ()).is_err());
+    }
+
+    #[tokio::test]
+    async fn stderr_warnings_are_scoped_to_their_task() {
+        warnings_to_stderr(async {
+            assert!(STDERR_WARNINGS.try_with(|()| ()).is_ok());
+            warn("RPC retry");
+        })
+        .await;
+        assert!(STDERR_WARNINGS.try_with(|()| ()).is_err());
     }
 
     #[test]

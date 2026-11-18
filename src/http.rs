@@ -19,6 +19,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
+        // Cloudflare in front of the public Axelar APIs answers requests
+        // without a User-Agent with a 403 challenge page.
+        .user_agent(concat!("axe/", env!("CARGO_PKG_VERSION")))
         .timeout(REQUEST_TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
         .build()

@@ -313,6 +313,72 @@ async fn run_relay(
     .await
 }
 
+async fn run_rfq_test(
+    command: cli::TestCommands,
+    global_network: Option<types::Network>,
+) -> Result<()> {
+    let cli::TestCommands::Rfq {
+        routes,
+        source,
+        amount,
+        recipient,
+        solana_recipient,
+        timeout_secs,
+        api,
+        config,
+        private_key,
+        sender,
+        dry_run,
+        json,
+    } = command
+    else {
+        unreachable!("run_rfq_test called with another test command")
+    };
+    commands::intents::rfq_test(commands::intents::RfqTestArgs {
+        network: cli::resolve_network(global_network, config.as_deref())?,
+        routes,
+        source,
+        amount,
+        recipient,
+        solana_recipient,
+        timeout: std::time::Duration::from_secs(timeout_secs),
+        rfq_url: api.rfq_url,
+        config,
+        wallet: rfq_wallet(dry_run, sender, private_key)?,
+        json,
+    })
+    .await
+}
+
+/// The signing key, or for a dry run the address quotes are requested for.
+fn rfq_wallet(
+    dry_run: bool,
+    sender: Option<alloy::primitives::Address>,
+    private_key: Option<String>,
+) -> Result<commands::intents::RfqWallet> {
+    // clap has already read EVM_PRIVATE_KEY into the flag.
+    let private_key = commands::intents::resolve_private_key(
+        private_key,
+        None,
+        std::env::var("PRIVATE_KEY").ok(),
+    );
+    if !dry_run {
+        let signer = private_key?
+            .parse()
+            .map_err(|_| eyre::eyre!("the EVM private key is not valid hex"))?;
+        return Ok(commands::intents::RfqWallet::Signer(signer));
+    }
+    let private_key = private_key.ok();
+    if sender.is_none() && private_key.is_none() {
+        return Err(eyre::eyre!(
+            "a dry run needs --sender or an EVM key (EVM_PRIVATE_KEY, PRIVATE_KEY, or --private-key)"
+        ));
+    }
+    Ok(commands::intents::RfqWallet::DryRun(
+        commands::intents::resolve_quote_sender(sender, private_key)?,
+    ))
+}
+
 async fn run_test(
     command: cli::TestCommands,
     global_network: Option<types::Network>,
@@ -321,6 +387,7 @@ async fn run_test(
         command @ cli::TestCommands::Gmp { .. } => run_gmp_test(command, global_network).await,
         command @ cli::TestCommands::Relay { .. } => run_relay(command, global_network).await,
         command @ cli::TestCommands::Its { .. } => run_its_test(command, global_network).await,
+        command @ cli::TestCommands::Rfq { .. } => run_rfq_test(command, global_network).await,
         command @ cli::TestCommands::LoadTest { .. } => {
             run_load_test(command, global_network).await
         }

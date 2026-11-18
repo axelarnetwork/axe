@@ -449,7 +449,7 @@ fn remaining_until(deadline: chrono::DateTime<Utc>) -> String {
         .unwrap_or_else(|_| "expired".to_owned())
 }
 
-fn render_status(status: &StatusResponse, json: bool) -> Result<()> {
+pub(super) fn render_status(status: &StatusResponse, json: bool) -> Result<()> {
     let response = serde_json::to_string_pretty(status)?;
     if json {
         println!("{response}");

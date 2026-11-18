@@ -18,11 +18,11 @@ use super::types::{
     LegResult, PreparedDeposit, Quote, QuoteOutcome, QuoteRequest, RoundTripInputBudget, RoutePlan,
     RunLimits, StatusOutput, SubmittedIntent, TimedQuote, TransferState, WalletAsset, parse_amount,
 };
-use crate::evm::{ERC20, EvmEndpoints, send_tx_robust_with_warning};
+use crate::evm::{ERC20, EvmEndpoints, send_tx_confirmed};
 use crate::retry::retry_with_fallback_all;
 use crate::ui;
 
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(super) const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 const MIN_QUOTE_LIFETIME: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -487,7 +487,7 @@ async fn require_quote(client: &RfqClient, request: &QuoteRequest) -> Result<Tim
     }
 }
 
-fn validate_quote_lifetime(quote: &Quote) -> Result<()> {
+pub(super) fn validate_quote_lifetime(quote: &Quote) -> Result<()> {
     let remaining = quote.quote_expires_in();
     if remaining < MIN_QUOTE_LIFETIME {
         return Err(eyre!(
@@ -514,29 +514,21 @@ async fn execute_actions(
     let mut last_hash = None;
     for action in actions {
         let request = action_request(action, signer.address(), &source.id.chain_id)?;
-        let receipt = send_tx_robust_with_warning(
+        let hash = send_tx_confirmed(
             &endpoints,
             signer,
             request,
-            label,
+            &format!("{label} action '{}'", action.id),
             RECEIPT_TIMEOUT,
             |message| feedback.warn(message),
         )
         .await?;
-        if !receipt.status() {
-            return Err(eyre!(
-                "{} action '{}' reverted in transaction {}",
-                label,
-                action.id,
-                receipt.transaction_hash
-            ));
-        }
-        last_hash = Some(receipt.transaction_hash.to_string());
+        last_hash = Some(hash.to_string());
     }
     Ok(last_hash)
 }
 
-fn action_request(
+pub(super) fn action_request(
     action: &Action,
     signer: Address,
     expected_chain: &str,
@@ -910,6 +902,8 @@ async fn wait_for_fulfillment(
                     }
                     TransferState::AwaitingDeposit
                     | TransferState::Pending
+                    | TransferState::RefundPending
+                    | TransferState::RefundInitiated
                     | TransferState::NotFound => {}
                 }
             }
@@ -1000,7 +994,7 @@ mod tests {
     use super::*;
 
     use super::super::types::{
-        AssetId, Backend, BackendType, Fees, QuoteInput, QuoteOutput, SelectionReason, Validity,
+        AssetId, Backend, BackendType, Fees, QuoteInput, QuoteOutput, Validity,
     };
 
     #[tokio::test]
@@ -1061,7 +1055,7 @@ mod tests {
     fn quote_with_actions(actions: Vec<Action>) -> Quote {
         Quote {
             quote_id: "quote-id".to_owned(),
-            selection_reason: SelectionReason::BestAvailable,
+            selection_reason: "best_available".to_owned(),
             backend: Backend {
                 kind: BackendType::Intent,
                 name: "solver".to_owned(),

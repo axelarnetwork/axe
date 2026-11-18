@@ -137,7 +137,9 @@ pub(super) async fn resolve_evm_chains(
             ));
             continue;
         }
-        let Some(rpc_url) = first_working_rpc(&chain, chain_id, candidates, feedback).await else {
+        let Some(rpc_url) =
+            first_working_rpc(&chain.chain_id, chain_id, candidates, feedback).await
+        else {
             feedback.warn(&format!(
                 "{} has no usable RPC in the axe chains config",
                 chain.chain_id
@@ -180,8 +182,26 @@ fn evm_chain_candidates<'a>(
     candidates
 }
 
+/// The first working RPC for one EVM chain: its intent override, then the
+/// chains config entries with that chain ID.
+pub(super) async fn resolve_evm_rpc(
+    config: &ChainsConfig,
+    chain_id: u64,
+    label: &str,
+    feedback: DiscoveryFeedback,
+) -> Option<String> {
+    let candidates = evm_chain_candidates(config, chain_id, label);
+    first_working_rpc(
+        &format!("eip155:{chain_id}"),
+        chain_id,
+        candidates,
+        feedback,
+    )
+    .await
+}
+
 async fn first_working_rpc(
-    chain: &ChainInfo,
+    caip2: &str,
     expected_chain_id: u64,
     candidates: Vec<(&str, &ChainConfig)>,
     feedback: DiscoveryFeedback,
@@ -190,7 +210,7 @@ async fn first_working_rpc(
         .and_then(|kind| kind.url().map(|url| (kind, url)));
     for candidate in intent_rpc_candidates(candidates, rpc_override) {
         if let Some(rpc_url) = validate_rpc_candidate(
-            chain,
+            caip2,
             expected_chain_id,
             &candidate.source,
             candidate.url,
@@ -225,7 +245,7 @@ fn intent_rpc_candidates(
 }
 
 async fn validate_rpc_candidate(
-    chain: &ChainInfo,
+    caip2: &str,
     expected_chain_id: u64,
     source: &str,
     rpc_url: String,
@@ -236,7 +256,7 @@ async fn validate_rpc_candidate(
         Err(error) => {
             feedback.warn(&format!(
                 "skipping RPC {source} for {}: {}",
-                chain.chain_id,
+                caip2,
                 ui::scrub_urls(&error.to_string())
             ));
             return None;
@@ -248,14 +268,14 @@ async fn validate_rpc_candidate(
         Ok(actual_chain_id) => {
             feedback.warn(&format!(
                 "skipping RPC {source}: expected {}, got eip155:{actual_chain_id}",
-                chain.chain_id
+                caip2
             ));
             None
         }
         Err(error) => {
             feedback.warn(&format!(
                 "skipping RPC {source} for {}: {}",
-                chain.chain_id,
+                caip2,
                 ui::scrub_urls(&error.to_string())
             ));
             None
@@ -1208,7 +1228,7 @@ fn average_quote_ms(plans: &[RoutePlan]) -> u64 {
 mod tests {
     use super::*;
     use crate::commands::intents::types::{
-        Backend, BackendType, Fees, QuoteInput, QuoteOutput, SelectionReason, Validity,
+        Backend, BackendType, Fees, QuoteInput, QuoteOutput, Validity,
     };
 
     fn asset(chain: &str, token: &str, balance: u64, native: bool) -> WalletAsset {
@@ -1403,7 +1423,7 @@ mod tests {
         let to = asset("eip155:2", "b", 0, false);
         let quote = Quote {
             quote_id: "quote-id".into(),
-            selection_reason: SelectionReason::BestAvailable,
+            selection_reason: "best_available".to_owned(),
             backend: Backend {
                 kind: BackendType::Intent,
                 name: "Axelar Intents".into(),

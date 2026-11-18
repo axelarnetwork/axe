@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 use clap::{Args, Parser, Subcommand};
 use eyre::Result;
 
-use crate::commands::intents::{AssetSpec, AssetType, HumanAmount, OrderType, QuoteBenchmarkMode};
+use crate::commands::intents::{
+    AssetSpec, AssetType, HumanAmount, OrderType, QuoteBenchmarkMode, RfqRoute, RfqSource,
+};
 use crate::commands::load_test::{Protocol, TestType};
 use crate::commands::propose::ProposeArgs;
 use crate::types::Network;
@@ -773,6 +775,58 @@ pub enum TestCommands {
         /// for this network/src/dst/deployer combination (Solana source). EVM tests always use a fresh token.
         #[arg(long)]
         fresh_token: bool,
+    },
+
+    /// End-to-end check of rfq-api routes: quote each one, send its quoted
+    /// actions on the source chain, and poll the transfers' status until DONE
+    Rfq {
+        /// Routes to exercise, in order (repeat the flag or separate with commas)
+        #[arg(long = "route", value_enum, required = true, value_delimiter = ',')]
+        routes: Vec<RfqRoute>,
+
+        /// Source chain. The destination is the other EVM chain, or Solana
+        #[arg(long, value_enum, default_value_t)]
+        source: RfqSource,
+
+        /// Source amount in base units, for a single route (each route has
+        /// its own default)
+        #[arg(long)]
+        amount: Option<U256>,
+
+        /// Recipient on the EVM routes (default the sender)
+        #[arg(long)]
+        recipient: Option<Address>,
+
+        /// Recipient on the solana route, which needs one
+        #[arg(long)]
+        solana_recipient: Option<solana_sdk::pubkey::Pubkey>,
+
+        /// Seconds to poll each transfer for DONE before failing it
+        #[arg(long, alias = "timeout", default_value = "2700", value_parser = clap::value_parser!(u64).range(1..))]
+        timeout_secs: u64,
+
+        #[command(flatten)]
+        api: IntentApiOptions,
+
+        /// Path to chains config JSON, for the source chain's RPC
+        #[arg(long, env = "CHAINS_CONFIG")]
+        config: Option<PathBuf>,
+
+        /// EVM key override. Defaults to EVM_PRIVATE_KEY, then PRIVATE_KEY.
+        #[arg(long, env = "EVM_PRIVATE_KEY", hide_env_values = true)]
+        private_key: Option<String>,
+
+        /// Quote for this address instead of the key's
+        #[arg(long, requires = "dry_run")]
+        sender: Option<Address>,
+
+        /// Quote and print the actions without sending anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Print a JSON summary on stdout, with progress on stderr
+        #[arg(long)]
+        json: bool,
     },
 
     /// Monitor express-execution reimbursement (observe-only): for each chain
@@ -1605,6 +1659,111 @@ mod tests {
         assert!(
             Cli::try_parse_from(["axe", "intents", "exercise", "--private-key", "00"]).is_err()
         );
+    }
+
+    #[test]
+    fn test_rfq_parses_routes_sources_and_dry_run_flags() {
+        let cli = Cli::try_parse_from([
+            "axe",
+            "test",
+            "rfq",
+            "--route",
+            "native-wrap",
+            "--source",
+            "sepolia",
+            "--amount",
+            "5000",
+            "--recipient",
+            "0x000000000000000000000000000000000000bEEF",
+            "--solana-recipient",
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            "--dry-run",
+            "--sender",
+            "0x000000000000000000000000000000000000dEaD",
+            "--timeout",
+            "60",
+            "--json",
+        ])
+        .unwrap();
+        let Commands::Test {
+            subcommand:
+                TestCommands::Rfq {
+                    routes,
+                    source,
+                    amount,
+                    recipient,
+                    solana_recipient,
+                    timeout_secs,
+                    sender,
+                    dry_run,
+                    json,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected test rfq");
+        };
+
+        assert_eq!(routes, [RfqRoute::NativeWrap]);
+        assert_eq!(source, RfqSource::Ethereum);
+        assert_eq!(amount, Some(U256::from(5_000u64)));
+        assert!(recipient.is_some() && solana_recipient.is_some());
+        assert_eq!(timeout_secs, 60);
+        assert!(sender.is_some() && dry_run && json);
+    }
+
+    #[test]
+    fn test_rfq_takes_several_routes_in_order() {
+        for args in [
+            &["--route", "its,gateway", "--route", "solana"][..],
+            &["--route", "its", "--route", "gateway", "--route", "solana"][..],
+        ] {
+            let cli = Cli::try_parse_from(["axe", "test", "rfq"].iter().chain(args)).unwrap();
+            let Commands::Test {
+                subcommand: TestCommands::Rfq { routes, .. },
+            } = cli.command
+            else {
+                panic!("expected test rfq");
+            };
+            assert_eq!(routes, [RfqRoute::Its, RfqRoute::Gateway, RfqRoute::Solana]);
+        }
+    }
+
+    #[test]
+    fn test_rfq_requires_a_route_and_a_dry_run_for_a_sender_override() {
+        const DEAD: &str = "0x000000000000000000000000000000000000dEaD";
+        assert!(Cli::try_parse_from(["axe", "test", "rfq"]).is_err());
+        assert!(Cli::try_parse_from(["axe", "test", "rfq", "--route", "bridge"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "axe",
+                "test",
+                "rfq",
+                "--route",
+                "its",
+                "--recipient",
+                "9WzD"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["axe", "test", "rfq", "--route", "its", "--sender", DEAD])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from(["axe", "test", "rfq", "--route", "solana"]).unwrap();
+        let Commands::Test {
+            subcommand:
+                TestCommands::Rfq {
+                    source,
+                    timeout_secs,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected test rfq");
+        };
+        assert_eq!(source, RfqSource::Avalanche);
+        assert_eq!(timeout_secs, 2_700);
     }
 
     /// Env vars whose value is safe to render in `--help`. Everything else
