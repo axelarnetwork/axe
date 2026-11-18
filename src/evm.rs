@@ -1142,6 +1142,21 @@ pub fn decode_evm_error(err: &dyn std::fmt::Debug) -> String {
     debug
 }
 
+/// A send error as text, led by the name of any custom-error revert data it
+/// carries. ITS's `UntrustedChain()` then reads as a route the network has
+/// not set up, not as an opaque `0xf9188a68`.
+pub fn describe_send_error<E: std::fmt::Display>(error: &E) -> String {
+    let text = error.to_string();
+    let revert_data = text
+        .split_once("data: \"0x")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(data, _)| data);
+    match revert_data {
+        Some(data) if data.len() >= 8 => format!("{} ({text})", decode_revert_data(data)),
+        _ => text,
+    }
+}
+
 /// Compute CREATE address: keccak256(rlp([sender, nonce]))[12..]
 pub fn compute_create_address(sender: Address, nonce: u64) -> Address {
     let mut stream = Vec::new();
@@ -1231,8 +1246,9 @@ mod tests {
 
     use super::{
         AVALANCHE_FUJI_CHAIN_ID, EvmEndpoints, SEND_ROUNDS, TxHash, UnconfirmedBroadcast,
-        is_pending_state_error, nonce_contention_backoff, nonce_held_by_pooled_tx,
-        parse_expected_nonce, send_error_may_mean_landed, should_retry_fill,
+        describe_send_error, is_pending_state_error, nonce_contention_backoff,
+        nonce_held_by_pooled_tx, parse_expected_nonce, send_error_may_mean_landed,
+        should_retry_fill,
     };
 
     #[test]
@@ -1340,6 +1356,27 @@ mod tests {
         assert!(!should_retry_fill(&pending));
         let timeout = eyre::eyre!("request timeout");
         assert!(should_retry_fill(&timeout));
+    }
+
+    #[test]
+    fn send_error_names_the_custom_revert() {
+        // Arc testnet -> Solana ITS: the source ITS does not trust the destination.
+        let untrusted = "server returned an error response: error code 3: execution \
+                         reverted, data: \"0xf9188a68\"";
+        let described = describe_send_error(&untrusted);
+        assert!(described.starts_with("UntrustedChain()"), "{described}");
+        assert!(described.ends_with(&format!("({untrusted})")));
+        assert_eq!(describe_send_error(&"request timeout"), "request timeout");
+    }
+
+    #[test]
+    fn fee_history_head_race_retries_the_fill() {
+        // The exact Arc wording that failed mainnet cron run 43865381418.
+        let head_race = eyre::eyre!(
+            "server returned an error response: error code -32602: request beyond head \
+             block: requested 31540128, head 31540127"
+        );
+        assert!(should_retry_fill(&head_race));
     }
 
     #[test]

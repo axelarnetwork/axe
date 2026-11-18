@@ -33,7 +33,7 @@ pub use encoding::{
     clone_keypair, find_interchain_token_pda, find_its_root_pda, get_associated_token_address,
     interchain_token_id, load_keypair,
 };
-pub use gateway::pay_gas_lamports;
+pub use gateway::MIN_PAY_GAS_LAMPORTS;
 pub use gateway::{
     approve_messages_on_gateway, decode_execute_data, execute_on_memo,
     extract_gateway_call_contract_payload, extract_its_message_id, send_call_contract,

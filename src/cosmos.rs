@@ -4,12 +4,14 @@
 //!
 //! - [`signers`]: cosmos wallet derivation from a mnemonic.
 //! - [`rpc`]: read-only LCD/Tendermint queries + axelar config readers.
+//! - [`freshness`]: demotes an LCD/RPC primary whose node has stopped advancing.
 //! - [`tx`]: tx building, simulation, sign-and-broadcast.
 //! - [`events`]: parsing event attributes out of cosmos tx responses to
 //!   discover proposal IDs, second-leg ITS metadata, and routing/approval
 //!   state.
 
 mod events;
+mod freshness;
 pub(crate) mod proposal_review;
 pub(crate) mod rpc;
 mod signers;

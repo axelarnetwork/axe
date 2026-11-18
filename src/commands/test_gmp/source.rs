@@ -9,7 +9,9 @@ use tokio::task::spawn_blocking;
 
 use crate::commands::load_test::{make_executable_payload, memo_program_id};
 use crate::evm::{ContractCall, SenderReceiver};
-use crate::solana::{extract_its_message_id, load_keypair, send_call_contract};
+use crate::solana::{
+    MIN_PAY_GAS_LAMPORTS, extract_its_message_id, load_keypair, send_call_contract,
+};
 use crate::ui;
 
 /// The bits of a freshly sent GMP `callContract` that downstream Amplifier
@@ -145,6 +147,7 @@ pub async fn send_svm_call_contract(
             &send_destination_chain,
             &send_destination,
             &send_payload,
+            MIN_PAY_GAS_LAMPORTS,
         )?;
         let raw_sig = metrics.signature.clone();
         let message_id = extract_its_message_id(&source_rpc, network, &raw_sig)

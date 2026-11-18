@@ -9,6 +9,7 @@ use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::freshness::{AxelarEndpoint, demote_stale_primary};
 use crate::ui;
 
 /// `account` sub-object inside the LCD `/cosmos/auth/v1beta1/accounts`
@@ -367,23 +368,19 @@ fn lcd_fallbacks_for(primary: &str) -> &'static [&'static str] {
 static LCD_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Print a one-time warning when an LCD response came from a fallback
-/// endpoint instead of the user-configured primary. `idx` is the position
-/// in the candidate list — `0` is the primary (no warning), anything ≥ 1 is
-/// a fallback. The endpoint URL is intentionally NOT logged — it can be a
-/// private/paid endpoint from a repo secret.
-fn note_lcd_fallback_use(idx: usize, last_err: Option<&CosmwasmQueryError>) {
-    if idx == 0 {
+/// endpoint instead of the user-configured primary. The endpoint URL is
+/// intentionally NOT logged: it can be a private/paid endpoint from a repo
+/// secret.
+fn note_lcd_fallback_use(from_fallback: bool, last_err: Option<&CosmwasmQueryError>) {
+    // No error means the primary was demoted for having stopped advancing,
+    // which `demote_stale_primary` has already reported.
+    let Some(error) = last_err.filter(|_| from_fallback) else {
         return;
-    }
+    };
     if LCD_FALLBACK_WARNED.set(()).is_err() {
         return;
     }
-    let cause = last_err
-        .map(|e| {
-            let s = e.to_string();
-            s.lines().next().unwrap_or("").to_string()
-        })
-        .unwrap_or_else(|| "primary unreachable".to_string());
+    let cause = error.to_string().lines().next().unwrap_or("").to_string();
     ui::warn(&format!(
         "Axelar LCD primary unhealthy ({cause}); using fallback LCD for the rest of this run"
     ));
@@ -516,18 +513,20 @@ pub async fn lcd_cosmwasm_smart_query_typed(
             }
         }
     }
+    demote_stale_primary(AxelarEndpoint::Lcd, &mut candidates).await;
 
     let query_json = serde_json::to_string(query_msg).map_err(CosmwasmQueryError::Encode)?;
     let query_b64 = base64::engine::general_purpose::STANDARD.encode(query_json.as_bytes());
     let mut last_err: Option<CosmwasmQueryError> = None;
 
-    for (idx, endpoint) in candidates.iter().enumerate() {
+    for endpoint in &candidates {
         // Role label keeps logs / report files free of endpoint URLs (which
         // can be private / paid endpoints supplied via repo secrets).
-        let role = if idx == 0 {
-            "primary LCD"
-        } else {
+        let from_fallback = *endpoint != primary;
+        let role = if from_fallback {
             "fallback LCD"
+        } else {
+            "primary LCD"
         };
         let url = format!("{endpoint}/cosmwasm/wasm/v1/contract/{contract}/smart/{query_b64}");
         match crate::http::client().get(&url).send().await {
@@ -558,7 +557,7 @@ pub async fn lcd_cosmwasm_smart_query_typed(
                                         continue;
                                     }
                                 };
-                                note_lcd_fallback_use(idx, last_err.as_ref());
+                                note_lcd_fallback_use(from_fallback, last_err.as_ref());
                                 return Ok(data);
                             }
                             Err(e) => {
@@ -686,19 +685,16 @@ fn rpc_fallbacks_for(primary: &str) -> &'static [&'static str] {
 /// flood the report log.
 static RPC_FALLBACK_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
-fn note_rpc_fallback_use(idx: usize, last_err: Option<&eyre::Report>) {
-    if idx == 0 {
+fn note_rpc_fallback_use(from_fallback: bool, last_err: Option<&eyre::Report>) {
+    // No error means the primary was demoted for having stopped advancing,
+    // which `demote_stale_primary` has already reported.
+    let Some(error) = last_err.filter(|_| from_fallback) else {
         return;
-    }
+    };
     if RPC_FALLBACK_WARNED.set(()).is_err() {
         return;
     }
-    let cause = last_err
-        .map(|e| {
-            let s = e.to_string();
-            s.lines().next().unwrap_or("").to_string()
-        })
-        .unwrap_or_else(|| "primary unreachable".to_string());
+    let cause = error.to_string().lines().next().unwrap_or("").to_string();
     ui::warn(&format!(
         "Axelar Tendermint RPC primary unhealthy ({cause}); using fallback for the rest of this run"
     ));
@@ -723,17 +719,19 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
             }
         }
     }
+    demote_stale_primary(AxelarEndpoint::TendermintRpc, &mut candidates).await;
 
     let query = format!("\"{event_key}='{event_value}'\"");
     let encoded = url_encode_query(&query);
     let mut last_err: Option<eyre::Report> = None;
 
-    for (idx, endpoint) in candidates.iter().enumerate() {
+    for endpoint in &candidates {
         // Role label keeps URLs out of logs / report (see lcd_cosmwasm_smart_query).
-        let role = if idx == 0 {
-            "primary Tendermint RPC"
-        } else {
+        let from_fallback = *endpoint != primary;
+        let role = if from_fallback {
             "fallback Tendermint RPC"
+        } else {
+            "primary Tendermint RPC"
         };
         let url = format!("{endpoint}/tx_search?query={encoded}&per_page=1");
         match crate::http::client().get(&url).send().await {
@@ -745,7 +743,7 @@ pub async fn rpc_tx_search_event(rpc: &str, event_key: &str, event_value: &str) 
                 }
                 match response.json::<Value>().await {
                     Ok(v) => {
-                        note_rpc_fallback_use(idx, last_err.as_ref());
+                        note_rpc_fallback_use(from_fallback, last_err.as_ref());
                         return Ok(v);
                     }
                     Err(e) => {
@@ -891,7 +889,7 @@ pub async fn rpc_block_info(rpc: &str, height: Option<u64>) -> Result<(u64, Stri
             continue;
         };
         let height: u64 = parse_required("block.header.height", Some(&height_str))?;
-        note_rpc_fallback_use(idx, last_err.as_ref());
+        note_rpc_fallback_use(idx != 0, last_err.as_ref());
         return Ok((height, time));
     }
 

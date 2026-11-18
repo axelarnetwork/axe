@@ -299,11 +299,15 @@ impl ExpressRecord {
     /// `"error"`, set when the hub or destination execute reverted. A failed
     /// message can occasionally be revived by manual intervention (re-execute
     /// with more gas), but the automated relay is done — for a load-test
-    /// verdict that is a failure.
+    /// verdict that is a failure. A message that executed is never failed:
+    /// when two relayers race, the loser's revert is recorded on the message
+    /// the winner executed (seen on mainnet hub to hedera legs).
     pub fn is_failed(&self) -> bool {
-        self.status
-            .as_deref()
-            .is_some_and(|s| s.eq_ignore_ascii_case("error"))
+        self.executed.is_none()
+            && self
+                .status
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("error"))
     }
 
     /// `Some(reason)` when express execution has been ruled out for this
@@ -568,6 +572,14 @@ mod tests {
     #[test]
     fn is_executed_true_when_executed_object_present() {
         assert!(record(Some("approved"), true).is_executed());
+    }
+
+    #[test]
+    fn is_failed_only_for_an_unexecuted_error() {
+        assert!(record(Some("error"), false).is_failed());
+        assert!(!record(Some("error"), true).is_failed());
+        assert!(!record(Some("executed"), true).is_failed());
+        assert!(!record(None, false).is_failed());
     }
 
     #[test]
