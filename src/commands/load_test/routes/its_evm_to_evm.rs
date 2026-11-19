@@ -238,17 +238,8 @@ async fn resolve_or_deploy_token(
 ) -> eyre::Result<TokenIdentity> {
     let src = &args.source_chain;
     let endpoints = EvmEndpoints::connect(source_rpc_urls)?;
-    let needed = sizing.amount_per_tx * U256::from(sizing.num_keys);
-    let config_axe = super::helpers::reusable_config_axe(
-        &args.config,
-        src,
-        its.its_proxy_addr,
-        endpoints.primary(),
-        evm_source.deployer_address,
-        needed,
-    )
-    .await?;
-
+    // An explicit token wins before the configured AXE is even read, so a
+    // route pinned to another token cannot fail on AXE's balance.
     if let Some(token_id) = args.token_id.as_deref() {
         return resolve_provided_token(
             args,
@@ -261,6 +252,16 @@ async fn resolve_or_deploy_token(
         )
         .await;
     }
+    let needed = sizing.amount_per_tx * U256::from(sizing.num_keys);
+    let config_axe = super::helpers::reusable_config_axe(
+        &args.config,
+        src,
+        its.its_proxy_addr,
+        endpoints.primary(),
+        evm_source.deployer_address,
+        needed,
+    )
+    .await?;
     if let Some((tid, addr)) = config_axe {
         ui::kv("token ID (chains-config)", &format!("{tid}"));
         ui::address("token address", &format!("{addr}"));
@@ -282,13 +283,15 @@ async fn resolve_provided_token(
         .parse()
         .map_err(|e| eyre!("invalid --token-id: {e}"))?;
     let its_proxy = its.its_proxy_addr;
+    // The address registered with the source ITS, so canonical tokens (a
+    // Hedera HTS token included) resolve too, not only ITS-minted ones.
     let token_addr = retry_with_fallback(
         "token address lookup",
         endpoints.providers(),
         |e| !deterministic_view_failure(e),
         |p| async move {
             InterchainTokenService::new(its_proxy, p)
-                .interchainTokenAddress(token_id)
+                .registeredTokenAddress(token_id)
                 .call()
                 .await
         },
@@ -298,12 +301,7 @@ async fn resolve_provided_token(
     ui::kv("token ID (provided)", &format!("{token_id}"));
     ui::address("token address", &format!("{token_addr}"));
 
-    let destination = ProviderBuilder::new().connect_http(destination_rpc.parse()?);
-    let dest_code = retry_all("destination token code", || async {
-        destination.get_code_at(token_addr).await
-    })
-    .await?;
-    if !dest_code.is_empty() {
+    if destination_has_token_manager(args, token_id, destination_rpc).await? {
         return Ok((token_id, token_addr, None).into());
     }
     let salt_value = super::find_cached_salt(value).await.ok_or_else(|| {
@@ -326,6 +324,36 @@ async fn resolve_provided_token(
     )
     .await?;
     Ok((token_id, token_addr, Some(message_id)).into())
+}
+
+/// Whether `token_id` already has a token manager on the destination chain.
+/// The destination token can live at another address than the source token
+/// (always so for a Hedera HTS token), so its token manager is what shows
+/// the token is registered there.
+async fn destination_has_token_manager(
+    args: &LoadTestArgs,
+    token_id: FixedBytes<32>,
+    destination_rpc: &str,
+) -> eyre::Result<bool> {
+    let cfg = ChainsConfig::load(&args.config).await?;
+    let dest = args.destination_chain.as_ref();
+    let dest_its: Address = cfg
+        .chains
+        .get(dest)
+        .ok_or_else(|| eyre!("destination chain '{dest}' not found in config"))?
+        .contract_address(ChainContract::InterchainTokenService, dest)?
+        .parse()?;
+    let destination = ProviderBuilder::new().connect_http(destination_rpc.parse()?);
+    let its = InterchainTokenService::new(dest_its, &destination);
+    let manager = retry_all("destination token manager address", || async {
+        its.tokenManagerAddress(token_id).call().await
+    })
+    .await?;
+    let code = retry_all("destination token manager code", || async {
+        destination.get_code_at(manager).await
+    })
+    .await?;
+    Ok(!code.is_empty())
 }
 
 async fn resolve_cached_or_deploy(
