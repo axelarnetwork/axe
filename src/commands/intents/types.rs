@@ -262,8 +262,13 @@ pub enum PaymentMethod {
     TxValue,
     InputToken,
     OutputToken,
+    /// Taken from the route's internal token (USDC) after a swap.
+    RouteToken,
     Sponsored,
     Offchain,
+    /// A method this build does not know, which must not fail the whole quote.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Display for PaymentMethod {
@@ -273,8 +278,10 @@ impl Display for PaymentMethod {
             Self::TxValue => "transaction value",
             Self::InputToken => "input token",
             Self::OutputToken => "output token",
+            Self::RouteToken => "route token",
             Self::Sponsored => "sponsored",
             Self::Offchain => "off-chain",
+            Self::Unknown => "unknown",
         };
         formatter.write_str(value)
     }
@@ -854,6 +861,19 @@ mod tests {
                 state
             );
             assert_eq!(serde_json::to_value(state).unwrap(), json!(wire));
+        }
+    }
+
+    #[test]
+    fn parses_route_token_and_unknown_payment_methods() {
+        for (wire, method) in [
+            ("route_token", PaymentMethod::RouteToken),
+            ("some_future_method", PaymentMethod::Unknown),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<PaymentMethod>(json!(wire)).unwrap(),
+                method
+            );
         }
     }
 

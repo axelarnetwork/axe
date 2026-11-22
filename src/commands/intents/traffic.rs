@@ -75,7 +75,9 @@ struct TrafficMode {
     order_type: OrderType,
 }
 
-const TRAFFIC_MODES: [TrafficMode; 4] = [
+/// Native routes always swap through the solver's inventory token, and a swap
+/// cannot honour `EXACT_OUTPUT`, so native traffic is exact-input only.
+const TRAFFIC_MODES: [TrafficMode; 3] = [
     TrafficMode {
         asset_type: AssetType::Token,
         order_type: OrderType::ExactInput,
@@ -87,10 +89,6 @@ const TRAFFIC_MODES: [TrafficMode; 4] = [
     TrafficMode {
         asset_type: AssetType::Native,
         order_type: OrderType::ExactInput,
-    },
-    TrafficMode {
-        asset_type: AssetType::Native,
-        order_type: OrderType::ExactOutput,
     },
 ];
 
@@ -353,7 +351,7 @@ mod tests {
         let modes = traffic_modes(None)
             .map(|(_, mode)| mode)
             .collect::<Vec<_>>();
-        assert_eq!(modes.len(), 4);
+        assert_eq!(modes.len(), 3);
         assert!(modes.contains(&TrafficMode {
             asset_type: AssetType::Token,
             order_type: OrderType::ExactInput,
@@ -365,32 +363,26 @@ mod tests {
         assert!(modes.contains(&TrafficMode {
             asset_type: AssetType::Native,
             order_type: OrderType::ExactInput,
-        }));
-        assert!(modes.contains(&TrafficMode {
-            asset_type: AssetType::Native,
-            order_type: OrderType::ExactOutput,
         }));
     }
 
     #[test]
     fn traffic_filters_modes_by_asset_type() {
-        for asset_type in [AssetType::Token, AssetType::Native] {
-            let modes = traffic_modes(Some(asset_type))
-                .map(|(_, mode)| mode)
-                .collect::<Vec<_>>();
-            assert_eq!(modes.len(), 2);
-            assert!(modes.iter().all(|mode| mode.asset_type == asset_type));
-            assert!(
-                modes
-                    .iter()
-                    .any(|mode| mode.order_type == OrderType::ExactInput)
-            );
-            assert!(
-                modes
-                    .iter()
-                    .any(|mode| mode.order_type == OrderType::ExactOutput)
-            );
-        }
+        let token = traffic_modes(Some(AssetType::Token))
+            .map(|(_, mode)| mode.order_type)
+            .collect::<Vec<_>>();
+        assert_eq!(token, [OrderType::ExactInput, OrderType::ExactOutput]);
+
+        let native = traffic_modes(Some(AssetType::Native))
+            .map(|(_, mode)| mode)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            native,
+            [TrafficMode {
+                asset_type: AssetType::Native,
+                order_type: OrderType::ExactInput,
+            }]
+        );
     }
 
     #[test]
