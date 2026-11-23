@@ -121,11 +121,16 @@ jobs:
           # Robinhood's finalized head lags ~16 min (Orbit L2 settling on
           # Sepolia), so its first leg reaches the hub ~21 min after the send:
           # that route gets a longer verification window and job timeout.
+          # Monad <-> Hedera sends testnet AXEH (Hedera 0.0.11522629, monad-3
+          # 0xf062494666Cca65b4d8B793b7F40dEeF9c4D5EAf), for the reason given
+          # above MATRIX_MAINNET_ITS. Testnet Hedera still ran 0.79.0 when
+          # AXE broke on mainnet, so this keeps the route alive through
+          # testnet's own upgrade.
           MATRIX_TESTNET_ITS='{"include":[
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
             {"name":"XRPL EVM -> XRPL","src":"XRPL EVM","dst":"XRPL","notes":"evm->xrpl ITS (XRP unwrap)"},
-            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS (AXEH)","token_id":"0xdbf4654f8ed16fc47462d690b85d4c0f13f6bd96f39b5faed26db6bff6338bb8"},
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS (AXEH)","token_id":"0xdbf4654f8ed16fc47462d690b85d4c0f13f6bd96f39b5faed26db6bff6338bb8"},
             {"name":"Hyperliquid -> Solana","src":"Hyperliquid","dst":"Solana","notes":"evm->sol ITS"},
             {"name":"Solana -> Hyperliquid","src":"Solana","dst":"Hyperliquid","notes":"sol->evm ITS"},
             {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
@@ -167,6 +172,15 @@ jobs:
           # via the config-token path (the exact path CI uses — no local salt
           # cache): Avalanche→Monad legacy→amp 71.6s, Avalanche→Ethereum
           # legacy→legacy 82.7s, Monad→Avalanche amp→legacy 37.1s.
+          # Monad <-> Hedera sends AXEH, not AXE: Hedera 0.79.2 (mainnet,
+          # 2026-11-18) rejects a plain ContractID supply key in delegate
+          # context, so Hedera ITS can no longer mint or burn any HTS token
+          # it created, AXE included (HTSCallFailed 326). AXEH is a
+          # Hedera-native HTS token (0.0.10961756, fixed supply, no keys)
+          # registered as canonical, so its lock/unlock token manager only
+          # moves tokens, which still works; deployed to Monad at
+          # 0x2Bb84B08370DdfF11Be329B3b61A9C35131B7b4E. The Hedera wallet's
+          # allowance to ITS (not the token manager) funds the lock.
           MATRIX_MAINNET_ITS='{"include":[
             {"name":"Arc -> Solana","src":"Arc","dst":"Solana","notes":"evm->sol ITS (Arc source)"},
             {"name":"XRPL -> XRPL EVM","src":"XRPL","dst":"XRPL EVM","notes":"xrpl->evm ITS (canonical XRP wrapping)"},
@@ -175,8 +189,8 @@ jobs:
             {"name":"Stellar -> Hyperliquid","src":"Stellar","dst":"Hyperliquid","notes":"stellar->evm ITS"},
             {"name":"Sui -> Solana","src":"Sui","dst":"Solana","notes":"sui->sol ITS"},
             {"name":"Solana -> Sui","src":"Solana","dst":"Sui","notes":"sol->sui ITS"},
-            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS"},
-            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS"},
+            {"name":"Monad -> Hedera","src":"Monad","dst":"Hedera","notes":"evm->evm ITS (AXEH)","token_id":"0x094f8422b169a6cf4f57f90bc2d6bf91f1d19d128fe5836bdc4045d497696636"},
+            {"name":"Hedera -> Monad","src":"Hedera","dst":"Monad","notes":"evm->evm ITS (AXEH)","token_id":"0x094f8422b169a6cf4f57f90bc2d6bf91f1d19d128fe5836bdc4045d497696636"},
             {"name":"Avalanche -> Monad","src":"Avalanche","dst":"Monad","notes":"legacy->amp ITS (legacy source)"},
             {"name":"Monad -> Avalanche","src":"Monad","dst":"Avalanche","notes":"amp->legacy ITS"},
             {"name":"Avalanche -> Ethereum","src":"Avalanche","dst":"Ethereum","notes":"legacy->legacy ITS (legacy source)"}
@@ -372,6 +386,8 @@ jobs:
           destination_chain: ${{ matrix.dst }}
           protocol: ${{ inputs.protocol }}
           num_txs: "1"
+          # Routes pinned to a token other than the configured AXE set this.
+          token_id: ${{ matrix.token_id }}
           # Unique suffix avoids artifact-name collision across matrix jobs.
           artifact_suffix: -route-${{ strategy.job-index }}
           evm_private_key: ${{ secrets.EVM_PRIVATE_KEY }}
