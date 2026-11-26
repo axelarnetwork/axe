@@ -259,11 +259,12 @@ const fn next_plan_index(cursor: usize, available: usize) -> usize {
 fn render_strategy(wallet_bps: u16, asset_type: Option<AssetType>) {
     ui::section("intent traffic");
     ui::kv("strategy", "serial balance-returning round trips");
-    let coverage = asset_type.map_or_else(
-        || "all tokens and native assets · both order types".to_owned(),
-        |asset_type| format!("{} assets only · both order types", asset_type.label()),
-    );
-    ui::kv("coverage", &coverage);
+    let coverage = match asset_type {
+        Some(AssetType::Token) => "tokens: exact input and exact output",
+        Some(AssetType::Native) => "native assets: exact input",
+        None => "tokens: exact input and exact output · native assets: exact input",
+    };
+    ui::kv("coverage", coverage);
     ui::kv(
         "maximum route input",
         &format!("{:.2}% of spendable balance", f64::from(wallet_bps) / 100.0),

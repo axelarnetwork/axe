@@ -11,7 +11,7 @@ use super::client::RfqClient;
 use super::presentation::{IntentActivity, asset_table};
 use super::types::{
     ActionPayload, AssetSpec, AssetType, CatalogChain, CatalogResponse, CatalogToken, FeeEntry,
-    HumanAmount, LegPlan, OrderType, Quote, QuoteRequest, StatusResponse, TokenInfo,
+    Fees, HumanAmount, LegPlan, OrderType, Quote, QuoteRequest, StatusResponse, TokenInfo,
     TokensResponse, TransferState, format_units, is_native_token, parse_amount,
 };
 use crate::types::Network;
@@ -391,9 +391,7 @@ fn render_quote(quote: &Quote, latency: Duration, from: &TokenInfo, to: &TokenIn
         "estimated completion",
         &ui::format_duration(Duration::from_secs(quote.estimated_time_seconds)),
     );
-    render_fee("gas fee", quote.fees.gas.as_ref());
-    render_fee("user fee", quote.fees.user.as_ref());
-    render_fee("integrator fee", quote.fees.integrator.as_ref());
+    render_fees(&quote.fees);
     ui::kv("quote latency", &ui::format_duration(latency));
     ui::kv(
         "quote expires in",
@@ -421,6 +419,21 @@ fn render_actions(quote: &Quote) {
 fn with_usd(amount: &str, symbol: &str, usd: Option<&str>) -> String {
     let value = format!("{amount} {symbol}");
     usd.map_or(value.clone(), |usd| format!("{value} (~${usd})"))
+}
+
+fn render_fees(fees: &Fees) {
+    render_fee("gas fee", fees.user_gas.as_ref().or(fees.gas.as_ref()));
+    render_fee("user fee", fees.user.as_ref());
+    for (label, fee) in [
+        ("protocol fee", &fees.protocol),
+        ("DEX fee", &fees.dex),
+        ("execution fee", &fees.execution),
+    ] {
+        if fee.is_some() {
+            render_fee(label, fee.as_ref());
+        }
+    }
+    render_fee("integrator fee", fees.integrator.as_ref());
 }
 
 fn render_fee(label: &str, fee: Option<&FeeEntry>) {
@@ -466,7 +479,9 @@ pub(super) fn render_status(status: &StatusResponse, json: bool) -> Result<()> {
         ui::kv("source chain", &source.chain);
         ui::tx_hash("source transaction", &source.tx_hash);
         ui::kv("message ID", &source.message_id);
-        ui::kv("source timestamp", &source.timestamp.to_rfc3339());
+        if let Some(timestamp) = source.timestamp {
+            ui::kv("source timestamp", &timestamp.to_rfc3339());
+        }
     }
     if let Some(input) = &status.input {
         ui::kv(
@@ -477,7 +492,9 @@ pub(super) fn render_status(status: &StatusResponse, json: bool) -> Result<()> {
     if let Some(destination) = &status.destination {
         ui::kv("destination chain", &destination.chain);
         ui::tx_hash("destination transaction", &destination.tx_hash);
-        ui::kv("destination timestamp", &destination.timestamp.to_rfc3339());
+        if let Some(timestamp) = destination.timestamp {
+            ui::kv("destination timestamp", &timestamp.to_rfc3339());
+        }
     }
     if let Some(output) = &status.output {
         ui::kv(

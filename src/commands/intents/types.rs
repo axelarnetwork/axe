@@ -225,9 +225,17 @@ pub struct QuoteOutput {
 pub struct Fees {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gas: Option<FeeEntry>,
+    #[serde(rename = "userGas", skip_serializing_if = "Option::is_none")]
+    pub user_gas: Option<FeeEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<FeeEntry>,
     pub integrator: Option<FeeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<FeeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dex: Option<FeeEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<FeeEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -433,7 +441,7 @@ pub struct ChainExecution {
     pub chain: String,
     pub tx_hash: String,
     pub message_id: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -441,7 +449,7 @@ pub struct ChainExecution {
 pub struct ChainDelivery {
     pub chain: String,
     pub tx_hash: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -878,6 +886,24 @@ mod tests {
     }
 
     #[test]
+    fn quote_fees_preserve_the_solver_breakdown() {
+        let entry = json!({
+            "amount": "10",
+            "token": { "chain": "eip155:1", "symbol": "USDC" },
+            "paymentMethod": "route_token",
+            "quoteTreatment": "included_in_quote",
+        });
+        let fees = json!({
+            "userGas": { "paymentMethod": "wallet_native", "quoteTreatment": "outside_quote",
+                "amount": "42", "token": { "chain": "eip155:1", "symbol": "ETH" } },
+            "protocol": entry, "dex": entry, "execution": entry, "integrator": null
+        });
+
+        let typed: Fees = serde_json::from_value(fees.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), fees);
+    }
+
+    #[test]
     fn quote_response_round_trips_the_current_rfq_schema() {
         let response = json!({
             "quotes": [{
@@ -1108,6 +1134,14 @@ mod tests {
             },
             "details": { "reason": "test" }
         });
+
+        let mut pending_timestamps = response.clone();
+        for leg in ["source", "destination"] {
+            pending_timestamps[leg]["timestamp"] = serde_json::Value::Null;
+        }
+        let terminal: StatusResponse = serde_json::from_value(pending_timestamps.clone()).unwrap();
+        assert!(terminal.state.is_terminal());
+        assert_eq!(serde_json::to_value(terminal).unwrap(), pending_timestamps);
 
         let typed: StatusResponse = serde_json::from_value(response.clone()).unwrap();
 
