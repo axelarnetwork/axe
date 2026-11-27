@@ -168,12 +168,12 @@ mod tests {
 
     #[test]
     fn semantic_boundary_strings_preserve_external_values() {
-        let chain = ConfigChainId::new("flow".to_string()).expect("valid chain id");
-        let axelar = AxelarChainId::new("Flow".to_string()).expect("valid Axelar id");
+        let chain = ConfigChainId::new("avalanche".to_string()).expect("valid chain id");
+        let axelar = AxelarChainId::new("Avalanche".to_string()).expect("valid Axelar id");
         let rpc = RpcUrl::new("https://rpc.example".to_string()).expect("valid RPC");
 
-        assert_eq!(chain.as_ref(), "flow");
-        assert_eq!(axelar.as_ref(), "Flow");
+        assert_eq!(chain.as_ref(), "avalanche");
+        assert_eq!(axelar.as_ref(), "Avalanche");
         assert_eq!(rpc.as_ref(), "https://rpc.example");
     }
 }

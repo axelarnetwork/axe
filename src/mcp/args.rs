@@ -41,7 +41,7 @@ pub struct RouteArgs {
     pub route: Option<TestType>,
     /// Source chain axelar id, for example solana.
     pub source_chain: String,
-    /// Destination chain axelar id, for example flow.
+    /// Destination chain axelar id, for example monad.
     pub destination_chain: String,
 }
 
@@ -188,7 +188,7 @@ impl ExpressOriginateArgs {
 pub struct StartLoadTestArgs {
     /// Source chain axelar id, for example solana.
     pub source_chain: String,
-    /// Destination chain axelar id, for example flow.
+    /// Destination chain axelar id, for example monad.
     pub destination_chain: String,
     /// gmp for callContract, its for interchainTransfer, or its-with-data.
     pub protocol: Option<Protocol>,

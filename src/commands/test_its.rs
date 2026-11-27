@@ -163,7 +163,11 @@ async fn deploy_legacy_token<P: alloy::providers::Provider>(
     }
     ui::success("tokenId verified on-chain");
 
-    ui::step_header(2, TOTAL_STEPS, "Deploy remote interchain token to flow");
+    ui::step_header(
+        2,
+        TOTAL_STEPS,
+        &format!("Deploy remote interchain token to {DEST_CHAIN}"),
+    );
     let gas_value = crate::types::eth(2);
     ui::kv("destination", DEST_CHAIN);
     ui::kv("gas value", &format!("{gas_value} wei"));

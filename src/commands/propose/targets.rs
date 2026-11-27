@@ -317,7 +317,7 @@ mod tests {
             hub("monad", false),
             hub("Moonbeam", false),
             hub("solana", false),
-            hub("plume", true),
+            hub("fantom", true),
             hub("arc", false),
             hub("sui", false),
         ];
@@ -343,7 +343,7 @@ mod tests {
                 ("monad".to_string(), "skipped (--skip)".to_string()),
                 ("Moonbeam".to_string(), "deprecated".to_string()),
                 ("solana".to_string(), "not an EVM chain".to_string()),
-                ("plume".to_string(), "frozen on the ITS Hub".to_string()),
+                ("fantom".to_string(), "frozen on the ITS Hub".to_string()),
                 ("arc".to_string(), "the chain being trusted".to_string()),
                 ("sui".to_string(), "not in the chains config".to_string()),
             ]

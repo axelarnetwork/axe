@@ -24,13 +24,6 @@
         }
       }
     },
-    "berachain": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0x77245A4f2c7Aed9fA2dDAD3C5677eE8a647Aa716"
-        }
-      }
-    },
     "celo-sepolia": {
       "contracts": {
         "SenderReceiver": {
@@ -42,13 +35,6 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x345885411916186bF934367d34C36Dcb0dd47acE"
-        }
-      }
-    },
-    "flow": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0xa154d64e9800c569e4C09790331678653b131EeA"
         }
       }
     },
@@ -91,13 +77,6 @@
       "contracts": {
         "SenderReceiver": {
           "address": "0x02afc6a9938258311AF71BD2fc30Cda86b53A8E3"
-        }
-      }
-    },
-    "plume": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0xCfA63a95ca7428CCc7ca9e874BaD54F4314d4D47"
         }
       }
     },

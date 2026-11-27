@@ -651,7 +651,7 @@ mod tests {
         two.calls[1].asg.operator = Address::from([9; 20]);
         let error = super::single_operator(&two).unwrap_err().to_string();
         assert!(error.contains("hedera"), "{error}");
-        assert!(!error.contains("flow ("), "{error}");
+        assert!(!error.contains("monad ("), "{error}");
     }
 
     #[test]
@@ -663,10 +663,10 @@ mod tests {
             vec![].into(),
         );
         one.action_label = "ITS set-trusted-chain".into();
-        assert_eq!(proposal_title(&one), "ITS set-trusted-chain on flow");
+        assert_eq!(proposal_title(&one), "ITS set-trusted-chain on monad");
         assert_eq!(
             proposal_description(&one),
-            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on flow."
+            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on monad."
         );
         let mut second = plan(
             config(String::new()),
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(proposal_title(&one), "ITS set-trusted-chain on 2 chains");
         assert_eq!(
             proposal_description(&one),
-            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on flow, hedera."
+            "Service-Governance operator (ApproveOperatorProposal) proposal: ITS set-trusted-chain on monad, hedera."
         );
     }
 }

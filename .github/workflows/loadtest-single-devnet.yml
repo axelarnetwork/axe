@@ -19,14 +19,11 @@ on:
         options:
           - Arc
           - Avalanche
-          - Berachain
           - Core Avalanche
           - Core Ethereum
           - Core Optimism
           - Ethereum
-          - Flow
           - Optimism
-          - Plume
           - Solana
           - Sui
           - XRPL EVM
@@ -37,14 +34,11 @@ on:
         options:
           - Arc
           - Avalanche
-          - Berachain
           - Core Avalanche
           - Core Ethereum
           - Core Optimism
           - Ethereum
-          - Flow
           - Optimism
-          - Plume
           - Solana
           - Sui
           - XRPL EVM
@@ -96,11 +90,8 @@ jobs:
       AXE_VERIFY_INACTIVITY_SECS: "3000"
       ARC_DEVNET_AMPLIFIER_RPC:       ${{ secrets.ARC_DEVNET_AMPLIFIER_RPC }}
       AVALANCHE_DEVNET_AMPLIFIER_RPC: ${{ secrets.AVALANCHE_DEVNET_AMPLIFIER_RPC }}
-      BERACHAIN_DEVNET_AMPLIFIER_RPC: ${{ secrets.BERACHAIN_DEVNET_AMPLIFIER_RPC }}
       ETHEREUM_DEVNET_AMPLIFIER_RPC:  ${{ secrets.ETHEREUM_DEVNET_AMPLIFIER_RPC }}
-      FLOW_DEVNET_AMPLIFIER_RPC:      ${{ secrets.FLOW_DEVNET_AMPLIFIER_RPC }}
       OPTIMISM_DEVNET_AMPLIFIER_RPC:  ${{ secrets.OPTIMISM_DEVNET_AMPLIFIER_RPC }}
-      PLUME_DEVNET_AMPLIFIER_RPC:     ${{ secrets.PLUME_DEVNET_AMPLIFIER_RPC }}
       SOLANA_DEVNET_AMPLIFIER_RPC:    ${{ secrets.SOLANA_DEVNET_AMPLIFIER_RPC }}
       SUI_DEVNET_AMPLIFIER_RPC:       ${{ secrets.SUI_DEVNET_AMPLIFIER_RPC }}
       XRPL_EVM_DEVNET_AMPLIFIER_RPC:  ${{ secrets.XRPL_EVM_DEVNET_AMPLIFIER_RPC }}

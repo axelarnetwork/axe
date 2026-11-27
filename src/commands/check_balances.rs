@@ -153,7 +153,6 @@ fn stagenet_chain_targets() -> Vec<ChainTarget> {
         evm("hedera", 5.0),
         evm("monad", 50.0),
         evm("avalanche", 0.5),
-        evm("flow", 1.0),
         ChainTarget {
             chain_key: "xrpl".to_string(),
             kind: ChainKind::Xrpl,
@@ -186,7 +185,6 @@ fn devnet_chain_targets() -> Vec<ChainTarget> {
         evm("avalanche-fuji", 0.5),
         evm("eth-sepolia", 0.5),
         evm("xrpl-evm-devnet", 2.0),
-        evm("flow", 1.0),
         ChainTarget {
             chain_key: "sui-2".to_string(),
             kind: ChainKind::Sui,
@@ -362,12 +360,10 @@ fn axe_targets(network: Network) -> Vec<ChainTarget> {
             axe("monad", ChainKind::Evm),
             axe("hedera", ChainKind::Evm),
             axe("avalanche", ChainKind::Evm),
-            axe("flow", ChainKind::Evm),
         ],
         Network::DevnetAmplifier => vec![
             axe("avalanche-fuji", ChainKind::Evm),
             axe("eth-sepolia", ChainKind::Evm),
-            axe("flow", ChainKind::Evm),
         ],
     }
 }

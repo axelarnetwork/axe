@@ -216,20 +216,20 @@ cargo install --locked --path .   # or `cargo build --release` + run from target
 ```bash
 # Burst
 axe test load-test \
-  --source-chain flow \
+  --source-chain avalanche \
   --destination-chain solana-stagenet-3 \
   --num-txs 100 \
   --network stagenet
 
-# Sustained with larger wallet pool for Flow
+# Sustained with larger wallet pool for Avalanche
 EVM_PRIVATE_KEY=0x... axe test load-test \
-  --source-chain flow \
+  --source-chain avalanche \
   --destination-chain solana-stagenet-3 \
   --tps 2 \
   --duration-secs 120 \
   --key-cycle 6 \
   --network stagenet \
-  --source-rpc https://your-flow-rpc-endpoint
+  --source-rpc https://your-avalanche-rpc-endpoint
 ```
 
 #### Mainnet examples

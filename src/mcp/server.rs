@@ -1581,7 +1581,7 @@ mod tests {
     #[tokio::test]
     async fn load_test_with_zero_transactions_is_refused() {
         let err = server()
-            .start_load_test(load_test("solana", "flow", 0))
+            .start_load_test(load_test("solana", "monad", 0))
             .await
             .expect_err("a run of nothing must be refused");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
@@ -1616,7 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn load_test_over_the_per_run_cap_is_refused_before_any_lookup() {
         let err = server()
-            .start_load_test(load_test("solana", "flow", 11))
+            .start_load_test(load_test("solana", "monad", 11))
             .await
             .expect_err("11 transactions exceed the default cap of 10");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
@@ -1626,7 +1626,7 @@ mod tests {
     #[tokio::test]
     async fn load_test_on_a_chain_outside_the_allowlist_is_refused() {
         let server = server_with(SpendPolicy::new(SpendLimits {
-            allowed_chains: vec!["solana".into(), "flow".into()],
+            allowed_chains: vec!["solana".into(), "monad".into()],
             ..SpendLimits::default()
         }));
         let err = server
@@ -1645,7 +1645,7 @@ mod tests {
             allowed_chains: Vec::new(),
         }));
         let err = server
-            .start_load_test(load_test("solana", "flow", 4))
+            .start_load_test(load_test("solana", "monad", 4))
             .await
             .expect_err("4 transactions exceed a lifetime budget of 3");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);

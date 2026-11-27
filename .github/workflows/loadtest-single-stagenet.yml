@@ -20,17 +20,14 @@ on:
           - Arbitrum
           - Avalanche
           - Base
-          - Berachain
           - Celo
           - Ethereum
-          - Flow
           - Hedera
           - Hyperliquid
           - Kava
           - Linea
           - Mantle
           - Optimism
-          - Plume
           - Polygon
           - Solana
           - Sui
@@ -44,17 +41,14 @@ on:
           - Arbitrum
           - Avalanche
           - Base
-          - Berachain
           - Celo
           - Ethereum
-          - Flow
           - Hedera
           - Hyperliquid
           - Kava
           - Linea
           - Mantle
           - Optimism
-          - Plume
           - Polygon
           - Solana
           - Sui
@@ -109,10 +103,8 @@ jobs:
       ARBITRUM_STAGENET_RPC:    ${{ secrets.ARBITRUM_STAGENET_RPC }}
       AVALANCHE_STAGENET_RPC:   ${{ secrets.AVALANCHE_STAGENET_RPC }}
       BASE_STAGENET_RPC:        ${{ secrets.BASE_STAGENET_RPC }}
-      BERACHAIN_STAGENET_RPC:   ${{ secrets.BERACHAIN_STAGENET_RPC }}
       CELO_STAGENET_RPC:        ${{ secrets.CELO_STAGENET_RPC }}
       ETHEREUM_STAGENET_RPC:    ${{ secrets.ETHEREUM_STAGENET_RPC }}
-      FLOW_STAGENET_RPC:        ${{ secrets.FLOW_STAGENET_RPC }}
       HEDERA_STAGENET_RPC:      ${{ secrets.HEDERA_STAGENET_RPC }}
       HYPERLIQUID_STAGENET_RPC: ${{ secrets.HYPERLIQUID_STAGENET_RPC }}
       KAVA_STAGENET_RPC:        ${{ secrets.KAVA_STAGENET_RPC }}
@@ -120,7 +112,6 @@ jobs:
       MANTLE_STAGENET_RPC:      ${{ secrets.MANTLE_STAGENET_RPC }}
       MONAD_STAGENET_RPC:       ${{ secrets.MONAD_STAGENET_RPC }}
       OPTIMISM_STAGENET_RPC:    ${{ secrets.OPTIMISM_STAGENET_RPC }}
-      PLUME_STAGENET_RPC:       ${{ secrets.PLUME_STAGENET_RPC }}
       POLYGON_STAGENET_RPC:     ${{ secrets.POLYGON_STAGENET_RPC }}
       SOLANA_STAGENET_RPC:      ${{ secrets.SOLANA_STAGENET_RPC }}
       SUI_STAGENET_RPC:         ${{ secrets.SUI_STAGENET_RPC }}

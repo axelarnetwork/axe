@@ -25,31 +25,10 @@
         }
       }
     },
-    "berachain": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0x212b552Ca4d22295BFe5B0fddB5a39649445fB05"
-        }
-      }
-    },
-    "flow": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0xE3cB3749334718ceaFFFe415C92364D4ddE2E6F1"
-        }
-      }
-    },
     "optimism-sepolia": {
       "contracts": {
         "SenderReceiver": {
           "address": "0xA2CC74F8EEFA5B79C9e68E05D6D7dc8AE427C914"
-        }
-      }
-    },
-    "plume-2": {
-      "contracts": {
-        "SenderReceiver": {
-          "address": "0x7f16ebAC3E721a83b8d032F5C00159CE8a9FFBbd"
         }
       }
     },
