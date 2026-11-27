@@ -139,6 +139,10 @@ pub enum Commands {
     CheckBalances {
         /// Axelar network (defaults to --network / AXE_NETWORK, else testnet)
         network: Option<Network>,
+        /// Check only these chains-config keys (comma-separated). A chain
+        /// with no threshold has nothing to check and passes.
+        #[arg(long, value_delimiter = ',')]
+        chains: Vec<String>,
     },
 
     /// Show network info (e.g. block height + timestamp)

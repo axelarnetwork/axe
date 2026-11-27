@@ -369,9 +369,9 @@ fn axe_targets(network: Network) -> Vec<ChainTarget> {
 }
 
 /// Probe every wallet without printing anything.
-async fn probe_all(network: Network, config: &ChainsConfig) -> Vec<BalanceRow> {
-    let native = chain_targets(network);
-    let axe = axe_targets(network);
+async fn probe_all(network: Network, config: &ChainsConfig, only: &[String]) -> Vec<BalanceRow> {
+    let native = selected(chain_targets(network), only);
+    let axe = selected(axe_targets(network), only);
     let mut rows = Vec::with_capacity(native.len() + axe.len());
     for target in &native {
         rows.push(probe_row(config, target, network, Asset::Native).await);
@@ -382,6 +382,19 @@ async fn probe_all(network: Network, config: &ChainsConfig) -> Vec<BalanceRow> {
     rows
 }
 
+/// `targets` restricted to the chain keys in `only`, or all of them when
+/// `only` is empty. A load-test route checks just its source chain, so one
+/// underfunded wallet does not stop routes that never spend from it.
+fn selected(targets: Vec<ChainTarget>, only: &[String]) -> Vec<ChainTarget> {
+    if only.is_empty() {
+        return targets;
+    }
+    targets
+        .into_iter()
+        .filter(|target| only.contains(&target.chain_key))
+        .collect()
+}
+
 /// The wallet balance check as data.
 ///
 /// Unlike the CLI, this reports shortfalls rather than failing: an agent needs
@@ -390,7 +403,7 @@ async fn probe_all(network: Network, config: &ChainsConfig) -> Vec<BalanceRow> {
 pub(crate) async fn resolve(network: Network) -> Result<BalanceReport> {
     let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path).await?;
-    let rows = probe_all(network, &config).await;
+    let rows = probe_all(network, &config, &[]).await;
 
     let underfunded = rows.iter().filter(|r| r.is_fatal()).count();
 
@@ -455,14 +468,21 @@ impl WalletRow {
     }
 }
 
-pub async fn run(network: Network) -> Result<()> {
+pub async fn run(network: Network, only: &[String]) -> Result<()> {
     let config_path = config_source::resolve(network, None).await?.into_path();
     let config = ChainsConfig::load(&config_path).await?;
 
     ui::section(&format!("wallet balance check: {network}"));
     ui::kv("config", &config_path.display().to_string());
 
-    let rows = probe_all(network, &config).await;
+    let rows = probe_all(network, &config, only).await;
+    if rows.is_empty() {
+        ui::success(&format!(
+            "no balance thresholds for {} on {network}; nothing to check",
+            only.join(", ")
+        ));
+        return Ok(());
+    }
 
     render_table(&rows);
 
@@ -939,6 +959,30 @@ fn shorten_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_route_checks_only_its_source_chain() {
+        let keys = |targets: Vec<ChainTarget>| -> Vec<String> {
+            targets.into_iter().map(|t| t.chain_key).collect()
+        };
+        let all = keys(chain_targets(Network::Testnet));
+
+        assert_eq!(keys(selected(chain_targets(Network::Testnet), &[])), all);
+        assert_eq!(
+            keys(selected(
+                chain_targets(Network::Testnet),
+                &["solana".into()]
+            )),
+            ["solana"]
+        );
+        // The source wallet's AXE row comes along with its native row.
+        assert_eq!(
+            keys(selected(axe_targets(Network::Testnet), &["monad-3".into()])),
+            ["monad-3"]
+        );
+        // A chain without a threshold has nothing to check.
+        assert!(selected(chain_targets(Network::Testnet), &["base-sepolia".into()]).is_empty());
+    }
 
     #[test]
     fn mainnet_uses_stellar_top_level_key() {
