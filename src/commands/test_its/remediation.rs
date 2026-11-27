@@ -32,7 +32,7 @@ pub async fn print_untrusted_chain_remediation<P: Provider>(
         .ok();
 
     let dest_provider = ProviderBuilder::new().connect_http(dest_rpc.parse()?);
-    let flow_owner = Ownable::new(dest_its_addr, &dest_provider)
+    let dest_owner = Ownable::new(dest_its_addr, &dest_provider)
         .owner()
         .call()
         .await
@@ -55,7 +55,7 @@ pub async fn print_untrusted_chain_remediation<P: Provider>(
     lines.push(format!(
         "2. On {dest_chain} — set \"{axelar_id}\" as trusted:"
     ));
-    if let Some(owner) = flow_owner {
+    if let Some(owner) = dest_owner {
         lines.push(format!("   owner: {owner}"));
     }
     lines.push(format!("   cast send {dest_its_addr} \\"));

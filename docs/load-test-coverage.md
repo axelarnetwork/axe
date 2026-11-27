@@ -62,7 +62,7 @@ Whether a pair works also depends on whether both chains are deployed on the cho
 |---|---|---|---|---|---|---|---|
 | **testnet** | many | `solana` | `stellar-2026-q1-2` | `sui` | `xrpl` | `xrpl-evm` | most coverage |
 | **stagenet** | many | `solana-stagenet-3` | none | `sui` | `xrpl` | `xrpl-evm` | no Stellar |
-| **devnet-amplifier** | `avalanche-fuji`, `eth-sepolia`, `optimism-sepolia`, `arc-2`, `berachain`, `flow`, `plume-2` | `solana-18` | none | `sui-2` | none | `xrpl-evm-devnet` ⚠️ | no Stellar; xrpl-evm-devnet AxelarGateway/ITS not deployed at configured addresses (`eth_getCode` returns `0x`) — GMP/ITS to it falls through pre-flight bytecode check |
+| **devnet-amplifier** | `avalanche-fuji`, `eth-sepolia`, `optimism-sepolia`, `arc-2`, `core-avalanche`, `core-ethereum`, `core-optimism` | `solana-18` | none | `sui-2` | none | `xrpl-evm-devnet` ⚠️ | no Stellar; xrpl-evm-devnet AxelarGateway/ITS not deployed at configured addresses (`eth_getCode` returns `0x`) — GMP/ITS to it falls through pre-flight bytecode check |
 | **mainnet** | many | `solana` | `stellar` | `sui` | `xrpl` | `xrpl-evm` | full coverage; `--network mainnet` resolves the Solana program IDs to mainnet (`gtwqvLL…`, `gaszjG…`, `memtaCu…`, `itsAUdH…`) |
 
 ## Resolving how a `--protocol`/`--source-chain`/`--destination-chain` triple is dispatched

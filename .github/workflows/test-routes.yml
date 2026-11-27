@@ -314,10 +314,13 @@ jobs:
           ./target/release/axe check-balances "${{ inputs.network }}"
 
   test-route:
-    # Wait for BOTH the matrix builder and the wallet preflight. If any
-    # wallet is underfunded the matrix never runs (and we don't waste
-    # ~10 min of CI on routes that would all fail mid-tx).
+    # Runs after the wallet preflight even when it fails: each route checks
+    # its own source wallet first (run-loadtest), so one underfunded chain
+    # fails only the routes that spend from it. A preflight that let one dry
+    # testnet MON wallet skip the whole fleet left testnet untested on most
+    # days of November 2026. The failed preflight still turns the run red.
     needs: [setup, preflight]
+    if: ${{ !cancelled() && needs.setup.result == 'success' }}
     runs-on: ubuntu-latest
     # A route may raise both budgets via `timeout_minutes` / `inactivity_secs`
     # in its matrix entry (e.g. a source chain with slow finality).
@@ -473,6 +476,10 @@ jobs:
           {
             echo ""
             echo "**$PASSED / $TOTAL passed**"
+            if [ "${{ needs.preflight.result }}" != "success" ]; then
+              echo ""
+              echo "Wallet preflight failed: some wallet is underfunded or unreadable (see the preflight job). Routes spending from it fail their own source check."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           # Echo to stdout too so it's visible in the job log, not just the
           # workflow run summary tab.

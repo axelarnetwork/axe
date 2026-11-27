@@ -40,7 +40,7 @@ Shows recent transactions for Axelar Solana programs (Gateway, ITS, GasService, 
 
 ```bash
 axe decode evm-activity --contract gateway --network devnet-amplifier --chain avalanche-fuji --limit 5
-axe decode evm-activity --contract its --network testnet --chain flow --json
+axe decode evm-activity --contract its --network testnet --chain hyperliquid --json
 ```
 
 Shows recent events from Axelar EVM contracts (Gateway, ITS, GasService) using `eth_getLogs`. Auto-discovers contract addresses from config files. Decodes event names and parameters using the embedded ABI database.

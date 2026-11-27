@@ -19,7 +19,7 @@ async fn repeated_completed_relay_is_read_only_and_needs_no_signer() {
         {"key":"message_id","value":"governance-message-645"},
         {"key":"source_chain","value":"axelar"},
         {"key":"source_address","value":"axelar1gov"},
-        {"key":"destination_chain","value":"flow"},
+        {"key":"destination_chain","value":"monad"},
         {"key":"destination_address","value":Address::from([2; 20]).to_string()}
     ]});
     // Identical calls can occur in the same block for different chains or senders.
@@ -93,7 +93,7 @@ fn args() -> ProposeArgs {
     ProposeArgs {
         mnemonic_env: "MNEMONIC".into(),
         network: Network::Testnet,
-        chain: Some("flow".into()),
+        chain: Some("monad".into()),
         chains: vec![],
         skip: vec![],
         op: None,
@@ -121,7 +121,7 @@ fn proposal(ptype: ProposalType, eta: u64) -> Value {
     );
     json!({"id":"645", "status":"PROPOSAL_STATUS_PASSED", "voting_end_time":"2026-09-29T16:03:24Z", "messages":[{
         "@type":"/cosmwasm.wasm.v1.MsgExecuteContract", "sender":cfg.gov_module, "contract":cfg.axelarnet_gateway,
-        "msg":{"call_contract":{"destination_chain":"flow", "destination_address":cfg.asg_address, "payload":alloy::hex::encode(payload)}}, "funds":[]
+        "msg":{"call_contract":{"destination_chain":"monad", "destination_address":cfg.asg_address, "payload":alloy::hex::encode(payload)}}, "funds":[]
     }]})
 }
 
@@ -338,39 +338,4 @@ fn multi_call_plan_matches_messages_in_any_order_but_none_left_over() {
             .matching_plan(&twice)
             .is_none()
     );
-}
-
-#[tokio::test]
-#[ignore = "read-only live testnet recovery of proposal 645; never signs or broadcasts"]
-async fn recover_flow_645_and_locate_historical_message() {
-    let source = crate::config_source::resolve(Network::Testnet, None)
-        .await
-        .unwrap();
-    let config = crate::config::ChainsConfig::load(source.path())
-        .await
-        .unwrap();
-    let cfg = helpers::resolve(Network::Testnet, &config, "flow").unwrap();
-    let record = load(&cfg.lcd, 645).await.unwrap();
-    assert_eq!(record.status, "PROPOSAL_STATUS_PASSED");
-    let call = alloy::dyn_abi::DynSolValue::Tuple(vec![
-        alloy::dyn_abi::DynSolValue::String("robinhood".into()),
-        alloy::dyn_abi::DynSolValue::String("hub".into()),
-    ]);
-    let mut calldata =
-        alloy::primitives::keccak256("setTrustedAddress(string,string)")[..4].to_vec();
-    calldata.extend(call.abi_encode_params());
-    let target = cfg.its_address.as_ref().unwrap().parse().unwrap();
-    let mut args = args();
-    args.proposal_id = Some(645);
-    let plan = plan(cfg.clone(), ProposalType::Operator, target, calldata.into());
-    let (record, payloads) = find(&plan, &args).await.unwrap().unwrap();
-    let msg = crate::commands::propose::relay_message::find_governance_message(
-        &cfg,
-        alloy::primitives::keccak256(&payloads[0]),
-        record.execution_time().unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(msg.source_address, cfg.gov_module);
-    println!("Recovered proposal 645 message: {}", msg.message_id);
 }

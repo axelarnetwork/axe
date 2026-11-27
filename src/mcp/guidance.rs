@@ -194,7 +194,7 @@ mod tests {
             &path,
             r#"{"chains":{
                 "solana":{"chainType":"svm","axelarId":"solana","rpc":"http://solana.invalid"},
-                "flow":{"chainType":"evm","axelarId":"flow","rpc":"http://flow.invalid"}
+                "monad":{"chainType":"evm","axelarId":"monad","rpc":"http://monad.invalid"}
             },"axelar":{}}"#,
         )
         .unwrap();
@@ -203,9 +203,14 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_chain_is_unsupported_with_the_resolvers_reason() {
-        let support =
-            check_route_in_config(&fixture_config(), Protocol::Gmp, None, "nope-chain", "flow")
-                .await;
+        let support = check_route_in_config(
+            &fixture_config(),
+            Protocol::Gmp,
+            None,
+            "nope-chain",
+            "monad",
+        )
+        .await;
         assert!(!support.supported);
         assert_eq!(support.route, None);
         assert!(
@@ -221,11 +226,11 @@ mod tests {
     #[tokio::test]
     async fn route_is_inferred_from_the_chain_types_when_omitted() {
         let support =
-            check_route_in_config(&fixture_config(), Protocol::Gmp, None, "solana", "flow").await;
+            check_route_in_config(&fixture_config(), Protocol::Gmp, None, "solana", "monad").await;
         assert_eq!(support.route, Some(TestType::SolToEvm));
         assert_eq!(
             support.supported,
-            is_supported(Protocol::Gmp, TestType::SolToEvm, "solana", "flow").is_ok()
+            is_supported(Protocol::Gmp, TestType::SolToEvm, "solana", "monad").is_ok()
         );
     }
 
@@ -238,8 +243,8 @@ mod tests {
             (Protocol::Gmp, TestType::SolToEvm),
             (Protocol::Its, TestType::SolToSol),
         ] {
-            let expected = is_supported(protocol, route, "solana", "flow");
-            let support = check_route(protocol, route, "solana", "flow");
+            let expected = is_supported(protocol, route, "solana", "monad");
+            let support = check_route(protocol, route, "solana", "monad");
 
             assert_eq!(support.supported, expected.is_ok());
             assert_eq!(support.route, Some(route));
@@ -249,13 +254,13 @@ mod tests {
                 "an unsupported pair carries the resolver's reason"
             );
             assert_eq!(support.source_chain, "solana");
-            assert_eq!(support.destination_chain, "flow");
+            assert_eq!(support.destination_chain, "monad");
         }
     }
 
     #[test]
     fn route_support_serializes_in_the_vocabulary_the_caller_used() {
-        let support = check_route(Protocol::ItsWithData, TestType::EvmToSol, "flow", "solana");
+        let support = check_route(Protocol::ItsWithData, TestType::EvmToSol, "monad", "solana");
         let json = serde_json::to_value(&support).unwrap();
         assert_eq!(json["protocol"], "its-with-data");
         assert_eq!(json["route"], "evm-to-sol");

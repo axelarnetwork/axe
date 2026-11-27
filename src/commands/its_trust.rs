@@ -289,7 +289,7 @@ mod tests {
         let registry = [
             registered("Ethereum", false),
             registered("arc", false),
-            registered("berachain", true),
+            registered("fantom", true),
             registered("Moonbeam", false),
             registered("solana", false),
             registered("xrpl", false),
@@ -305,7 +305,7 @@ mod tests {
             reasons,
             [
                 ("arc", "itself"),
-                ("berachain", "frozen on the ITS Hub"),
+                ("fantom", "frozen on the ITS Hub"),
                 ("Moonbeam", "deprecated"),
                 ("xrpl", "skipped (--skip)"),
             ]

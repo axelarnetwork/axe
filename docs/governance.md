@@ -17,7 +17,7 @@ axe propose testnet avalanche --op pause --type timelock --relay
 axe propose mainnet --op set-trusted --its-chain ethereum --chains all --confirm-mainnet
 
 # explicit destinations, or use --skip <a,b> to exclude keys from --chains all
-axe propose testnet --op set-trusted --its-chain solana --chains avalanche,flow --relay
+axe propose testnet --op set-trusted --its-chain solana --chains avalanche,hedera --relay
 
 # any other call — pass the target and abi-encoded calldata directly
 axe propose testnet avalanche \

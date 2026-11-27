@@ -113,12 +113,10 @@ runs:
           "Core Optimism":  {"devnet-amplifier": "core-optimism"},
           "Avalanche":   {"mainnet": "avalanche",  "testnet": "avalanche",        "stagenet": "avalanche", "devnet-amplifier": "avalanche-fuji"},
           "Base":        {"mainnet": "base",       "testnet": "base-sepolia",     "stagenet": "base-sepolia"},
-          "Berachain":   {"stagenet": "berachain", "devnet-amplifier": "berachain"},
           "Binance":     {"mainnet": "binance",    "testnet": "binance"},
           "Celo":        {"stagenet": "celo-sepolia"},
           "Ethereum":    {"mainnet": "ethereum",   "testnet": "ethereum-sepolia", "stagenet": "ethereum-sepolia", "devnet-amplifier": "eth-sepolia"},
           "Filecoin":    {"mainnet": "filecoin",   "testnet": "filecoin-2"},
-          "Flow":        {"stagenet": "flow",      "devnet-amplifier": "flow"},
           "Hedera":      {"mainnet": "hedera",   "testnet": "hedera",             "stagenet": "hedera"},
           "Hyperliquid": {"mainnet": "hyperliquid","testnet": "hyperliquid",      "stagenet": "hyperliquid"},
           "Immutable":   {"mainnet": "immutable",  "testnet": "immutable"},
@@ -127,7 +125,6 @@ runs:
           "Mantle":      {"mainnet": "mantle",     "testnet": "mantle-sepolia",   "stagenet": "mantle-sepolia"},
           "Monad":       {"mainnet": "monad",     "testnet": "monad-3"},
           "Optimism":    {"mainnet": "optimism",   "testnet": "optimism-sepolia", "stagenet": "optimism-sepolia", "devnet-amplifier": "optimism-sepolia"},
-          "Plume":       {"stagenet": "plume",     "devnet-amplifier": "plume-2"},
           "Polygon":     {"mainnet": "polygon",    "testnet": "polygon-sepolia",  "stagenet": "polygon-sepolia"},
           "Robinhood":   {"testnet": "robinhood"},
           "Scroll":      {"mainnet": "scroll"},
@@ -150,12 +147,10 @@ runs:
           "Core Optimism":  "evm",
           "Avalanche":   "evm",
           "Base":        "evm",
-          "Berachain":   "evm",
           "Binance":     "evm",
           "Celo":        "evm",
           "Ethereum":    "evm",
           "Filecoin":    "evm",
-          "Flow":        "evm",
           "Hedera":      "evm",
           "Hyperliquid": "evm",
           "Immutable":   "evm",
@@ -164,7 +159,6 @@ runs:
           "Mantle":      "evm",
           "Monad":       "evm",
           "Optimism":    "evm",
-          "Plume":       "evm",
           "Polygon":     "evm",
           "Robinhood":   "evm",
           "Scroll":      "evm",
@@ -382,6 +376,10 @@ runs:
           echo "::error::Chains config not found at $CONFIG_PATH" >&2
           exit 1
         fi
+
+        # Check only the wallet this route spends from, so an underfunded
+        # wallet on another chain cannot stop it.
+        CHAINS_CONFIG="$CONFIG_PATH" ./target/release/axe check-balances "$NETWORK" --chains "$SOURCE_CHAIN"
 
         ARGS=(
           --network "$NETWORK"

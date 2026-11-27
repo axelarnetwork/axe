@@ -42,11 +42,11 @@ legacy-chain support is load-bearing for mainnet.
 
 ## 2. Supported route surface (from the dispatcher)
 
-The 27 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Berachain,
-Binance, Celo, Ethereum, Filecoin, Flow, Hedera, Hyperliquid, Immutable,
-Kava, Linea, Mantle, Monad, Optimism, Plume, Polygon, Robinhood,
-Scroll, Solana, Stellar, Sui, XRPL, XRPL EVM. Berachain/Celo/Flow/Plume exist
-only on stagenet / devnet-amplifier; Arc (`arc-8`) and Robinhood (`robinhood`)
+The 27 wired chains (`CHAIN_MAP`): Arbitrum, Arc, Avalanche, Base, Binance,
+Celo, Core Avalanche, Core Ethereum, Core Optimism, Ethereum, Filecoin, Hedera,
+Hyperliquid, Immutable, Kava, Linea, Mantle, Monad, Optimism, Polygon, Robinhood,
+Scroll, Solana, Stellar, Sui, XRPL, XRPL EVM. Celo exists only on stagenet and the
+Core chains only on devnet-amplifier; Arc (`arc-8`) and Robinhood (`robinhood`)
 are testnet-only amplifier EVM chains (Arc also on devnet-amplifier as `arc-2`)
 — see [`docs/routes.md`](docs/routes.md) for the per-network roster. Purged (gone
 from the repo): Fantom, Centrifuge.

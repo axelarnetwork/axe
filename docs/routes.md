@@ -25,12 +25,13 @@ The `✓` columns mark the networks each chain is configured for.
 | Arc         | EVM     |   | ✓ |   | ✓ |
 | Avalanche   | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Base        | EVM     | ✓ | ✓ | ✓ |   |
-| Berachain   | EVM     |   |   | ✓ | ✓ |
 | Binance     | EVM     | ✓ | ✓ |   |   |
 | Celo        | EVM     |   |   | ✓ |   |
+| Core Avalanche | EVM  |   |   |   | ✓ |
+| Core Ethereum | EVM   |   |   |   | ✓ |
+| Core Optimism | EVM   |   |   |   | ✓ |
 | Ethereum    | EVM     | ✓ | ✓ | ✓ | ✓ |
 | Filecoin    | EVM     | ✓ | ✓ |   |   |
-| Flow        | EVM     |   |   | ✓ | ✓ |
 | Hedera      | EVM     | ✓ | ✓ | ✓ |   |
 | Hyperliquid | EVM     | ✓ | ✓ | ✓ |   |
 | Immutable   | EVM     | ✓ | ✓ |   |   |
@@ -39,7 +40,6 @@ The `✓` columns mark the networks each chain is configured for.
 | Mantle      | EVM     | ✓ | ✓ | ✓ |   |
 | Monad       | EVM     | ✓ | ✓ |   |   |
 | Optimism    | EVM     | ✓ | ✓ | ✓ | ✓ |
-| Plume       | EVM     |   |   | ✓ | ✓ |
 | Polygon     | EVM     | ✓ | ✓ | ✓ |   |
 | Robinhood   | EVM     |   | ✓ |   |   |
 | Scroll      | EVM     | ✓ |   |   |   |

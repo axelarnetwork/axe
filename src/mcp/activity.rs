@@ -175,7 +175,7 @@ mod tests {
         let result = Ok(CallToolResponse::Complete(CallToolResult::success(vec![
             ContentBlock::text("fine"),
         ])));
-        let arguments = args(&json!({"chain": "flow"}));
+        let arguments = args(&json!({"chain": "monad"}));
         assert_eq!(
             tool_call_line(
                 "verifiers",
@@ -183,7 +183,7 @@ mod tests {
                 &result,
                 Duration::from_millis(1234)
             ),
-            r#"tool verifiers 1234ms ok {"chain":"flow"}"#
+            r#"tool verifiers 1234ms ok {"chain":"monad"}"#
         );
     }
 

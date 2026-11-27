@@ -5,7 +5,7 @@ use alloy::primitives::{Address, Bytes};
 pub(super) fn config(lcd: String) -> ResolvedConfig {
     ResolvedConfig {
         mnemonic_env: "MNEMONIC".into(),
-        edge_axelar_id: "flow".into(),
+        edge_axelar_id: "monad".into(),
         asg_address: Address::from([2; 20]).to_string(),
         gateway_address: Address::from([3; 20]).to_string(),
         its_address: Some(Address::from([4; 20]).to_string()),

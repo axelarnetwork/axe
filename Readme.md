@@ -24,7 +24,7 @@ checkout or setup required.
 axe test gmp --network testnet --source-chain solana --destination-chain solana
 
 # Cross-chain load test: 50 transactions, verified end-to-end
-axe test load-test --network testnet --source-chain solana --destination-chain flow --num-txs 50
+axe test load-test --network testnet --source-chain solana --destination-chain hyperliquid --num-txs 50
 
 # Decode any Axelar-related transaction or calldata
 axe decode tx 0xabc123...

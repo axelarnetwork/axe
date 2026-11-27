@@ -169,8 +169,8 @@ If you find yourself reaching for `<'a>` on a bundle struct, ask: is the alloc a
 
 After the offline gates pass and live testnet transactions are explicitly approved, run these routes serially with exactly one load transaction each:
 
-- GMP: Flow → Solana, Solana → Flow, and Solana → Sui.
-- ITS: Flow → Solana, Solana → Flow, Stellar → Flow, and XRPL → XRPL EVM.
+- GMP: Hyperliquid → Solana, Solana → Hyperliquid, and Solana → Sui.
+- ITS: Hyperliquid → Solana, Solana → Hyperliquid, Stellar → Hyperliquid, and XRPL → XRPL EVM.
 
 These seven rails cover EVM, Solana, Sui, Stellar, and XRPL source/destination adapters with the smallest stable fleet currently available. Reuse cached deployments where possible. Do not substitute XRPL EVM → XRPL unless its EVM wallet has both the canonical XRP token and sufficient native gas, and do not use Sui-source ITS until the test wallet owns a registered `Coin<T>`.
 

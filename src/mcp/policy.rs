@@ -399,13 +399,13 @@ mod tests {
 
     #[test]
     fn chain_allowlist_is_case_insensitive_and_names_the_allowed_set() {
-        let policy = policy(5, None, &["solana", "flow"]);
+        let policy = policy(5, None, &["solana", "monad"]);
         assert_eq!(policy.check_chain("Solana"), Ok(()));
         assert_eq!(
             policy.check_chain("ethereum"),
             Err(PolicyViolation::ChainNotAllowed {
                 chain: "ethereum".into(),
-                allowed: vec!["solana".into(), "flow".into()],
+                allowed: vec!["solana".into(), "monad".into()],
             })
         );
     }
@@ -416,12 +416,12 @@ mod tests {
             SpendPolicy::default().describe(),
             "Operator caps: at most 10 transactions per load test."
         );
-        let policy = policy(2, Some(20), &["solana", "flow"]);
+        let policy = policy(2, Some(20), &["solana", "monad"]);
         assert_eq!(policy.reserve(2), Ok(()));
         assert_eq!(
             policy.describe(),
             "Operator caps: at most 2 transactions per load test; 18 of 20 transactions \
-             remaining over the server's lifetime; only these chains: solana, flow."
+             remaining over the server's lifetime; only these chains: solana, monad."
         );
     }
 }

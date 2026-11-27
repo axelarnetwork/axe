@@ -485,9 +485,9 @@ async fn run_cli() -> Result<()> {
             chain,
             action,
         } => commands::its_asg::run(network, &chain, &action).await,
-        cli::Commands::CheckBalances { network } => {
+        cli::Commands::CheckBalances { network, chains } => {
             let network = cli::network_or_default(network, cli.network)?;
-            commands::check_balances::run(network).await
+            commands::check_balances::run(network, &chains).await
         }
         cli::Commands::VerifierVotes {
             network,
