@@ -377,6 +377,10 @@ runs:
           exit 1
         fi
 
+        # Check only the wallet this route spends from, so an underfunded
+        # wallet on another chain cannot stop it.
+        CHAINS_CONFIG="$CONFIG_PATH" ./target/release/axe check-balances "$NETWORK" --chains "$SOURCE_CHAIN"
+
         ARGS=(
           --network "$NETWORK"
           test load-test
